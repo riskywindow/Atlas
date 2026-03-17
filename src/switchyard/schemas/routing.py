@@ -152,6 +152,16 @@ class ShadowDisposition(StrEnum):
     SHADOWED = "shadowed"
 
 
+class PolicyRolloutMode(StrEnum):
+    """Safe rollout posture for intelligent routing policies."""
+
+    DISABLED = "disabled"
+    SHADOW_ONLY = "shadow_only"
+    REPORT_ONLY = "report_only"
+    CANARY = "canary"
+    ACTIVE_GUARDED = "active_guarded"
+
+
 class RouteSelectionReasonCode(StrEnum):
     """Stable reason codes for route selection and analysis."""
 

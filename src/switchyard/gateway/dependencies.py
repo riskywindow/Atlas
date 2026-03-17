@@ -16,6 +16,7 @@ from switchyard.control.affinity import SessionAffinityService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
 from switchyard.control.locality import PrefixLocalityService
+from switchyard.control.policy_rollout import PolicyRolloutService
 from switchyard.control.shadow import ShadowTrafficService
 from switchyard.gateway.trace_capture import TraceCaptureService
 from switchyard.logging import get_logger
@@ -38,6 +39,7 @@ class GatewayServices:
     prefix_locality: PrefixLocalityService
     canary: CanaryRoutingService
     shadow: ShadowTrafficService
+    policy_rollout: PolicyRolloutService
     telemetry: Telemetry
     trace_capture: TraceCaptureService
 

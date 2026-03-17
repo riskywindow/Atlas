@@ -25,6 +25,7 @@ from switchyard.control.locality import (
     PrefixLocalityService,
     UtcPrefixLocalityClock,
 )
+from switchyard.control.policy_rollout import PolicyRolloutResolution, PolicyRolloutService
 from switchyard.control.shadow import ShadowLaunchPlan, ShadowTrafficService
 
 __all__ = [
@@ -44,6 +45,8 @@ __all__ = [
     "MonotonicCircuitBreakerClock",
     "PrefixLocalityClock",
     "PrefixLocalityService",
+    "PolicyRolloutResolution",
+    "PolicyRolloutService",
     "UtcPrefixLocalityClock",
     "ShadowLaunchPlan",
     "ShadowTrafficService",

@@ -7,6 +7,7 @@ from switchyard.control.affinity import SessionAffinityService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
 from switchyard.control.locality import PrefixLocalityService
+from switchyard.control.policy_rollout import PolicyRolloutService
 from switchyard.router.features import extract_request_feature_vector
 from switchyard.router.policies import (
     PolicyRegistry,
@@ -45,6 +46,7 @@ class RouterService:
         prefix_locality: PrefixLocalityService | None = None,
         canary_routing: CanaryRoutingService | None = None,
         policy_registry: PolicyRegistry | None = None,
+        policy_rollout: PolicyRolloutService | None = None,
     ) -> None:
         self._registry = registry
         self._circuit_breaker = circuit_breaker
@@ -52,6 +54,7 @@ class RouterService:
         self._prefix_locality = prefix_locality
         self._canary_routing = canary_routing
         self._policy_registry = policy_registry or PolicyRegistry()
+        self._policy_rollout = policy_rollout
 
     async def route(
         self,
@@ -144,7 +147,21 @@ class RouterService:
             )
             raise NoRouteAvailableError(msg)
 
-        primary_policy = self._policy_registry.resolve(context.policy)
+        rollout_resolution = (
+            None
+            if self._policy_rollout is None
+            else self._policy_rollout.resolve(
+                registry=self._policy_registry,
+                requested_policy=context.policy,
+                request=request,
+                context=context,
+            )
+        )
+        primary_policy = (
+            self._policy_registry.resolve(context.policy)
+            if rollout_resolution is None
+            else rollout_resolution.primary_policy
+        )
         primary_evaluation = primary_policy.evaluate(
             request=request,
             context=context,
@@ -180,13 +197,29 @@ class RouterService:
                 "prefix locality preferred backend differs from the current "
                 "session affinity binding"
             )
+        shadow_policies = (
+            self._policy_registry.shadow_policies
+            if rollout_resolution is None
+            else rollout_resolution.shadow_policies
+        )
         shadow_evaluations = [
             shadow_policy.evaluate(
                 request=request,
                 context=context,
                 candidates=eligible_snapshots,
-            ).to_shadow_explanation(serving_target=request.model)
-            for shadow_policy in self._policy_registry.shadow_policies
+            )
+            for shadow_policy in shadow_policies
+        ]
+        if self._policy_rollout is not None and rollout_resolution is not None:
+            self._policy_rollout.observe_decision(
+                context=context,
+                resolution=rollout_resolution,
+                primary_evaluation=primary_evaluation,
+                shadow_evaluations=shadow_evaluations,
+            )
+        shadow_explanations = [
+            evaluation.to_shadow_explanation(serving_target=request.model)
+            for evaluation in shadow_evaluations
         ]
         chosen = primary_evaluation.selected_assessment()
         chosen_rationale = list(primary_evaluation.selected_reason)
@@ -358,6 +391,6 @@ class RouterService:
                 selection_reason_codes=selected_reason_codes,
                 selected_reason=chosen_rationale,
                 tie_breaker=primary_evaluation.tie_breaker,
-                shadow_evaluations=shadow_evaluations,
+                shadow_evaluations=shadow_explanations,
             ),
         )

@@ -13,6 +13,8 @@ from switchyard.schemas.routing import (
     CircuitBreakerState,
     HistoryDepthBucket,
     InputLengthBucket,
+    PolicyReference,
+    PolicyRolloutMode,
     PrefixHotness,
     ShadowPolicy,
     WorkloadTag,
@@ -106,6 +108,76 @@ class ShadowRoutingRuntimeSummary(BaseModel):
     policies: list[ShadowPolicy] = Field(default_factory=list)
 
 
+class PolicyDecisionRuntimeEntry(BaseModel):
+    """Bounded recent policy-decision record for runtime inspection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=128)
+    recorded_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    requested_policy: str = Field(min_length=1, max_length=64)
+    rollout_mode: PolicyRolloutMode
+    selected_policy: PolicyReference
+    selected_backend: str = Field(min_length=1, max_length=128)
+    shadow_policy: PolicyReference | None = None
+    abstained: bool = False
+    exploration_used: bool = False
+    canary_selected: bool = False
+    guardrail_triggers: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class PolicyRolloutRuntimeSummary(BaseModel):
+    """Current intelligent-policy rollout state and recent bounded diagnostics."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: PolicyRolloutMode = PolicyRolloutMode.DISABLED
+    candidate_policy: PolicyReference | None = None
+    active_policy: PolicyReference | None = None
+    shadow_policy: PolicyReference | None = None
+    compatibility_policy: str | None = Field(default=None, min_length=1, max_length=64)
+    canary_percentage: float = Field(default=0.0, ge=0.0, le=100.0)
+    kill_switch_enabled: bool = False
+    learning_frozen: bool = False
+    exploration_enabled: bool = False
+    recent_decisions: list[PolicyDecisionRuntimeEntry] = Field(default_factory=list)
+    recent_abstentions: int = Field(default=0, ge=0)
+    recent_guardrail_triggers: list[str] = Field(default_factory=list)
+    last_policy_update_at: datetime | None = None
+    last_learning_event_at: datetime | None = None
+    last_learning_event: str | None = Field(default=None, min_length=1, max_length=256)
+    last_guardrail_trigger: str | None = Field(default=None, min_length=1, max_length=256)
+    notes: list[str] = Field(default_factory=list)
+
+
+class PolicyRolloutUpdateRequest(BaseModel):
+    """Runtime mutation request for local policy-rollout controls."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: PolicyRolloutMode | None = None
+    canary_percentage: float | None = Field(default=None, ge=0.0, le=100.0)
+    kill_switch_enabled: bool | None = None
+    learning_frozen: bool | None = None
+
+
+class PolicyRolloutStateSnapshot(BaseModel):
+    """Serializable policy-rollout state for local export/import workflows."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: PolicyRolloutMode = PolicyRolloutMode.DISABLED
+    canary_percentage: float = Field(default=0.0, ge=0.0, le=100.0)
+    kill_switch_enabled: bool = False
+    learning_frozen: bool = False
+    last_policy_update_at: datetime | None = None
+    last_learning_event_at: datetime | None = None
+    last_learning_event: str | None = Field(default=None, min_length=1, max_length=256)
+    recent_decisions: list[PolicyDecisionRuntimeEntry] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
 class SessionAffinityRuntimeSummary(BaseModel):
     """Current session-affinity cache summary."""
 
@@ -174,6 +246,7 @@ class RuntimeInspectionResponse(BaseModel):
     circuit_breakers: CircuitBreakerRuntimeSummary
     canary_routing: CanaryRoutingRuntimeSummary
     shadow_routing: ShadowRoutingRuntimeSummary
+    policy_rollout: PolicyRolloutRuntimeSummary
     session_affinity: SessionAffinityRuntimeSummary
     routing_features: RoutingFeatureRuntimeSummary
     prefix_locality: PrefixLocalityRuntimeSummary

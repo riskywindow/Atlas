@@ -7,11 +7,17 @@ import pytest
 
 from switchyard.adapters.mock import MockBackendAdapter
 from switchyard.adapters.registry import AdapterRegistry
-from switchyard.config import CanaryRoutingSettings, CircuitBreakerSettings, SessionAffinitySettings
+from switchyard.config import (
+    CanaryRoutingSettings,
+    CircuitBreakerSettings,
+    PolicyRolloutSettings,
+    SessionAffinitySettings,
+)
 from switchyard.control.affinity import SessionAffinityService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
 from switchyard.control.locality import PrefixLocalityService
+from switchyard.control.policy_rollout import PolicyRolloutService
 from switchyard.router.policies import (
     AdaptivePolicyConfig,
     CandidateAssessment,
@@ -40,6 +46,7 @@ from switchyard.schemas.routing import (
     CanaryPolicy,
     CircuitBreakerPhase,
     PolicyReference,
+    PolicyRolloutMode,
     RequestClass,
     RequestContext,
     RequestFeatureVector,
@@ -1612,3 +1619,81 @@ async def test_adaptive_policy_scopes_estimates_by_tenant_when_enabled() -> None
 
     assert decision.backend_name == "alpha"
     assert {estimate_context.tenant_id for estimate_context in captured_contexts} == {"tenant-gold"}
+
+
+@pytest.mark.asyncio
+async def test_policy_rollout_shadow_only_coexists_with_existing_shadow_path() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(name="alpha", latency_ms=20.0, quality_tier=2, device_class=DeviceClass.CPU)
+    )
+    registry.register(
+        build_adapter(name="beta", latency_ms=10.0, quality_tier=2, device_class=DeviceClass.CPU)
+    )
+    rollout_candidate = ScoreOverridePolicy(
+        policy_id="adaptive-shadow-v1",
+        compatibility_policy=RoutingPolicy.BALANCED,
+        score_by_backend={"alpha": 100.0, "beta": 5.0},
+    )
+    existing_shadow = ScoreOverridePolicy(
+        policy_id="existing-shadow",
+        score_by_backend={"alpha": 1.0, "beta": 10.0},
+        reason_code=RouteSelectionReasonCode.SHADOW_POLICY_SCORE,
+    )
+    rollout = PolicyRolloutService(
+        PolicyRolloutSettings(
+            mode=PolicyRolloutMode.SHADOW_ONLY,
+            candidate_policy_id="adaptive-shadow-v1",
+        ),
+        candidate_policies=[rollout_candidate],
+    )
+    router = RouterService(
+        registry,
+        policy_registry=PolicyRegistry(shadow_policies=[existing_shadow]),
+        policy_rollout=rollout,
+    )
+
+    decision = await router.route(build_request(), build_context(RoutingPolicy.BALANCED))
+
+    assert decision.backend_name == "beta"
+    assert decision.explanation is not None
+    assert [
+        shadow.policy_reference.policy_id
+        for shadow in decision.explanation.shadow_evaluations
+    ] == ["existing-shadow", "adaptive-shadow-v1"]
+
+
+@pytest.mark.asyncio
+async def test_policy_rollout_canary_mode_can_select_candidate_policy() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(name="alpha", latency_ms=20.0, quality_tier=2, device_class=DeviceClass.CPU)
+    )
+    registry.register(
+        build_adapter(name="beta", latency_ms=10.0, quality_tier=2, device_class=DeviceClass.CPU)
+    )
+    rollout_candidate = ScoreOverridePolicy(
+        policy_id="adaptive-canary-v1",
+        compatibility_policy=RoutingPolicy.BALANCED,
+        score_by_backend={"alpha": 100.0, "beta": 5.0},
+    )
+    rollout = PolicyRolloutService(
+        PolicyRolloutSettings(
+            mode=PolicyRolloutMode.CANARY,
+            candidate_policy_id="adaptive-canary-v1",
+            canary_percentage=100.0,
+        ),
+        candidate_policies=[rollout_candidate],
+    )
+    router = RouterService(
+        registry,
+        policy_rollout=rollout,
+    )
+
+    decision = await router.route(build_request(), build_context(RoutingPolicy.BALANCED))
+
+    assert decision.backend_name == "alpha"
+    assert decision.policy_reference == PolicyReference(
+        policy_id="adaptive-canary-v1",
+        policy_version="phase6.test",
+    )

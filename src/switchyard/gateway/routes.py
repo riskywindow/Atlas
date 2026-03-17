@@ -22,6 +22,9 @@ from switchyard.logging import bind_request_context, get_logger
 from switchyard.router.features import routing_feature_runtime_summary
 from switchyard.schemas.admin import (
     DeploymentDiagnosticsResponse,
+    PolicyRolloutRuntimeSummary,
+    PolicyRolloutStateSnapshot,
+    PolicyRolloutUpdateRequest,
     RuntimeInspectionResponse,
 )
 from switchyard.schemas.backend import BackendHealthState
@@ -110,10 +113,58 @@ async def admin_runtime(
         circuit_breakers=services.circuit_breaker.inspect_state(),
         canary_routing=services.canary.inspect_state(),
         shadow_routing=services.shadow.inspect_state(),
+        policy_rollout=services.policy_rollout.inspect_state(),
         session_affinity=services.session_affinity.inspect_state(),
         routing_features=routing_feature_runtime_summary(),
         prefix_locality=services.prefix_locality.inspect_state(),
     )
+
+
+@router.get("/admin/policy-rollout", response_model=PolicyRolloutRuntimeSummary)
+async def admin_policy_rollout(
+    services: GatewayServices = Depends(get_services),
+) -> PolicyRolloutRuntimeSummary:
+    """Return current intelligent-policy rollout controls and recent decisions."""
+
+    return services.policy_rollout.inspect_state()
+
+
+@router.post("/admin/policy-rollout", response_model=PolicyRolloutRuntimeSummary)
+async def update_admin_policy_rollout(
+    update: PolicyRolloutUpdateRequest,
+    services: GatewayServices = Depends(get_services),
+) -> PolicyRolloutRuntimeSummary:
+    """Mutate local policy-rollout controls."""
+
+    return services.policy_rollout.update(update)
+
+
+@router.post("/admin/policy-rollout/reset", response_model=PolicyRolloutRuntimeSummary)
+async def reset_admin_policy_rollout(
+    services: GatewayServices = Depends(get_services),
+) -> PolicyRolloutRuntimeSummary:
+    """Reset local rollout state to its configured defaults."""
+
+    return services.policy_rollout.reset_state()
+
+
+@router.get("/admin/policy-rollout/export", response_model=PolicyRolloutStateSnapshot)
+async def export_admin_policy_rollout(
+    services: GatewayServices = Depends(get_services),
+) -> PolicyRolloutStateSnapshot:
+    """Export local rollout state for operator backup or transfer."""
+
+    return services.policy_rollout.export_state()
+
+
+@router.post("/admin/policy-rollout/import", response_model=PolicyRolloutRuntimeSummary)
+async def import_admin_policy_rollout(
+    snapshot: PolicyRolloutStateSnapshot,
+    services: GatewayServices = Depends(get_services),
+) -> PolicyRolloutRuntimeSummary:
+    """Import a previously exported local rollout state."""
+
+    return services.policy_rollout.import_state(snapshot)
 
 
 @router.get("/admin/deployment", response_model=DeploymentDiagnosticsResponse)

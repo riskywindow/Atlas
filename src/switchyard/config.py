@@ -22,6 +22,7 @@ from switchyard.schemas.backend import (
 from switchyard.schemas.benchmark import TraceCaptureMode
 from switchyard.schemas.routing import (
     CanaryPolicy,
+    PolicyRolloutMode,
     RequestClass,
     RoutingPolicy,
     ShadowPolicy,
@@ -306,6 +307,20 @@ class ShadowRoutingSettings(BaseModel):
     policies: tuple[ShadowPolicy, ...] = ()
 
 
+class PolicyRolloutSettings(BaseModel):
+    """Local-first rollout controls for intelligent routing policies."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: PolicyRolloutMode = PolicyRolloutMode.DISABLED
+    candidate_policy_id: str | None = Field(default=None, min_length=1, max_length=128)
+    shadow_policy_id: str | None = Field(default=None, min_length=1, max_length=128)
+    canary_percentage: float = Field(default=0.0, ge=0.0, le=100.0)
+    kill_switch_enabled: bool = False
+    learning_frozen: bool = False
+    max_recent_decisions: int = Field(default=25, ge=1, le=200)
+
+
 class Phase4ControlPlaneSettings(BaseModel):
     """Phase 4 control-plane configuration."""
 
@@ -319,6 +334,7 @@ class Phase4ControlPlaneSettings(BaseModel):
     session_affinity: SessionAffinitySettings = Field(default_factory=SessionAffinitySettings)
     canary_routing: CanaryRoutingSettings = Field(default_factory=CanaryRoutingSettings)
     shadow_routing: ShadowRoutingSettings = Field(default_factory=ShadowRoutingSettings)
+    policy_rollout: PolicyRolloutSettings = Field(default_factory=PolicyRolloutSettings)
 
     @model_validator(mode="after")
     def sync_feature_toggles(self) -> Phase4ControlPlaneSettings:

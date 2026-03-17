@@ -20,6 +20,7 @@ from switchyard.control.affinity import SessionAffinityService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
 from switchyard.control.locality import PrefixLocalityService
+from switchyard.control.policy_rollout import PolicyRolloutService
 from switchyard.control.shadow import ShadowTrafficService
 from switchyard.gateway.dependencies import GatewayServices, gateway_lifespan
 from switchyard.gateway.routes import BackendExecutionExhaustedError, InvalidRequestContextError
@@ -44,6 +45,7 @@ def create_app(
     *,
     registry: AdapterRegistry | None = None,
     router_service: RouterService | None = None,
+    policy_rollout: PolicyRolloutService | None = None,
     session_affinity: SessionAffinityService | None = None,
     prefix_locality: PrefixLocalityService | None = None,
     settings: Settings | None = None,
@@ -63,12 +65,16 @@ def create_app(
     resolved_prefix_locality = prefix_locality or PrefixLocalityService()
     resolved_canary = CanaryRoutingService(resolved_settings.phase4.canary_routing)
     resolved_shadow = ShadowTrafficService(resolved_settings.phase4.shadow_routing)
+    resolved_policy_rollout = policy_rollout or PolicyRolloutService(
+        resolved_settings.phase4.policy_rollout
+    )
     resolved_router = router_service or RouterService(
         resolved_registry,
         circuit_breaker=resolved_circuit_breaker,
         session_affinity=resolved_session_affinity,
         prefix_locality=resolved_prefix_locality,
         canary_routing=resolved_canary,
+        policy_rollout=resolved_policy_rollout,
     )
     configure_logging(resolved_settings.log_level)
     resolved_telemetry = telemetry or configure_telemetry(
@@ -87,6 +93,7 @@ def create_app(
         prefix_locality=resolved_prefix_locality,
         canary=resolved_canary,
         shadow=resolved_shadow,
+        policy_rollout=resolved_policy_rollout,
         telemetry=resolved_telemetry,
         trace_capture=build_trace_capture_service(
             mode=resolved_settings.trace_capture_mode,
