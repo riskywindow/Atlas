@@ -20,6 +20,11 @@ from switchyard.control.circuit import (
     CircuitProbe,
     MonotonicCircuitBreakerClock,
 )
+from switchyard.control.locality import (
+    PrefixLocalityClock,
+    PrefixLocalityService,
+    UtcPrefixLocalityClock,
+)
 from switchyard.control.shadow import ShadowLaunchPlan, ShadowTrafficService
 
 __all__ = [
@@ -37,6 +42,9 @@ __all__ = [
     "CircuitBreakerService",
     "CircuitProbe",
     "MonotonicCircuitBreakerClock",
+    "PrefixLocalityClock",
+    "PrefixLocalityService",
+    "UtcPrefixLocalityClock",
     "ShadowLaunchPlan",
     "ShadowTrafficService",
     "MonotonicAdmissionClock",

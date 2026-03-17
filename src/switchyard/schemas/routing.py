@@ -74,6 +74,14 @@ class WorkloadTag(StrEnum):
     PRIORITY_TENANT = "priority_tenant"
 
 
+class PrefixHotness(StrEnum):
+    """Coarse recent-prefix hotness for cache/locality-aware analysis."""
+
+    COLD = "cold"
+    WARM = "warm"
+    HOT = "hot"
+
+
 class RouteEligibilityState(StrEnum):
     """Eligibility state for a concrete backend deployment during routing."""
 
@@ -431,6 +439,44 @@ class RequestFeatureVector(BaseModel):
         return self
 
 
+class PrefixLocalitySignal(BaseModel):
+    """Decision-time repeated-prefix and warm-locality evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    signal_version: str = Field(default="phase6.v1", min_length=1, max_length=32)
+    serving_target: str = Field(min_length=1, max_length=128)
+    locality_key: str = Field(min_length=8, max_length=64)
+    prefix_fingerprint: str | None = Field(default=None, min_length=8, max_length=64)
+    repeated_prefix_detected: bool = False
+    recent_request_count: int = Field(default=0, ge=0)
+    hotness: PrefixHotness = PrefixHotness.COLD
+    cache_opportunity: bool = False
+    likely_benefits_from_locality: bool = False
+    preferred_backend: str | None = Field(default=None, min_length=1, max_length=128)
+    preferred_backend_request_count: int = Field(default=0, ge=0)
+    preferred_instance_id: str | None = Field(default=None, min_length=1, max_length=128)
+    preferred_instance_request_count: int = Field(default=0, ge=0)
+    candidate_local_backend: str | None = Field(default=None, min_length=1, max_length=128)
+    candidate_local_backend_request_count: int = Field(default=0, ge=0)
+    recent_backend_counts: dict[str, int] = Field(default_factory=dict)
+    recent_instance_counts: dict[str, int] = Field(default_factory=dict)
+    session_affinity_enabled: bool = False
+    session_affinity_backend: str | None = Field(default=None, min_length=1, max_length=128)
+    affinity_conflict: bool = False
+    last_seen_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_signal(self) -> PrefixLocalitySignal:
+        if self.repeated_prefix_detected and self.prefix_fingerprint is None:
+            msg = "repeated_prefix_detected requires prefix_fingerprint"
+            raise ValueError(msg)
+        if self.affinity_conflict and self.session_affinity_backend is None:
+            msg = "affinity_conflict requires session_affinity_backend"
+            raise ValueError(msg)
+        return self
+
+
 class ShadowRouteEvidence(BaseModel):
     """Explainable shadow-routing decision captured alongside the primary route."""
 
@@ -499,6 +545,7 @@ class RouteExplanation(BaseModel):
     serving_target: str = Field(min_length=1, max_length=128)
     candidates: list[RouteCandidateExplanation] = Field(min_length=1)
     request_features: RequestFeatureVector | None = None
+    prefix_locality_signal: PrefixLocalitySignal | None = None
     policy_reference: PolicyReference | None = None
     selected_backend: str = Field(min_length=1, max_length=128)
     selection_reason_codes: list[RouteSelectionReasonCode] = Field(default_factory=list)
@@ -543,6 +590,7 @@ class RequestContext(BaseModel):
     tenant: TenantIdentity | None = None
     session_affinity_key: SessionAffinityKey | None = None
     request_features: RequestFeatureVector | None = None
+    prefix_locality_signal: PrefixLocalitySignal | None = None
 
     @model_validator(mode="after")
     def validate_phase4_context(self) -> RequestContext:
@@ -601,6 +649,7 @@ class RouteDecision(BaseModel):
     annotations: RouteAnnotations | None = None
     telemetry_metadata: RouteTelemetryMetadata | None = None
     request_features: RequestFeatureVector | None = None
+    prefix_locality_signal: PrefixLocalitySignal | None = None
     policy_reference: PolicyReference | None = None
     topology_reference: TopologySnapshotReference | None = None
     selected_deployment: BackendDeployment | None = None
@@ -627,6 +676,14 @@ class RouteDecision(BaseModel):
             and self.explanation.request_features != self.request_features
         ):
             msg = "explanation.request_features must match request_features"
+            raise ValueError(msg)
+        if (
+            self.prefix_locality_signal is not None
+            and self.explanation is not None
+            and self.explanation.prefix_locality_signal is not None
+            and self.explanation.prefix_locality_signal != self.prefix_locality_signal
+        ):
+            msg = "explanation.prefix_locality_signal must match prefix_locality_signal"
             raise ValueError(msg)
         if self.explanation is not None:
             if self.explanation.policy_reference is None:

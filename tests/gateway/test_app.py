@@ -2120,3 +2120,8 @@ def test_admin_runtime_endpoint_reports_phase4_runtime_state() -> None:
     assert payload["session_affinity"]["bindings_by_target"] == {}
     assert payload["routing_features"]["feature_version"] == "phase6.v2"
     assert "repeated_prefix" in payload["routing_features"]["workload_tags"]
+    assert payload["prefix_locality"]["enabled"] is True
+    assert payload["prefix_locality"]["prefix_plaintext_retained"] is False
+    assert payload["prefix_locality"]["collision_scope"] == (
+        "serving_target+locality_key+prefix_fingerprint"
+    )

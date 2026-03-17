@@ -10,6 +10,7 @@ from switchyard.config import CanaryRoutingSettings, CircuitBreakerSettings, Ses
 from switchyard.control.affinity import SessionAffinityService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
+from switchyard.control.locality import PrefixLocalityService
 from switchyard.router.service import NoRouteAvailableError, RouterService
 from switchyard.schemas.backend import (
     BackendCapabilities,
@@ -27,6 +28,7 @@ from switchyard.schemas.routing import (
     PolicyReference,
     RequestClass,
     RequestContext,
+    RequestFeatureVector,
     RolloutDisposition,
     RoutingPolicy,
     SessionAffinityKey,
@@ -546,6 +548,80 @@ async def test_router_prefers_sticky_backend_when_it_is_still_eligible() -> None
     assert decision.sticky_route is not None
     assert decision.sticky_route.backend_name == "sticky-backend"
     assert decision.fallback_backends == ["faster-backend"]
+
+
+@pytest.mark.asyncio
+async def test_router_exposes_prefix_locality_signal_without_overriding_session_affinity() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="sticky-backend",
+            latency_ms=30.0,
+            quality_tier=2,
+            device_class=DeviceClass.CPU,
+            serving_targets=["chat-shared"],
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="warm-backend",
+            latency_ms=5.0,
+            quality_tier=4,
+            device_class=DeviceClass.CPU,
+            serving_targets=["chat-shared"],
+        )
+    )
+    affinity = SessionAffinityService(SessionAffinitySettings(enabled=True, ttl_seconds=60.0))
+    affinity.bind(
+        SessionAffinityKey(
+            tenant_id="tenant-a",
+            session_id="session-locality",
+            serving_target="chat-shared",
+        ),
+        backend_name="sticky-backend",
+    )
+    locality = PrefixLocalityService()
+    features = RequestFeatureVector(
+        message_count=1,
+        user_message_count=1,
+        prompt_character_count=64,
+        prompt_token_estimate=10,
+        max_output_tokens=128,
+        expected_total_tokens=138,
+        repeated_prefix_candidate=True,
+        prefix_character_count=32,
+        prefix_fingerprint="feedfacecafebeef",
+        locality_key="00112233445566778899",
+        session_affinity_expected=True,
+    )
+    locality.observe_request(serving_target="chat-shared", request_features=features)
+    locality.observe_execution(
+        serving_target="chat-shared",
+        request_features=features,
+        backend_name="warm-backend",
+        backend_instance_id=None,
+    )
+    router = RouterService(registry, session_affinity=affinity, prefix_locality=locality)
+    context = RequestContext(
+        request_id="req-prefix-affinity",
+        policy=RoutingPolicy.LATENCY_FIRST,
+        workload_shape=WorkloadShape.INTERACTIVE,
+        tenant_id="tenant-a",
+        session_id="session-locality",
+        request_features=features,
+    )
+
+    decision = await router.route(build_request("chat-shared"), context)
+
+    assert decision.backend_name == "sticky-backend"
+    assert decision.prefix_locality_signal is not None
+    assert decision.prefix_locality_signal.candidate_local_backend == "warm-backend"
+    assert decision.prefix_locality_signal.affinity_conflict is True
+    assert decision.annotations is not None
+    assert (
+        "prefix locality preferred backend differs from the current session affinity binding"
+        in decision.annotations.notes
+    )
 
 
 @pytest.mark.asyncio

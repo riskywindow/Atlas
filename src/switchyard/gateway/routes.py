@@ -112,6 +112,7 @@ async def admin_runtime(
         shadow_routing=services.shadow.inspect_state(),
         session_affinity=services.session_affinity.inspect_state(),
         routing_features=routing_feature_runtime_summary(),
+        prefix_locality=services.prefix_locality.inspect_state(),
     )
 
 
@@ -251,6 +252,11 @@ async def create_chat_completion(
         route_reason=route_record.route_reason,
         route_latency_ms=route_record.route_latency_ms,
     )
+    if decision.request_features is not None:
+        services.prefix_locality.observe_request(
+            serving_target=decision.serving_target,
+            request_features=decision.request_features,
+        )
     if chat_request.stream:
         return StreamingResponse(
             _stream_chat_completion(
@@ -485,6 +491,7 @@ async def _stream_chat_completion(
                         final_outcome="failed_after_stream_started",
                     )
                     _record_execution_observation(
+                        services,
                         decision,
                         executed_backend=backend_name,
                         latency_ms=failed_latency_ms,
@@ -570,6 +577,7 @@ async def _stream_chat_completion(
                 final_outcome="succeeded",
             )
             _record_execution_observation(
+                services,
                 decision,
                 executed_backend=backend_name,
                 latency_ms=execution.total_latency_ms,
@@ -627,6 +635,7 @@ async def _stream_chat_completion(
             final_outcome="failed_no_safe_fallback",
         )
         _record_execution_observation(
+            services,
             decision,
             executed_backend=None,
             latency_ms=(perf_counter() - stream_started) * 1000,
@@ -801,6 +810,7 @@ async def _generate_with_fallback(
             final_outcome="succeeded",
         )
         _record_execution_observation(
+            services,
             decision,
             executed_backend=backend_name,
             latency_ms=execution.total_latency_ms,
@@ -831,6 +841,7 @@ async def _generate_with_fallback(
         final_outcome="failed_no_safe_fallback",
     )
     _record_execution_observation(
+        services,
         decision,
         executed_backend=None,
         latency_ms=None,
@@ -915,6 +926,7 @@ def _set_execution_outcome(
 
 
 def _record_execution_observation(
+    services: GatewayServices,
     decision: RouteDecision,
     *,
     executed_backend: str | None,
@@ -941,6 +953,17 @@ def _record_execution_observation(
         error_category=error_category,
         final_outcome=final_outcome,
     )
+    if (
+        final_outcome == "succeeded"
+        and decision.request_features is not None
+        and decision.request_features.prefix_fingerprint is not None
+    ):
+        services.prefix_locality.observe_execution(
+            serving_target=decision.serving_target,
+            request_features=decision.request_features,
+            backend_name=executed_backend,
+            backend_instance_id=decision.execution_observation.backend_instance_id,
+        )
 
 
 def _update_session_affinity(

@@ -15,6 +15,7 @@ from switchyard.control.admission import AdmissionControlService
 from switchyard.control.affinity import SessionAffinityService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
+from switchyard.control.locality import PrefixLocalityService
 from switchyard.control.shadow import ShadowTrafficService
 from switchyard.gateway.trace_capture import TraceCaptureService
 from switchyard.logging import get_logger
@@ -34,6 +35,7 @@ class GatewayServices:
     admission: AdmissionControlService
     circuit_breaker: CircuitBreakerService
     session_affinity: SessionAffinityService
+    prefix_locality: PrefixLocalityService
     canary: CanaryRoutingService
     shadow: ShadowTrafficService
     telemetry: Telemetry

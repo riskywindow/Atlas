@@ -13,6 +13,7 @@ from switchyard.schemas.routing import (
     CircuitBreakerState,
     HistoryDepthBucket,
     InputLengthBucket,
+    PrefixHotness,
     ShadowPolicy,
     WorkloadTag,
 )
@@ -130,6 +131,38 @@ class RoutingFeatureRuntimeSummary(BaseModel):
     prefix_plaintext_retained: bool = False
 
 
+class TrackedPrefixRuntimeSummary(BaseModel):
+    """Bounded runtime summary for one tracked prefix digest."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    serving_target: str = Field(min_length=1, max_length=128)
+    locality_key: str = Field(min_length=8, max_length=64)
+    prefix_fingerprint: str = Field(min_length=8, max_length=64)
+    recent_request_count: int = Field(default=0, ge=0)
+    hotness: PrefixHotness = PrefixHotness.COLD
+    preferred_backend: str | None = Field(default=None, min_length=1, max_length=128)
+    preferred_instance_id: str | None = Field(default=None, min_length=1, max_length=128)
+    last_seen_at: datetime | None = None
+
+
+class PrefixLocalityRuntimeSummary(BaseModel):
+    """Current repeated-prefix and locality tracker summary."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    ttl_seconds: float = Field(gt=0.0, le=86_400.0)
+    max_prefixes: int = Field(ge=1)
+    active_prefixes: int = Field(default=0, ge=0)
+    hot_prefixes: int = Field(default=0, ge=0)
+    tracked_serving_targets: dict[str, int] = Field(default_factory=dict)
+    hottest_prefixes: list[TrackedPrefixRuntimeSummary] = Field(default_factory=list)
+    prefix_fingerprint_algorithm: str = Field(min_length=1, max_length=64)
+    prefix_plaintext_retained: bool = False
+    collision_scope: str = Field(min_length=1, max_length=128)
+
+
 class RuntimeInspectionResponse(BaseModel):
     """Top-level runtime inspection payload."""
 
@@ -143,6 +176,7 @@ class RuntimeInspectionResponse(BaseModel):
     shadow_routing: ShadowRoutingRuntimeSummary
     session_affinity: SessionAffinityRuntimeSummary
     routing_features: RoutingFeatureRuntimeSummary
+    prefix_locality: PrefixLocalityRuntimeSummary
 
 
 class DiagnosticStatus(StrEnum):

@@ -19,6 +19,7 @@ from switchyard.control.admission import AdmissionControlService, AdmissionRejec
 from switchyard.control.affinity import SessionAffinityService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
+from switchyard.control.locality import PrefixLocalityService
 from switchyard.control.shadow import ShadowTrafficService
 from switchyard.gateway.dependencies import GatewayServices, gateway_lifespan
 from switchyard.gateway.routes import BackendExecutionExhaustedError, InvalidRequestContextError
@@ -44,6 +45,7 @@ def create_app(
     registry: AdapterRegistry | None = None,
     router_service: RouterService | None = None,
     session_affinity: SessionAffinityService | None = None,
+    prefix_locality: PrefixLocalityService | None = None,
     settings: Settings | None = None,
     telemetry: Telemetry | None = None,
     registry_builder: RegistryBuilder | None = None,
@@ -58,12 +60,14 @@ def create_app(
     resolved_session_affinity = session_affinity or SessionAffinityService(
         resolved_settings.phase4.session_affinity
     )
+    resolved_prefix_locality = prefix_locality or PrefixLocalityService()
     resolved_canary = CanaryRoutingService(resolved_settings.phase4.canary_routing)
     resolved_shadow = ShadowTrafficService(resolved_settings.phase4.shadow_routing)
     resolved_router = router_service or RouterService(
         resolved_registry,
         circuit_breaker=resolved_circuit_breaker,
         session_affinity=resolved_session_affinity,
+        prefix_locality=resolved_prefix_locality,
         canary_routing=resolved_canary,
     )
     configure_logging(resolved_settings.log_level)
@@ -80,6 +84,7 @@ def create_app(
         admission=AdmissionControlService(resolved_settings.phase4.admission_control),
         circuit_breaker=resolved_circuit_breaker,
         session_affinity=resolved_session_affinity,
+        prefix_locality=resolved_prefix_locality,
         canary=resolved_canary,
         shadow=resolved_shadow,
         telemetry=resolved_telemetry,

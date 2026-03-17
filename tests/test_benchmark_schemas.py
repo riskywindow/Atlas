@@ -56,6 +56,8 @@ from switchyard.schemas.routing import (
     AdmissionDecisionState,
     CanaryPolicy,
     PolicyReference,
+    PrefixHotness,
+    PrefixLocalitySignal,
     RequestFeatureVector,
     RouteCandidateExplanation,
     RouteDecision,
@@ -111,6 +113,21 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
             locality_key="00112233445566778899",
         ),
         policy_reference=PolicyReference(policy_id="balanced", policy_version="phase6.v1"),
+        prefix_locality_signal=PrefixLocalitySignal(
+            serving_target="mock-chat",
+            locality_key="00112233445566778899",
+            prefix_fingerprint="feedfacecafebeef",
+            repeated_prefix_detected=True,
+            recent_request_count=2,
+            hotness=PrefixHotness.WARM,
+            cache_opportunity=True,
+            likely_benefits_from_locality=True,
+            preferred_backend="mock-a",
+            preferred_backend_request_count=1,
+            candidate_local_backend="mock-a",
+            candidate_local_backend_request_count=1,
+            recent_backend_counts={"mock-a": 1},
+        ),
         topology_reference=TopologySnapshotReference(
             topology_snapshot_id="topology-run-1",
             capture_source="gateway_admin_runtime",
@@ -146,6 +163,21 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
                 prefix_character_count=32,
                 prefix_fingerprint="feedfacecafebeef",
                 locality_key="00112233445566778899",
+            ),
+            prefix_locality_signal=PrefixLocalitySignal(
+                serving_target="mock-chat",
+                locality_key="00112233445566778899",
+                prefix_fingerprint="feedfacecafebeef",
+                repeated_prefix_detected=True,
+                recent_request_count=2,
+                hotness=PrefixHotness.WARM,
+                cache_opportunity=True,
+                likely_benefits_from_locality=True,
+                preferred_backend="mock-a",
+                preferred_backend_request_count=1,
+                candidate_local_backend="mock-a",
+                candidate_local_backend_request_count=1,
+                recent_backend_counts={"mock-a": 1},
             ),
             policy_reference=PolicyReference(policy_id="balanced", policy_version="phase6.v1"),
             candidates=[
@@ -292,6 +324,10 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
     assert "repeated_prefix" in payload["records"][0]["route_decision"]["request_features"][
         "workload_tags"
     ]
+    assert (
+        payload["records"][0]["route_decision"]["prefix_locality_signal"]["cache_opportunity"]
+        is True
+    )
     assert payload["records"][0]["execution_observation"]["queue_delay_ms"] == 5.0
     assert payload["records"][0]["topology_reference"]["topology_snapshot_id"] == (
         "topology-run-1"

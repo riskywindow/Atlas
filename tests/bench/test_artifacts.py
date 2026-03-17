@@ -240,6 +240,29 @@ async def test_run_gateway_benchmark_captures_deployed_topology_metadata() -> No
                 "prefix_fingerprint_algorithm": "sha256_truncated_16_hex",
                 "prefix_plaintext_retained": False,
             },
+            "prefix_locality": {
+                "enabled": True,
+                "ttl_seconds": 300.0,
+                "max_prefixes": 256,
+                "active_prefixes": 1,
+                "hot_prefixes": 1,
+                "tracked_serving_targets": {"mock-chat": 1},
+                "hottest_prefixes": [
+                    {
+                        "serving_target": "mock-chat",
+                        "locality_key": "00112233445566778899",
+                        "prefix_fingerprint": "feedfacecafebeef",
+                        "recent_request_count": 3,
+                        "hotness": "hot",
+                        "preferred_backend": "mock-a",
+                        "preferred_instance_id": None,
+                        "last_seen_at": "2026-03-16T00:00:00Z",
+                    }
+                ],
+                "prefix_fingerprint_algorithm": "sha256_truncated_16_hex",
+                "prefix_plaintext_retained": False,
+                "collision_scope": "serving_target+locality_key+prefix_fingerprint",
+            },
         }
 
     @app.post("/v1/chat/completions")

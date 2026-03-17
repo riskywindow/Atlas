@@ -6,6 +6,7 @@ from switchyard.adapters.registry import AdapterRegistry
 from switchyard.control.affinity import SessionAffinityService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
+from switchyard.control.locality import PrefixLocalityService
 from switchyard.router.features import extract_request_feature_vector
 from switchyard.router.policies import CandidateScore, rejection_reason, score_candidate
 from switchyard.schemas.backend import BackendHealthState
@@ -39,11 +40,13 @@ class RouterService:
         registry: AdapterRegistry,
         circuit_breaker: CircuitBreakerService | None = None,
         session_affinity: SessionAffinityService | None = None,
+        prefix_locality: PrefixLocalityService | None = None,
         canary_routing: CanaryRoutingService | None = None,
     ) -> None:
         self._registry = registry
         self._circuit_breaker = circuit_breaker
         self._session_affinity = session_affinity
+        self._prefix_locality = prefix_locality
         self._canary_routing = canary_routing
 
     async def route(
@@ -159,6 +162,28 @@ class RouterService:
                 candidate.snapshot.name,
             ),
         )
+        prefix_locality_signal = (
+            None
+            if self._prefix_locality is None
+            else self._prefix_locality.inspect(
+                serving_target=request.model,
+                request_features=request_features,
+                candidate_backends=[candidate.snapshot.name for candidate in ranked],
+                sticky_backend_name=sticky_backend_name,
+                session_affinity_enabled=(
+                    affinity_key is not None
+                    and context.internal_backend_pin is None
+                    and self._session_affinity is not None
+                    and self._session_affinity.enabled
+                ),
+            )
+        )
+        context.prefix_locality_signal = prefix_locality_signal
+        if prefix_locality_signal is not None and prefix_locality_signal.affinity_conflict:
+            annotations.notes.append(
+                "prefix locality preferred backend differs from the current "
+                "session affinity binding"
+            )
         chosen = ranked[0]
         chosen_rationale = chosen.rationale
         selected_reason_codes = [RouteSelectionReasonCode.POLICY_SCORE]
@@ -315,12 +340,14 @@ class RouterService:
                 labels={"request_id": context.request_id},
             ),
             request_features=request_features,
+            prefix_locality_signal=prefix_locality_signal,
             policy_reference=policy_reference,
             selected_deployment=chosen.snapshot.deployment,
             explanation=RouteExplanation(
                 serving_target=request.model,
                 candidates=explanations,
                 request_features=request_features,
+                prefix_locality_signal=prefix_locality_signal,
                 policy_reference=policy_reference,
                 selected_backend=chosen.snapshot.name,
                 selection_reason_codes=selected_reason_codes,

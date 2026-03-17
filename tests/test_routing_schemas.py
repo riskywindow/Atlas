@@ -10,6 +10,8 @@ from switchyard.schemas.routing import (
     LimiterMode,
     LimiterState,
     PolicyReference,
+    PrefixHotness,
+    PrefixLocalitySignal,
     QueueSnapshot,
     RequestClass,
     RequestContext,
@@ -136,6 +138,21 @@ def test_route_decision_valid_case() -> None:
             prefix_fingerprint="0123456789abcdef",
             locality_key="abcdef0123456789abcd",
         ),
+        prefix_locality_signal=PrefixLocalitySignal(
+            serving_target="chat-default",
+            locality_key="abcdef0123456789abcd",
+            prefix_fingerprint="0123456789abcdef",
+            repeated_prefix_detected=True,
+            recent_request_count=3,
+            hotness=PrefixHotness.HOT,
+            cache_opportunity=True,
+            likely_benefits_from_locality=True,
+            preferred_backend="mock-a",
+            preferred_backend_request_count=2,
+            candidate_local_backend="mock-a",
+            candidate_local_backend_request_count=2,
+            recent_backend_counts={"mock-a": 2},
+        ),
         policy_reference=PolicyReference(policy_id="balanced", policy_version="phase6.v1"),
         topology_reference=TopologySnapshotReference(
             topology_snapshot_id="topology-001",
@@ -164,6 +181,21 @@ def test_route_decision_valid_case() -> None:
                 prefix_character_count=28,
                 prefix_fingerprint="0123456789abcdef",
                 locality_key="abcdef0123456789abcd",
+            ),
+            prefix_locality_signal=PrefixLocalitySignal(
+                serving_target="chat-default",
+                locality_key="abcdef0123456789abcd",
+                prefix_fingerprint="0123456789abcdef",
+                repeated_prefix_detected=True,
+                recent_request_count=3,
+                hotness=PrefixHotness.HOT,
+                cache_opportunity=True,
+                likely_benefits_from_locality=True,
+                preferred_backend="mock-a",
+                preferred_backend_request_count=2,
+                candidate_local_backend="mock-a",
+                candidate_local_backend_request_count=2,
+                recent_backend_counts={"mock-a": 2},
             ),
             policy_reference=PolicyReference(policy_id="balanced", policy_version="phase6.v1"),
             candidates=[
@@ -203,6 +235,8 @@ def test_route_decision_valid_case() -> None:
     assert decision.explanation.selected_backend == "mock-a"
     assert decision.explanation.request_features is not None
     assert decision.explanation.request_features.repeated_prefix_candidate is True
+    assert decision.prefix_locality_signal is not None
+    assert decision.prefix_locality_signal.cache_opportunity is True
     assert decision.policy_reference == PolicyReference(
         policy_id="balanced",
         policy_version="phase6.v1",
