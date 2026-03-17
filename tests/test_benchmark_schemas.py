@@ -55,13 +55,19 @@ from switchyard.schemas.routing import (
     AdmissionDecision,
     AdmissionDecisionState,
     CanaryPolicy,
+    PolicyReference,
+    RequestFeatureVector,
     RouteCandidateExplanation,
     RouteDecision,
     RouteEligibilityState,
+    RouteExecutionObservation,
     RouteExplanation,
     RouteTelemetryMetadata,
     RoutingPolicy,
+    ShadowDisposition,
     ShadowPolicy,
+    ShadowRouteEvidence,
+    TopologySnapshotReference,
     WorkloadShape,
 )
 
@@ -90,8 +96,55 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
         rationale=["lowest latency"],
         considered_backends=["mock-a", "mock-b"],
         fallback_backends=["mock-b"],
+        request_features=RequestFeatureVector(
+            message_count=1,
+            user_message_count=1,
+            prompt_character_count=64,
+            prompt_token_estimate=10,
+            max_output_tokens=256,
+            expected_total_tokens=266,
+            repeated_prefix_candidate=True,
+            prefix_character_count=32,
+            prefix_fingerprint="feedfacecafebeef",
+            locality_key="00112233445566778899",
+        ),
+        policy_reference=PolicyReference(policy_id="balanced", policy_version="phase6.v1"),
+        topology_reference=TopologySnapshotReference(
+            topology_snapshot_id="topology-run-1",
+            capture_source="gateway_admin_runtime",
+            artifact_run_id="run_1",
+        ),
+        shadow_decision=ShadowRouteEvidence(
+            policy_name="shadow-policy",
+            disposition=ShadowDisposition.SHADOWED,
+            target_backend="mock-shadow",
+            sampling_rate=0.25,
+            decision_reason="launched",
+        ),
+        execution_observation=RouteExecutionObservation(
+            executed_backend="mock-a",
+            queue_delay_ms=5.0,
+            ttft_ms=11.0,
+            latency_ms=25.0,
+            output_tokens=2,
+            status_code=200,
+            final_outcome="succeeded",
+        ),
         explanation=RouteExplanation(
             serving_target="mock-chat",
+            request_features=RequestFeatureVector(
+                message_count=1,
+                user_message_count=1,
+                prompt_character_count=64,
+                prompt_token_estimate=10,
+                max_output_tokens=256,
+                expected_total_tokens=266,
+                repeated_prefix_candidate=True,
+                prefix_character_count=32,
+                prefix_fingerprint="feedfacecafebeef",
+                locality_key="00112233445566778899",
+            ),
+            policy_reference=PolicyReference(policy_id="balanced", policy_version="phase6.v1"),
             candidates=[
                 RouteCandidateExplanation(
                     backend_name="mock-a",
@@ -118,6 +171,15 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
         output_tokens=2,
         tokens_per_second=80.0,
         route_decision=route_decision,
+        execution_observation=RouteExecutionObservation(
+            executed_backend="mock-a",
+            queue_delay_ms=5.0,
+            ttft_ms=11.0,
+            latency_ms=25.0,
+            output_tokens=2,
+            status_code=200,
+            final_outcome="succeeded",
+        ),
         cache_observation=CacheObservation(supports_prefix_cache=True),
         success=True,
         status_code=200,
@@ -199,13 +261,18 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
                 git_sha="abcdef123456",
             ),
             topology_capture_source="gateway_admin_runtime",
+            topology_reference=TopologySnapshotReference(
+                topology_snapshot_id="topology-run-1",
+                capture_source="gateway_admin_runtime",
+                artifact_run_id="run_1",
+            ),
         ),
         records=[record],
     )
 
     payload = artifact.model_dump(mode="json")
 
-    assert payload["schema_version"] == BenchmarkArtifactSchemaVersion.V2.value
+    assert payload["schema_version"] == BenchmarkArtifactSchemaVersion.V3.value
     assert payload["git_revision"] == "abcdef123456"
     assert payload["model_alias"] == "mock-chat"
     assert payload["run_config"]["concurrency"] == 1
@@ -216,6 +283,13 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
     assert payload["records"][0]["scenario_family"] == "repeated_prefix"
     assert payload["records"][0]["cache_observation"]["supports_prefix_cache"] is True
     assert payload["records"][0]["route_candidate_count"] == 2
+    assert payload["records"][0]["route_decision"]["request_features"]["feature_version"] == (
+        "phase6.v1"
+    )
+    assert payload["records"][0]["execution_observation"]["queue_delay_ms"] == 5.0
+    assert payload["records"][0]["topology_reference"]["topology_snapshot_id"] == (
+        "topology-run-1"
+    )
     assert payload["records"][0]["route_reason"] == (
         "target=mock-chat | selected=mock-a | reason=lowest latency"
     )
@@ -227,6 +301,9 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
     assert (
         payload["environment"]["control_plane_image"]["image_tag"]
         == "switchyard/control-plane:dev"
+    )
+    assert payload["environment"]["topology_reference"]["capture_source"] == (
+        "gateway_admin_runtime"
     )
     assert payload["environment_snapshot"]["platform"] == payload["environment"]["platform"]
     assert payload["summary"]["family_summaries"]["repeated_prefix"]["request_count"] == 1
@@ -286,6 +363,80 @@ def test_benchmark_request_record_carries_phase4_control_plane_metadata() -> Non
     payload = record.model_dump(mode="json")
 
     assert payload["control_plane_metadata"]["tenant_id"] == "tenant-a"
+
+
+def test_captured_trace_and_replay_request_preserve_phase6_evidence() -> None:
+    route_decision = RouteDecision(
+        backend_name="mock-a",
+        serving_target="chat-shared",
+        policy=RoutingPolicy.BALANCED,
+        request_id="req-trace",
+        workload_shape=WorkloadShape.INTERACTIVE,
+        rationale=["selected"],
+        considered_backends=["mock-a"],
+        request_features=RequestFeatureVector(
+            message_count=1,
+            user_message_count=1,
+            prompt_character_count=48,
+            prompt_token_estimate=8,
+            max_output_tokens=64,
+            expected_total_tokens=72,
+            repeated_prefix_candidate=True,
+            prefix_character_count=24,
+            prefix_fingerprint="abc12345def67890",
+            locality_key="1234567890abcdef1234",
+        ),
+        policy_reference=PolicyReference(policy_id="balanced", policy_version="phase6.v1"),
+        topology_reference=TopologySnapshotReference(
+            topology_snapshot_id="topology-trace-1",
+            capture_source="gateway_admin_runtime",
+        ),
+        execution_observation=RouteExecutionObservation(
+            executed_backend="mock-a",
+            queue_delay_ms=2.0,
+            ttft_ms=7.0,
+            latency_ms=15.0,
+            output_tokens=5,
+            status_code=200,
+            final_outcome="succeeded",
+        ),
+    )
+    trace = CapturedTraceRecord(
+        record_id="trace-1",
+        request_id="req-trace",
+        execution_target=ExecutionTarget(
+            target_type=ExecutionTargetType.ROUTING_POLICY,
+            model_alias="chat-shared",
+            routing_policy=RoutingPolicy.BALANCED,
+        ),
+        route_decision=route_decision,
+        chosen_backend="mock-a",
+        stream=False,
+        fallback_used=False,
+        status_code=200,
+        latency_ms=15.0,
+        ttft_ms=7.0,
+        output_tokens=5,
+        capture_mode=TraceCaptureMode.METADATA_ONLY,
+    )
+    replay = ReplayRequest(
+        replay_request_id="replay-1",
+        source_request_id=trace.request_id,
+        source_trace_record_id=trace.record_id,
+        order_index=0,
+        request_features=trace.request_features,
+        policy_reference=trace.policy_reference,
+        topology_reference=trace.topology_reference,
+    )
+
+    assert trace.request_features is not None
+    assert trace.request_features.repeated_prefix_candidate is True
+    assert trace.policy_reference == PolicyReference(
+        policy_id="balanced",
+        policy_version="phase6.v1",
+    )
+    assert replay.topology_reference is not None
+    assert replay.topology_reference.topology_snapshot_id == "topology-trace-1"
 
 
 def test_phase4_workload_family_serializes_cleanly() -> None:
@@ -450,13 +601,13 @@ def test_comparison_summary_and_report_metadata_serialize() -> None:
         report_format=ReportFormat.MARKDOWN,
         source_of_truth=ReportSourceOfTruth.BENCHMARK_ARTIFACT,
         source_run_ids=["run-balanced"],
-        source_schema_versions=[BenchmarkArtifactSchemaVersion.V2],
+        source_schema_versions=[BenchmarkArtifactSchemaVersion.V3],
     )
 
     payload = comparison.model_dump(mode="json")
     report_payload = report.model_dump(mode="json")
 
-    assert payload["schema_version"] == "switchyard.benchmark.v2"
+    assert payload["schema_version"] == "switchyard.benchmark.v3"
     assert payload["comparison_summary"]["result_count"] == 1
     assert report_payload["source_of_truth"] == "benchmark_artifact"
 
@@ -595,11 +746,92 @@ def test_phase2_style_artifact_input_still_derives_phase3_fields() -> None:
         ],
     )
 
-    assert artifact.schema_version is BenchmarkArtifactSchemaVersion.V2
+    assert artifact.schema_version is BenchmarkArtifactSchemaVersion.V3
     assert artifact.execution_target is not None
     assert artifact.run_config.execution_target is not None
     assert artifact.environment_snapshot is not None
     assert artifact.model_alias == "mock-chat"
+    assert artifact.environment.topology_reference is None
+
+
+def test_v2_run_artifact_payload_still_loads_with_v3_model() -> None:
+    started_at = datetime(2026, 3, 15, tzinfo=UTC)
+    payload = {
+        "schema_version": BenchmarkArtifactSchemaVersion.V2.value,
+        "run_id": "legacy-v2",
+        "timestamp": "2026-03-15T00:00:00Z",
+        "scenario": {
+            "name": "legacy",
+            "model": "mock-chat",
+            "model_alias": "mock-chat",
+            "family": "short_chat",
+            "policy": "balanced",
+            "workload_shape": "interactive",
+            "request_count": 1,
+            "input_messages_per_request": 1,
+            "stream": False,
+            "workload_generation": {"pattern": "uniform", "seed": 0, "burst_size": 1},
+            "items": [],
+            "scenario_seed": 0,
+        },
+        "policy": "balanced",
+        "backends_involved": ["mock-a"],
+        "backend_types_involved": ["mock"],
+        "model_aliases_involved": ["mock-chat"],
+        "request_count": 1,
+        "summary": {
+            "request_count": 1,
+            "success_count": 1,
+            "failure_count": 0,
+            "avg_latency_ms": 1.0,
+            "p50_latency_ms": 1.0,
+            "p95_latency_ms": 1.0,
+            "avg_ttft_ms": None,
+            "p50_ttft_ms": None,
+            "p95_ttft_ms": None,
+            "total_output_tokens": 1,
+            "avg_output_tokens": 1.0,
+            "avg_tokens_per_second": 1.0,
+            "p95_tokens_per_second": 1.0,
+            "fallback_count": 0,
+            "chosen_backend_counts": {"mock-a": 1},
+            "family_summaries": {},
+        },
+        "environment": {
+            "benchmark_mode": "synthetic",
+            "host_name": "test-host",
+            "python_version": "3.12.0",
+            "platform": "macOS",
+            "machine": "arm64",
+            "processor": "arm",
+            "stream": False,
+            "timeout_seconds": 30.0,
+            "canary_percentage": 0.0,
+            "shadow_sampling_rate": 0.0,
+            "deployed_topology": [],
+            "worker_instance_inventory": [],
+            "metadata": {},
+        },
+        "records": [
+            {
+                "request_id": "req-1",
+                "backend_name": "mock-a",
+                "backend_type": "mock",
+                "model_alias": "mock-chat",
+                "started_at": started_at.isoformat().replace("+00:00", "Z"),
+                "completed_at": started_at.isoformat().replace("+00:00", "Z"),
+                "latency_ms": 0.0,
+                "success": True,
+                "status_code": 200,
+            }
+        ],
+    }
+
+    artifact = BenchmarkRunArtifact.model_validate(payload)
+
+    assert artifact.schema_version is BenchmarkArtifactSchemaVersion.V2
+    assert artifact.environment.topology_reference is None
+    assert artifact.records[0].policy_reference is None
 
 
 def test_comparison_summary_rejects_length_mismatch() -> None:

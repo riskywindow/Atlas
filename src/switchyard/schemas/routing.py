@@ -112,6 +112,18 @@ class ShadowDisposition(StrEnum):
     SHADOWED = "shadowed"
 
 
+class RouteSelectionReasonCode(StrEnum):
+    """Stable reason codes for route selection and analysis."""
+
+    POLICY_SCORE = "policy_score"
+    SESSION_AFFINITY = "session_affinity"
+    CANARY_BASELINE = "canary_baseline"
+    CANARY_SELECTED = "canary_selected"
+    SHADOW_SKIPPED = "shadow_skipped"
+    SHADOW_LAUNCHED = "shadow_launched"
+    FALLBACK_EXECUTION = "fallback_execution"
+
+
 class TenantIdentity(BaseModel):
     """Portable tenant identity and request class metadata."""
 
@@ -314,6 +326,109 @@ class RouteTelemetryMetadata(BaseModel):
     labels: dict[str, str] = Field(default_factory=dict)
 
 
+class PolicyReference(BaseModel):
+    """Stable policy identifier captured in route and artifact records."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    policy_id: str = Field(min_length=1, max_length=128)
+    policy_version: str = Field(default="phase6.v1", min_length=1, max_length=64)
+
+
+class TopologySnapshotReference(BaseModel):
+    """Reference to the deployment topology snapshot used for analysis."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    topology_snapshot_id: str = Field(min_length=1, max_length=128)
+    capture_source: str = Field(min_length=1, max_length=128)
+    captured_at: datetime | None = None
+    artifact_run_id: str | None = Field(default=None, min_length=1, max_length=128)
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class RequestFeatureVector(BaseModel):
+    """Deterministic request and locality signals extracted before scoring."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    feature_version: str = Field(default="phase6.v1", min_length=1, max_length=32)
+    message_count: int = Field(ge=1)
+    system_message_count: int = Field(default=0, ge=0)
+    user_message_count: int = Field(default=0, ge=0)
+    assistant_message_count: int = Field(default=0, ge=0)
+    tool_message_count: int = Field(default=0, ge=0)
+    prompt_character_count: int = Field(ge=0)
+    prompt_token_estimate: int = Field(ge=0)
+    max_output_tokens: int = Field(ge=1)
+    expected_total_tokens: int = Field(ge=1)
+    stream: bool = False
+    repeated_prefix_candidate: bool = False
+    prefix_character_count: int = Field(default=0, ge=0)
+    prefix_fingerprint: str | None = Field(default=None, min_length=8, max_length=64)
+    locality_key: str = Field(min_length=8, max_length=64)
+    session_affinity_expected: bool = False
+
+    @model_validator(mode="after")
+    def validate_counts(self) -> RequestFeatureVector:
+        counted_messages = (
+            self.system_message_count
+            + self.user_message_count
+            + self.assistant_message_count
+            + self.tool_message_count
+        )
+        if counted_messages != self.message_count:
+            msg = "role-specific message counts must sum to message_count"
+            raise ValueError(msg)
+        if self.expected_total_tokens < self.prompt_token_estimate:
+            msg = "expected_total_tokens must be greater than or equal to prompt_token_estimate"
+            raise ValueError(msg)
+        if self.prefix_character_count == 0 and self.prefix_fingerprint is not None:
+            msg = "prefix_fingerprint requires a positive prefix_character_count"
+            raise ValueError(msg)
+        if self.prefix_character_count > 0 and self.prefix_fingerprint is None:
+            msg = "prefix_character_count requires prefix_fingerprint"
+            raise ValueError(msg)
+        return self
+
+
+class ShadowRouteEvidence(BaseModel):
+    """Explainable shadow-routing decision captured alongside the primary route."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    policy_name: str = Field(min_length=1, max_length=128)
+    disposition: ShadowDisposition
+    target_backend: str | None = Field(default=None, min_length=1, max_length=128)
+    target_alias: str | None = Field(default=None, min_length=1, max_length=128)
+    sampling_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    decision_reason: str | None = Field(default=None, min_length=1, max_length=256)
+    score: float | None = None
+
+    @model_validator(mode="after")
+    def validate_targets(self) -> ShadowRouteEvidence:
+        if self.target_backend is not None and self.target_alias is not None:
+            msg = "shadow evidence may set target_backend or target_alias, not both"
+            raise ValueError(msg)
+        return self
+
+
+class RouteExecutionObservation(BaseModel):
+    """Runtime outcomes learned after the route decision was made."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    executed_backend: str | None = Field(default=None, min_length=1, max_length=128)
+    backend_instance_id: str | None = Field(default=None, min_length=1, max_length=128)
+    queue_delay_ms: float | None = Field(default=None, ge=0.0)
+    ttft_ms: float | None = Field(default=None, ge=0.0)
+    latency_ms: float | None = Field(default=None, ge=0.0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    status_code: int | None = Field(default=None, ge=100, le=599)
+    error_category: str | None = Field(default=None, min_length=1, max_length=128)
+    final_outcome: str | None = Field(default=None, min_length=1, max_length=128)
+
+
 class RouteCandidateExplanation(BaseModel):
     """Deterministic explanation for one backend candidate."""
 
@@ -321,10 +436,12 @@ class RouteCandidateExplanation(BaseModel):
     serving_target: str = Field(min_length=1, max_length=128)
     eligibility_state: RouteEligibilityState
     score: float | None = None
+    reason_codes: list[RouteSelectionReasonCode] = Field(default_factory=list)
     rationale: list[str] = Field(default_factory=list)
     rejection_reason: str | None = Field(default=None, min_length=1, max_length=256)
     deployment: BackendDeployment | None = None
     engine_type: EngineType | None = None
+    backend_instance_id: str | None = Field(default=None, min_length=1, max_length=128)
 
     @model_validator(mode="after")
     def validate_state_reason(self) -> RouteCandidateExplanation:
@@ -342,7 +459,10 @@ class RouteExplanation(BaseModel):
 
     serving_target: str = Field(min_length=1, max_length=128)
     candidates: list[RouteCandidateExplanation] = Field(min_length=1)
+    request_features: RequestFeatureVector | None = None
+    policy_reference: PolicyReference | None = None
     selected_backend: str = Field(min_length=1, max_length=128)
+    selection_reason_codes: list[RouteSelectionReasonCode] = Field(default_factory=list)
     selected_reason: list[str] = Field(default_factory=list)
     tie_breaker: str | None = Field(default=None, min_length=1, max_length=128)
     executed_backend: str | None = Field(default=None, min_length=1, max_length=128)
@@ -437,13 +557,20 @@ class RouteDecision(BaseModel):
     sticky_route: StickyRouteRecord | None = None
     canary_policy: CanaryPolicy | None = None
     shadow_policy: ShadowPolicy | None = None
+    shadow_decision: ShadowRouteEvidence | None = None
     annotations: RouteAnnotations | None = None
     telemetry_metadata: RouteTelemetryMetadata | None = None
+    request_features: RequestFeatureVector | None = None
+    policy_reference: PolicyReference | None = None
+    topology_reference: TopologySnapshotReference | None = None
     selected_deployment: BackendDeployment | None = None
+    execution_observation: RouteExecutionObservation | None = None
     explanation: RouteExplanation | None = None
 
     @model_validator(mode="after")
     def validate_fallback_backends(self) -> RouteDecision:
+        if self.policy_reference is None:
+            self.policy_reference = PolicyReference(policy_id=self.policy.value)
         if self.backend_name in self.fallback_backends:
             msg = "fallback_backends must not include the chosen backend"
             raise ValueError(msg)
@@ -453,6 +580,20 @@ class RouteDecision(BaseModel):
         if self.explanation is not None and self.explanation.selected_backend != self.backend_name:
             msg = "explanation.selected_backend must match backend_name"
             raise ValueError(msg)
+        if (
+            self.request_features is not None
+            and self.explanation is not None
+            and self.explanation.request_features is not None
+            and self.explanation.request_features != self.request_features
+        ):
+            msg = "explanation.request_features must match request_features"
+            raise ValueError(msg)
+        if self.explanation is not None:
+            if self.explanation.policy_reference is None:
+                self.explanation.policy_reference = self.policy_reference
+            elif self.explanation.policy_reference != self.policy_reference:
+                msg = "explanation.policy_reference must match policy_reference"
+                raise ValueError(msg)
         if (
             self.selected_deployment is not None
             and self.selected_deployment.name != self.backend_name

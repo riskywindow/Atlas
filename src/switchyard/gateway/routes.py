@@ -37,6 +37,8 @@ from switchyard.schemas.routing import (
     RolloutDisposition,
     RouteAnnotations,
     RouteDecision,
+    RouteExecutionObservation,
+    RouteSelectionReasonCode,
     RoutingPolicy,
     SessionAffinityKey,
     TenantTier,
@@ -472,10 +474,22 @@ async def _stream_chat_completion(
                     fallback_used=attempt_number > 1,
                 )
                 if emitted_chunk:
+                    failed_latency_ms = (perf_counter() - execution_start) * 1000
+                    failed_output_tokens = estimate_token_count("".join(output_fragments).strip())
                     _set_execution_outcome(
                         decision,
                         executed_backend=backend_name,
                         fallback_used=attempt_number > 1,
+                        final_outcome="failed_after_stream_started",
+                    )
+                    _record_execution_observation(
+                        decision,
+                        executed_backend=backend_name,
+                        latency_ms=failed_latency_ms,
+                        ttft_ms=ttft_ms,
+                        output_tokens=failed_output_tokens,
+                        status_code=503,
+                        error_category="stream_error",
                         final_outcome="failed_after_stream_started",
                     )
                     await services.trace_capture.capture_chat_completion(
@@ -488,12 +502,12 @@ async def _stream_chat_completion(
                         chosen_backend=backend_name,
                         stream=True,
                         status_code=503,
-                        latency_ms=(perf_counter() - execution_start) * 1000,
+                        latency_ms=failed_latency_ms,
                         ttft_ms=ttft_ms,
-                        output_tokens=estimate_token_count("".join(output_fragments).strip()),
+                        output_tokens=failed_output_tokens,
                         fallback_used=attempt_number > 1,
                         error=str(exc),
-                error_category="stream_error",
+                        error_category="stream_error",
                         request_payload=chat_request,
                         response_payload="".join(output_fragments).strip(),
                     )
@@ -553,6 +567,16 @@ async def _stream_chat_completion(
                 fallback_used=attempt_number > 1,
                 final_outcome="succeeded",
             )
+            _record_execution_observation(
+                decision,
+                executed_backend=backend_name,
+                latency_ms=execution.total_latency_ms,
+                ttft_ms=execution.ttft_ms,
+                output_tokens=execution.output_tokens,
+                status_code=200,
+                error_category=None,
+                final_outcome="succeeded",
+            )
             _update_session_affinity(
                 services=services,
                 context=context,
@@ -600,6 +624,16 @@ async def _stream_chat_completion(
             fallback_used=bool(decision.fallback_backends),
             final_outcome="failed_no_safe_fallback",
         )
+        _record_execution_observation(
+            decision,
+            executed_backend=None,
+            latency_ms=(perf_counter() - stream_started) * 1000,
+            ttft_ms=None,
+            output_tokens=None,
+            status_code=503,
+            error_category="execution_error",
+            final_outcome="failed_no_safe_fallback",
+        )
         await services.trace_capture.capture_chat_completion(
             request_timestamp=request_timestamp,
             request_id=context.request_id,
@@ -610,7 +644,12 @@ async def _stream_chat_completion(
             chosen_backend=None,
             stream=True,
             status_code=503,
-            latency_ms=(perf_counter() - stream_started) * 1000,
+            latency_ms=(
+                0.0
+                if decision.execution_observation is None
+                or decision.execution_observation.latency_ms is None
+                else decision.execution_observation.latency_ms
+            ),
             ttft_ms=None,
             output_tokens=None,
             fallback_used=bool(decision.fallback_backends),
@@ -743,7 +782,7 @@ async def _generate_with_fallback(
             selected_by_router=attempt_number == 1,
             outcome="succeeded",
         )
-        services.telemetry.record_backend_execution(
+        execution = services.telemetry.record_backend_execution(
             route=route,
             method=method,
             status_code=200,
@@ -757,6 +796,16 @@ async def _generate_with_fallback(
             decision,
             executed_backend=backend_name,
             fallback_used=attempt_number > 1,
+            final_outcome="succeeded",
+        )
+        _record_execution_observation(
+            decision,
+            executed_backend=backend_name,
+            latency_ms=execution.total_latency_ms,
+            ttft_ms=execution.ttft_ms,
+            output_tokens=execution.output_tokens,
+            status_code=200,
+            error_category=None,
             final_outcome="succeeded",
         )
         _update_session_affinity(
@@ -777,6 +826,16 @@ async def _generate_with_fallback(
         decision,
         executed_backend=None,
         fallback_used=bool(decision.fallback_backends),
+        final_outcome="failed_no_safe_fallback",
+    )
+    _record_execution_observation(
+        decision,
+        executed_backend=None,
+        latency_ms=None,
+        ttft_ms=None,
+        output_tokens=None,
+        status_code=503,
+        error_category="execution_error",
         final_outcome="failed_no_safe_fallback",
     )
     raise BackendExecutionExhaustedError(msg)
@@ -843,6 +902,43 @@ def _set_execution_outcome(
     decision.explanation.executed_backend = executed_backend
     decision.explanation.fallback_used = fallback_used
     decision.explanation.final_outcome = final_outcome
+    if (
+        fallback_used
+        and RouteSelectionReasonCode.FALLBACK_EXECUTION
+        not in decision.explanation.selection_reason_codes
+    ):
+        decision.explanation.selection_reason_codes.append(
+            RouteSelectionReasonCode.FALLBACK_EXECUTION
+        )
+
+
+def _record_execution_observation(
+    decision: RouteDecision,
+    *,
+    executed_backend: str | None,
+    latency_ms: float | None,
+    ttft_ms: float | None,
+    output_tokens: int | None,
+    status_code: int | None,
+    error_category: str | None,
+    final_outcome: str,
+) -> None:
+    queue_delay_ms = (
+        None
+        if decision.admission_decision is None
+        else decision.admission_decision.queue_wait_ms
+    )
+    decision.execution_observation = RouteExecutionObservation(
+        executed_backend=executed_backend,
+        backend_instance_id=None,
+        queue_delay_ms=queue_delay_ms,
+        ttft_ms=ttft_ms,
+        latency_ms=latency_ms,
+        output_tokens=output_tokens,
+        status_code=status_code,
+        error_category=error_category,
+        final_outcome=final_outcome,
+    )
 
 
 def _update_session_affinity(

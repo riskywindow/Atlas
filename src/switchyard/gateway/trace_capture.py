@@ -127,6 +127,10 @@ class TraceCaptureService:
                 sticky_route=route_decision.sticky_route,
                 canary_policy=route_decision.canary_policy,
                 shadow_policy=route_decision.shadow_policy,
+                shadow_decision=route_decision.shadow_decision,
+                policy_reference=route_decision.policy_reference,
+                topology_reference=route_decision.topology_reference,
+                execution_observation=route_decision.execution_observation,
                 telemetry_metadata=route_decision.telemetry_metadata,
             )
         elif admission_decision is not None:

@@ -9,22 +9,28 @@ from switchyard.schemas.routing import (
     CanaryPolicy,
     LimiterMode,
     LimiterState,
+    PolicyReference,
     QueueSnapshot,
     RequestClass,
     RequestContext,
+    RequestFeatureVector,
     RouteAnnotations,
     RouteCandidateExplanation,
     RouteDecision,
     RouteEligibilityState,
+    RouteExecutionObservation,
     RouteExplanation,
+    RouteSelectionReasonCode,
     RouteTelemetryMetadata,
     RoutingPolicy,
     SessionAffinityKey,
     ShadowDisposition,
     ShadowPolicy,
+    ShadowRouteEvidence,
     StickyRouteRecord,
     TenantIdentity,
     TenantTier,
+    TopologySnapshotReference,
     WeightedBackendAllocation,
     WorkloadShape,
 )
@@ -97,6 +103,13 @@ def test_route_decision_valid_case() -> None:
             target_backend="mock-b",
             sampling_rate=0.1,
         ),
+        shadow_decision=ShadowRouteEvidence(
+            policy_name="chat-default-shadow",
+            disposition=ShadowDisposition.SHADOWED,
+            target_backend="mock-b",
+            sampling_rate=0.1,
+            decision_reason="launched",
+        ),
         annotations=RouteAnnotations(
             overload_state=AdmissionDecisionState.ADMITTED,
             affinity_disposition=AffinityDisposition.REUSED,
@@ -111,14 +124,55 @@ def test_route_decision_valid_case() -> None:
             canary_enabled=True,
             shadow_enabled=True,
         ),
+        request_features=RequestFeatureVector(
+            message_count=1,
+            user_message_count=1,
+            prompt_character_count=42,
+            prompt_token_estimate=8,
+            max_output_tokens=128,
+            expected_total_tokens=136,
+            repeated_prefix_candidate=True,
+            prefix_character_count=28,
+            prefix_fingerprint="0123456789abcdef",
+            locality_key="abcdef0123456789abcd",
+        ),
+        policy_reference=PolicyReference(policy_id="balanced", policy_version="phase6.v1"),
+        topology_reference=TopologySnapshotReference(
+            topology_snapshot_id="topology-001",
+            capture_source="gateway_admin_runtime",
+            artifact_run_id="run-001",
+        ),
+        execution_observation=RouteExecutionObservation(
+            executed_backend="mock-a",
+            queue_delay_ms=3.0,
+            ttft_ms=12.0,
+            latency_ms=42.0,
+            output_tokens=18,
+            status_code=200,
+            final_outcome="succeeded",
+        ),
         explanation=RouteExplanation(
             serving_target="chat-default",
+            request_features=RequestFeatureVector(
+                message_count=1,
+                user_message_count=1,
+                prompt_character_count=42,
+                prompt_token_estimate=8,
+                max_output_tokens=128,
+                expected_total_tokens=136,
+                repeated_prefix_candidate=True,
+                prefix_character_count=28,
+                prefix_fingerprint="0123456789abcdef",
+                locality_key="abcdef0123456789abcd",
+            ),
+            policy_reference=PolicyReference(policy_id="balanced", policy_version="phase6.v1"),
             candidates=[
                 RouteCandidateExplanation(
                     backend_name="mock-a",
                     serving_target="chat-default",
                     eligibility_state=RouteEligibilityState.ELIGIBLE,
                     score=42.0,
+                    reason_codes=[RouteSelectionReasonCode.POLICY_SCORE],
                     rationale=["lowest observed latency"],
                 ),
                 RouteCandidateExplanation(
@@ -130,6 +184,7 @@ def test_route_decision_valid_case() -> None:
                 ),
             ],
             selected_backend="mock-a",
+            selection_reason_codes=[RouteSelectionReasonCode.POLICY_SCORE],
             selected_reason=["lowest observed latency"],
             tie_breaker="score, latency_ms, backend_name",
         ),
@@ -146,6 +201,14 @@ def test_route_decision_valid_case() -> None:
     )
     assert decision.explanation is not None
     assert decision.explanation.selected_backend == "mock-a"
+    assert decision.explanation.request_features is not None
+    assert decision.explanation.request_features.repeated_prefix_candidate is True
+    assert decision.policy_reference == PolicyReference(
+        policy_id="balanced",
+        policy_version="phase6.v1",
+    )
+    assert decision.execution_observation is not None
+    assert decision.execution_observation.final_outcome == "succeeded"
 
 
 def test_shadow_policy_rejects_multiple_target_kinds() -> None:

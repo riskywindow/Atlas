@@ -24,6 +24,7 @@ from switchyard.schemas.routing import (
     AffinityDisposition,
     CanaryPolicy,
     CircuitBreakerPhase,
+    PolicyReference,
     RequestClass,
     RequestContext,
     RolloutDisposition,
@@ -185,6 +186,13 @@ async def test_router_skips_unavailable_backend() -> None:
     assert decision.considered_backends == ["steady-healthy"]
     assert decision.explanation is not None
     assert decision.explanation.selected_backend == "steady-healthy"
+    assert decision.request_features is not None
+    assert decision.request_features.locality_key
+    assert decision.explanation.request_features == decision.request_features
+    assert decision.policy_reference == PolicyReference(
+        policy_id="latency_first",
+        policy_version="phase6.v1",
+    )
 
 
 @pytest.mark.asyncio
@@ -234,6 +242,9 @@ async def test_router_policies_choose_different_backends_when_tradeoffs_exist() 
     assert local_only_decision.rejected_backends["remote-fast"] == "policy requires a local backend"
     assert quality_decision.selected_deployment is not None
     assert quality_decision.selected_deployment.name == "local-premium"
+    assert quality_decision.request_features is not None
+    assert quality_decision.explanation is not None
+    assert quality_decision.explanation.policy_reference == quality_decision.policy_reference
 
 
 @pytest.mark.asyncio

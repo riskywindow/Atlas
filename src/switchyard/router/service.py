@@ -6,12 +6,14 @@ from switchyard.adapters.registry import AdapterRegistry
 from switchyard.control.affinity import SessionAffinityService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
+from switchyard.router.features import extract_request_feature_vector
 from switchyard.router.policies import CandidateScore, rejection_reason, score_candidate
 from switchyard.schemas.backend import BackendHealthState
 from switchyard.schemas.chat import ChatCompletionRequest
 from switchyard.schemas.routing import (
     AffinityDisposition,
     CircuitBreakerPhase,
+    PolicyReference,
     RequestContext,
     RolloutDisposition,
     RouteAnnotations,
@@ -19,6 +21,7 @@ from switchyard.schemas.routing import (
     RouteDecision,
     RouteEligibilityState,
     RouteExplanation,
+    RouteSelectionReasonCode,
     RouteTelemetryMetadata,
     SessionAffinityKey,
 )
@@ -61,6 +64,8 @@ class RouterService:
         sticky_backend_name: str | None = None
         sticky_route = None
         sticky_lookup_reason: str | None = None
+        request_features = extract_request_feature_vector(request, context)
+        policy_reference = PolicyReference(policy_id=context.policy.value)
         target_snapshot = await self._registry.snapshots_for_target(
             request.model,
             pinned_backend_name=context.internal_backend_pin,
@@ -113,6 +118,7 @@ class RouterService:
                         backend_name=snapshot.name,
                         serving_target=request.model,
                         eligibility_state=RouteEligibilityState.REJECTED,
+                        reason_codes=[],
                         rationale=[f"policy={context.policy.value}"],
                         rejection_reason=rejection.reason,
                         deployment=snapshot.deployment,
@@ -128,6 +134,7 @@ class RouterService:
                     serving_target=request.model,
                     eligibility_state=RouteEligibilityState.ELIGIBLE,
                     score=round(candidate.score, 3),
+                    reason_codes=[RouteSelectionReasonCode.POLICY_SCORE],
                     rationale=candidate.rationale,
                     deployment=snapshot.deployment,
                     engine_type=snapshot.capabilities.engine_type,
@@ -151,6 +158,7 @@ class RouterService:
         )
         chosen = ranked[0]
         chosen_rationale = chosen.rationale
+        selected_reason_codes = [RouteSelectionReasonCode.POLICY_SCORE]
         canary_policy = None
         if (
             context.internal_backend_pin is not None
@@ -173,6 +181,7 @@ class RouterService:
                     f"session_affinity=reused backend={sticky_backend_name}",
                     *sticky_candidate.rationale,
                 ]
+                selected_reason_codes = [RouteSelectionReasonCode.SESSION_AFFINITY]
                 fallback_backends = [
                     candidate.snapshot.name
                     for candidate in ranked
@@ -225,6 +234,7 @@ class RouterService:
                             f"canary_rollout=selected backend={canary_candidate.snapshot.name}",
                             *canary_candidate.rationale,
                         ]
+                        selected_reason_codes = [RouteSelectionReasonCode.CANARY_SELECTED]
                     else:
                         annotations.notes.append(
                             "canary candidate was ineligible; routing stayed on baseline"
@@ -247,6 +257,7 @@ class RouterService:
                             f"canary_rollout=baseline backend={baseline_candidate.snapshot.name}",
                             *baseline_candidate.rationale,
                         ]
+                        selected_reason_codes = [RouteSelectionReasonCode.CANARY_BASELINE]
                     else:
                         annotations.notes.append(
                             "configured canary baseline backend was ineligible; "
@@ -300,11 +311,16 @@ class RouterService:
                 canary_enabled=canary_policy is not None,
                 labels={"request_id": context.request_id},
             ),
+            request_features=request_features,
+            policy_reference=policy_reference,
             selected_deployment=chosen.snapshot.deployment,
             explanation=RouteExplanation(
                 serving_target=request.model,
                 candidates=explanations,
+                request_features=request_features,
+                policy_reference=policy_reference,
                 selected_backend=chosen.snapshot.name,
+                selection_reason_codes=selected_reason_codes,
                 selected_reason=chosen_rationale,
                 tie_breaker="score, latency_ms, backend_name",
             ),

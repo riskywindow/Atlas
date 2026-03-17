@@ -15,51 +15,55 @@ The goal is **not** to build a thin LLM wrapper. The goal is to build a serious 
 ---
 
 ## Current phase
-**Phase 5: portable worker inventory and deployment paths**
+**Phase 6: explainable routing intelligence and offline policy evaluation**
 
-Phase 5 builds on the Phase 4 routing and benchmarking core with explicit
-network-addressable worker endpoints, portable backend-instance inventory, stronger
-isolation of Apple-specific backend dependencies from the control plane, and
-deployment-aware local run paths. The system should still be Mac-first for real local
-backends, but the control plane, contracts, and benchmark artifacts now need to model
-future remote workers and mixed deployment topologies directly.
+Phase 6 builds on the Phase 5 deployable control plane, explicit worker topology, and
+deployment-aware benchmark artifacts with richer route-decision artifacts, deterministic
+request and workload feature extraction, repeated-prefix and cache/locality-aware
+signals, historical performance summaries, an explainable policy/scorer interface, and
+an offline simulation harness for comparing policies before they touch live traffic.
 
-Phase 5 is explicitly about making the control plane deployable and portable without
-overengineering. Containerization, Docker Compose, a `kind` path, and worker inventory
-must show up in typed contracts, config, docs, and tests rather than living as implied
-tribal knowledge.
+Phase 6 is explicitly about making routing smarter without making it opaque. Adaptive
+behavior, shadow scoring, and historical summaries must be typed, testable, replayable,
+portable to future remote GPU workers, and explainable from artifacts and logs.
 
-### Definition of done for Phase 5
-Phase 5 is complete when all of the following are true:
+### Definition of done for Phase 6
+Phase 6 is complete when all of the following are true:
 1. The repo keeps a clean Python workspace with linting, typing, and tests.
 2. There are at least two real backend adapter paths behind the shared contracts:
    - `mlx_lm`
    - `vllm_metal`
-3. Local model registration supports multiple configured backends without coupling the
-   control plane to Apple-specific runtime details.
-4. The FastAPI gateway still serves `GET /healthz`, `GET /readyz`, and
+3. The FastAPI gateway still serves `GET /healthz`, `GET /readyz`, and
    `POST /v1/chat/completions`, now with health-aware fallback across routed candidates.
-5. Router policy modes, overload admission, backend protection, and progressive-delivery
+4. Router policy modes, overload admission, backend protection, and progressive-delivery
    decisions remain outside the HTTP layer and are benchmarkable without spinning up the
    API.
-6. Structured logging and telemetry include route-level decision, overload, fallback,
+5. Structured logging and telemetry include route-level decision, overload, fallback,
    circuit-breaker, and degradation signals.
-7. Session affinity can keep multi-turn chat on a stable serving path without coupling
+6. Session affinity can keep multi-turn chat on a stable serving path without coupling
    the control plane to hardware-specific logic.
-8. Shadow traffic and canary routing stay explicit, bounded, and safe by default for
+7. Shadow traffic and canary routing stay explicit, bounded, and safe by default for
    local and CI workflows.
    Shadow traffic must never change the primary user-visible response path.
-9. Typed backend inventory can describe multiple backend instances per deployment,
+8. Typed backend inventory can describe multiple backend instances per deployment,
    including explicit network endpoints for future remote or containerized workers.
-10. Apple-specific imports stay lazy and optional so CI-friendly tests do not require
+9. Apple-specific imports stay lazy and optional so CI-friendly tests do not require
    Apple GPU hardware and portable control-plane images do not pull those dependencies in
    by default.
-11. The control plane has a containerized local deployment path, a Docker Compose stack,
+10. The control plane has a containerized local deployment path, a Docker Compose stack,
    and a documented `kind` path that preserve the single-workspace developer model.
-12. Benchmark and replay tooling can compare aliases, policies, pinned backends,
+11. Benchmark and replay tooling can compare aliases, policies, pinned backends,
    deployment variants, and progressive-delivery variants with machine-readable
    artifacts and readable markdown reports.
-13. Deployment docs and runbooks cover local host-native backends, containerized control
+12. Route decisions and benchmark/replay artifacts carry deterministic request and
+    workload features, including repeated-prefix and locality signals, without exposing
+    opaque hardware-specific routing logic.
+13. Historical performance summaries and policy/scorer explanations are serializable,
+    diffable, and usable by offline policy-comparison workflows.
+14. An offline simulation harness can compare baseline, shadow-scored, and guarded
+    adaptive policies against captured or synthetic traces without requiring Apple GPU
+    access in CI.
+15. Deployment docs and runbooks cover local host-native backends, containerized control
    plane operation, and future remote-worker extension points without assuming Apple GPU
    access in CI.
 
@@ -71,22 +75,22 @@ Phase 5 is complete when all of the following are true:
 - Primary development machine: **Apple Silicon Mac (M4 Pro, 24GB RAM)**.
 - During the Mac-first phase, **real model backends should run host-native on macOS**.
 - Containerized services are fine for infra such as Postgres, Redis, Prometheus, Grafana, and the OpenTelemetry Collector.
-- Do **not** add CUDA-only or Triton-only runtime dependencies in Phase 5.
+- Do **not** add CUDA-only or Triton-only runtime dependencies in Phase 6.
 - Keep the design explicitly portable so later phases can add `vllm_cuda` or other remote GPU workers.
 
 ### Scope constraints
-- Phase 5 should preserve **two real Mac-native backend paths** behind the same adapter boundary:
+- Phase 6 should preserve **two real Mac-native backend paths** behind the same adapter boundary:
   - `mlx_lm`
   - `vllm_metal`
 - A single logical model alias may map to multiple backend implementations. Registration, routing, and benchmarks should preserve that abstraction instead of assuming one alias implies one runtime.
 - A single logical backend deployment may map to multiple explicit worker instances with
   distinct network addresses. Inventory should stay typed and portable to future remote
   workers.
-- Avoid premature multi-service complexity. In Phase 5, a **single Python workspace** is still preferred over many separate packages.
+- Avoid premature multi-service complexity. In Phase 6, a **single Python workspace** is still preferred over many separate packages.
 - Do not build a frontend UI yet.
 - A small `kind` deployment path is in scope, but avoid a production-grade Kubernetes
   platform build-out.
-- Do not introduce Ray into the request path in Phase 5.
+- Do not introduce Ray into the request path in Phase 6.
 
 ### Quality constraints
 - Prefer **small vertical slices** over giant speculative scaffolding.
@@ -123,7 +127,7 @@ Phase 5 is complete when all of the following are true:
 
 ---
 
-## Recommended stack for Phase 5
+## Recommended stack for Phase 6
 - Python 3.12
 - `uv` for environment and dependency management
 - FastAPI
@@ -231,11 +235,14 @@ Create typed schemas for:
 - `RequestContext`
 - `WorkloadShape`
 
-Phase 5 routing decisions should keep enough information to support:
+Phase 6 routing decisions should keep enough information to support:
 - route-level observability,
 - health-aware fallback,
 - bounded admission and backend protection,
 - session affinity and progressive delivery,
+- deterministic request and workload feature extraction,
+- repeated-prefix and locality-aware routing signals,
+- scorer explanations and shadow scoring,
 - comparative policy benchmarking.
 
 ### Benchmark schemas
@@ -246,7 +253,7 @@ Create typed schemas for:
 - `BenchmarkRunArtifact`
 
 Artifacts should be reproducible and serializable.
-Phase 5 may add replay-, overload-, deployment-, and comparison-oriented schemas as long
+Phase 6 may add replay-, overload-, deployment-, comparison-, and simulation-oriented schemas as long
 as the JSON remains easy to diff and archive.
 
 ---
@@ -421,15 +428,15 @@ When choosing between multiple valid next steps, prefer this order:
 8. Benchmark artifact format and CLI
 9. Documentation and dev ergonomics
 
-## Phase 5 implementation priorities
+## Phase 6 implementation priorities
 When choosing between multiple valid next steps, prefer this order:
 1. Keep the shared contracts, routing core, and test baseline clean
-2. Add explicit worker inventory and network endpoint modeling in small slices
-3. Isolate Apple-specific runtime dependencies from the portable control-plane packaging
-4. Add containerized control-plane, Docker Compose, and `kind` deployment paths with safe defaults
-5. Extend benchmarks, replay, reports, and runbooks to cover deployment-aware execution
+2. Add deterministic request and workload feature extraction in small typed slices
+3. Add explainable scorer and policy interfaces before adaptive behavior
+4. Extend artifacts, replay, and offline simulation before live adaptive routing
+5. Keep Apple-specific runtime dependencies isolated from the portable control-plane packaging
 6. Preserve adapter portability for future `vllm_cuda`, cloud, and remote workers
-7. Update documentation and local dev ergonomics
+7. Update deployment docs, routing docs, and local dev ergonomics
 
 ---
 

@@ -2614,6 +2614,10 @@ def _control_plane_metadata_from_response(
             sticky_route=route_decision.sticky_route,
             canary_policy=route_decision.canary_policy,
             shadow_policy=route_decision.shadow_policy,
+            shadow_decision=route_decision.shadow_decision,
+            policy_reference=route_decision.policy_reference,
+            topology_reference=route_decision.topology_reference,
+            execution_observation=route_decision.execution_observation,
             telemetry_metadata=route_decision.telemetry_metadata,
         )
     return ControlPlaneReportMetadata(
@@ -3038,6 +3042,9 @@ def _planned_replay_requests(
                 tenant_id=trace.tenant_id,
                 request_class=trace.request_class,
                 session_id=trace.session_id,
+                request_features=trace.request_features,
+                policy_reference=trace.policy_reference,
+                topology_reference=trace.topology_reference,
                 metadata={"original_capture_mode": trace.capture_mode.value},
             )
         )

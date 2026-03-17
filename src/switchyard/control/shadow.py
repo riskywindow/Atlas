@@ -18,8 +18,10 @@ from switchyard.schemas.routing import (
     RequestContext,
     RouteAnnotations,
     RouteDecision,
+    RouteSelectionReasonCode,
     ShadowDisposition,
     ShadowPolicy,
+    ShadowRouteEvidence,
 )
 from switchyard.telemetry import BackendLabels, Telemetry
 
@@ -64,15 +66,18 @@ class ShadowTrafficService:
         annotations = _ensure_shadow_annotations(decision)
         if not self.enabled:
             annotations.shadow_disposition = ShadowDisposition.DISABLED
+            decision.shadow_decision = None
             return None
         if context.internal_backend_pin is not None:
             annotations.shadow_disposition = ShadowDisposition.SKIPPED
             annotations.notes.append("shadow traffic skipped for internally pinned requests")
+            decision.shadow_decision = None
             return None
 
         policy = self._matching_policy(request=request, context=context)
         if policy is None:
             annotations.shadow_disposition = ShadowDisposition.SKIPPED
+            decision.shadow_decision = None
             return None
 
         decision.shadow_policy = policy
@@ -80,6 +85,14 @@ class ShadowTrafficService:
             annotations.shadow_disposition = ShadowDisposition.SKIPPED
             annotations.notes.append(
                 f"shadow policy '{policy.policy_name}' skipped by sampling"
+            )
+            decision.shadow_decision = ShadowRouteEvidence(
+                policy_name=policy.policy_name,
+                disposition=ShadowDisposition.SKIPPED,
+                target_backend=policy.target_backend,
+                target_alias=policy.target_alias,
+                sampling_rate=policy.sampling_rate,
+                decision_reason="sampling_skipped",
             )
             return None
 
@@ -89,12 +102,36 @@ class ShadowTrafficService:
                 "shadow policy "
                 f"'{policy.policy_name}' resolved to primary backend '{primary_backend_name}'"
             )
+            decision.shadow_decision = ShadowRouteEvidence(
+                policy_name=policy.policy_name,
+                disposition=ShadowDisposition.SKIPPED,
+                target_backend=policy.target_backend,
+                target_alias=policy.target_alias,
+                sampling_rate=policy.sampling_rate,
+                decision_reason="resolved_to_primary_backend",
+            )
             return None
 
         annotations.shadow_disposition = ShadowDisposition.SHADOWED
         annotations.notes.append(f"shadow policy '{policy.policy_name}' launched")
         if decision.telemetry_metadata is not None:
             decision.telemetry_metadata.shadow_enabled = True
+        if (
+            decision.explanation is not None
+            and RouteSelectionReasonCode.SHADOW_LAUNCHED
+            not in decision.explanation.selection_reason_codes
+        ):
+            decision.explanation.selection_reason_codes.append(
+                RouteSelectionReasonCode.SHADOW_LAUNCHED
+            )
+        decision.shadow_decision = ShadowRouteEvidence(
+            policy_name=policy.policy_name,
+            disposition=ShadowDisposition.SHADOWED,
+            target_backend=policy.target_backend,
+            target_alias=policy.target_alias,
+            sampling_rate=policy.sampling_rate,
+            decision_reason="launched",
+        )
         return ShadowLaunchPlan(
             primary_request_id=context.request_id,
             shadow_request_id=f"{context.request_id}:shadow:{policy.policy_name}",

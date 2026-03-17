@@ -41,6 +41,7 @@ from switchyard.config import AppEnvironment, Settings
 from switchyard.gateway import create_app
 from switchyard.schemas.backend import BackendCapabilities, BackendType, DeviceClass
 from switchyard.schemas.benchmark import (
+    BenchmarkArtifactSchemaVersion,
     BenchmarkDeploymentTarget,
     BenchmarkEnvironmentMetadata,
     BenchmarkRequestRecord,
@@ -1214,6 +1215,31 @@ async def test_load_benchmark_artifact_model_round_trips_run_artifact(tmp_path: 
 
     assert isinstance(loaded, BenchmarkRunArtifact)
     assert loaded.run_id == artifact.run_id
+
+
+@pytest.mark.asyncio
+async def test_load_benchmark_artifact_model_accepts_v2_run_artifact_payload(
+    tmp_path: Path,
+) -> None:
+    artifact = await run_synthetic_benchmark(
+        scenario=build_synthetic_scenario(request_count=1),
+        timestamp=datetime(2026, 3, 15, 12, 0, tzinfo=UTC),
+    )
+    payload = artifact.model_dump(mode="json")
+    payload["schema_version"] = BenchmarkArtifactSchemaVersion.V2.value
+    payload["records"][0].pop("request_features", None)
+    payload["records"][0].pop("policy_reference", None)
+    payload["records"][0].pop("topology_reference", None)
+    payload["records"][0].pop("execution_observation", None)
+    payload["environment"].pop("topology_reference", None)
+
+    artifact_path = tmp_path / "run-artifact-v2.json"
+    artifact_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_benchmark_artifact_model(artifact_path)
+
+    assert isinstance(loaded, BenchmarkRunArtifact)
+    assert loaded.schema_version is BenchmarkArtifactSchemaVersion.V2
 
 
 def test_summarize_records_includes_phase1_metrics() -> None:

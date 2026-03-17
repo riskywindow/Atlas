@@ -19,13 +19,18 @@ from switchyard.schemas.routing import (
     AdmissionDecision,
     CanaryPolicy,
     CircuitBreakerState,
+    PolicyReference,
     RequestClass,
+    RequestFeatureVector,
     RouteDecision,
+    RouteExecutionObservation,
     RouteExplanation,
     RouteTelemetryMetadata,
     RoutingPolicy,
     ShadowPolicy,
+    ShadowRouteEvidence,
     StickyRouteRecord,
+    TopologySnapshotReference,
     WorkloadShape,
 )
 
@@ -35,6 +40,7 @@ class BenchmarkArtifactSchemaVersion(StrEnum):
 
     V1 = "switchyard.benchmark.v1"
     V2 = "switchyard.benchmark.v2"
+    V3 = "switchyard.benchmark.v3"
 
 
 class WorkloadPattern(StrEnum):
@@ -134,6 +140,10 @@ class ControlPlaneReportMetadata(BaseModel):
     sticky_route: StickyRouteRecord | None = None
     canary_policy: CanaryPolicy | None = None
     shadow_policy: ShadowPolicy | None = None
+    shadow_decision: ShadowRouteEvidence | None = None
+    policy_reference: PolicyReference | None = None
+    topology_reference: TopologySnapshotReference | None = None
+    execution_observation: RouteExecutionObservation | None = None
     telemetry_metadata: RouteTelemetryMetadata | None = None
 
 
@@ -306,6 +316,9 @@ class CapturedTraceRecord(BaseModel):
     tenant_id: str = Field(default="default", min_length=1, max_length=128)
     request_class: RequestClass = RequestClass.STANDARD
     session_id: str | None = Field(default=None, min_length=1, max_length=128)
+    request_features: RequestFeatureVector | None = None
+    policy_reference: PolicyReference | None = None
+    topology_reference: TopologySnapshotReference | None = None
     route_decision: RouteDecision | None = None
     chosen_backend: str | None = Field(default=None, min_length=1, max_length=128)
     stream: bool = False
@@ -331,6 +344,13 @@ class CapturedTraceRecord(BaseModel):
             self.request_class = self.route_decision.telemetry_metadata.request_class
             if self.route_decision.session_affinity_key is not None:
                 self.session_id = self.route_decision.session_affinity_key.session_id
+        if self.route_decision is not None:
+            if self.request_features is None:
+                self.request_features = self.route_decision.request_features
+            if self.policy_reference is None:
+                self.policy_reference = self.route_decision.policy_reference
+            if self.topology_reference is None:
+                self.topology_reference = self.route_decision.topology_reference
         if self.status_code is not None and self.status_code >= 400 and self.error is None:
             msg = "failed trace records must include an error message"
             raise ValueError(msg)
@@ -345,7 +365,7 @@ class ReplayPlan(BaseModel):
     plan_id: str = Field(min_length=1, max_length=128)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     source_run_id: str = Field(min_length=1, max_length=128)
-    source_schema_version: BenchmarkArtifactSchemaVersion = BenchmarkArtifactSchemaVersion.V2
+    source_schema_version: BenchmarkArtifactSchemaVersion = BenchmarkArtifactSchemaVersion.V3
     execution_target: ExecutionTarget
     replay_mode: ReplayMode = ReplayMode.SEQUENTIAL
     concurrency: int = Field(default=1, ge=1, le=1024)
@@ -391,6 +411,9 @@ class ReplayRequest(BaseModel):
     tenant_id: str = Field(default="default", min_length=1, max_length=128)
     request_class: RequestClass = RequestClass.STANDARD
     session_id: str | None = Field(default=None, min_length=1, max_length=128)
+    request_features: RequestFeatureVector | None = None
+    policy_reference: PolicyReference | None = None
+    topology_reference: TopologySnapshotReference | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
@@ -478,7 +501,7 @@ class BenchmarkTargetComparisonArtifact(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: BenchmarkArtifactSchemaVersion = BenchmarkArtifactSchemaVersion.V2
+    schema_version: BenchmarkArtifactSchemaVersion = BenchmarkArtifactSchemaVersion.V3
     comparison_id: str = Field(min_length=1, max_length=128)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     source_kind: ComparisonSourceKind
@@ -577,7 +600,11 @@ class BenchmarkRequestRecord(BaseModel):
     tenant_id: str = Field(default="default", min_length=1, max_length=128)
     request_class: RequestClass = RequestClass.STANDARD
     session_id: str | None = Field(default=None, min_length=1, max_length=128)
+    request_features: RequestFeatureVector | None = None
+    policy_reference: PolicyReference | None = None
+    topology_reference: TopologySnapshotReference | None = None
     backend_name: str = Field(min_length=1, max_length=128)
+    backend_instance_id: str | None = Field(default=None, min_length=1, max_length=128)
     backend_type: str | None = Field(default=None, min_length=1, max_length=64)
     model_alias: str | None = Field(default=None, min_length=1, max_length=128)
     model_identifier: str | None = Field(default=None, min_length=1, max_length=512)
@@ -587,6 +614,7 @@ class BenchmarkRequestRecord(BaseModel):
     ttft_ms: float | None = Field(default=None, ge=0.0)
     output_tokens: int | None = Field(default=None, ge=0)
     tokens_per_second: float | None = Field(default=None, ge=0.0)
+    queue_delay_ms: float | None = Field(default=None, ge=0.0)
     routing_policy: RoutingPolicy | None = None
     route_candidate_count: int | None = Field(default=None, ge=1)
     fallback_used: bool = False
@@ -594,6 +622,7 @@ class BenchmarkRequestRecord(BaseModel):
     route_reason: str | None = Field(default=None, min_length=1, max_length=512)
     route_explanation: RouteExplanation | None = None
     route_decision: RouteDecision | None = None
+    execution_observation: RouteExecutionObservation | None = None
     control_plane_metadata: ControlPlaneReportMetadata | None = None
     success: bool
     status_code: int = Field(ge=100, le=599)
@@ -617,6 +646,14 @@ class BenchmarkRequestRecord(BaseModel):
         if self.route_decision is not None:
             if self.routing_policy is None:
                 self.routing_policy = self.route_decision.policy
+            if self.request_features is None:
+                self.request_features = self.route_decision.request_features
+            if self.policy_reference is None:
+                self.policy_reference = self.route_decision.policy_reference
+            if self.topology_reference is None:
+                self.topology_reference = self.route_decision.topology_reference
+            if self.execution_observation is None:
+                self.execution_observation = self.route_decision.execution_observation
             if self.route_candidate_count is None:
                 self.route_candidate_count = len(self.route_decision.considered_backends)
             if self.route_explanation is None:
@@ -642,8 +679,17 @@ class BenchmarkRequestRecord(BaseModel):
                         sticky_route=self.route_decision.sticky_route,
                         canary_policy=self.route_decision.canary_policy,
                         shadow_policy=self.route_decision.shadow_policy,
+                        shadow_decision=self.route_decision.shadow_decision,
+                        policy_reference=self.route_decision.policy_reference,
+                        topology_reference=self.route_decision.topology_reference,
+                        execution_observation=self.route_decision.execution_observation,
                         telemetry_metadata=telemetry_metadata,
                     )
+        if self.execution_observation is not None:
+            if self.backend_instance_id is None:
+                self.backend_instance_id = self.execution_observation.backend_instance_id
+            if self.queue_delay_ms is None:
+                self.queue_delay_ms = self.execution_observation.queue_delay_ms
         if self.route_explanation is not None:
             compact_reason = self.route_explanation.compact_reason()
             if self.route_reason is None:
@@ -747,6 +793,7 @@ class BenchmarkEnvironmentMetadata(EnvironmentSnapshot):
     worker_instance_inventory: list[BackendInstance] = Field(default_factory=list)
     control_plane_image: BackendImageMetadata | None = None
     topology_capture_source: str | None = Field(default=None, min_length=1, max_length=128)
+    topology_reference: TopologySnapshotReference | None = None
     control_plane_metadata: ControlPlaneReportMetadata | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
 
@@ -756,7 +803,7 @@ class BenchmarkRunArtifact(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: BenchmarkArtifactSchemaVersion = BenchmarkArtifactSchemaVersion.V2
+    schema_version: BenchmarkArtifactSchemaVersion = BenchmarkArtifactSchemaVersion.V3
     run_id: str = Field(min_length=1, max_length=128)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     git_sha: str | None = Field(default=None, min_length=7, max_length=40)
@@ -811,6 +858,19 @@ class BenchmarkRunArtifact(BaseModel):
             self.model_alias = self.execution_target.model_alias
         if self.environment_snapshot is None:
             self.environment_snapshot = EnvironmentSnapshot.from_environment(self.environment)
+        if (
+            self.environment.topology_reference is None
+            and self.environment.topology_capture_source is not None
+        ):
+            self.environment.topology_reference = TopologySnapshotReference(
+                topology_snapshot_id=self.run_id,
+                capture_source=self.environment.topology_capture_source,
+                artifact_run_id=self.run_id,
+            )
+        if self.environment.topology_reference is not None:
+            for record in self.records:
+                if record.topology_reference is None:
+                    record.topology_reference = self.environment.topology_reference
         return self
 
 
@@ -845,7 +905,7 @@ class BenchmarkComparisonArtifact(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: BenchmarkArtifactSchemaVersion = BenchmarkArtifactSchemaVersion.V2
+    schema_version: BenchmarkArtifactSchemaVersion = BenchmarkArtifactSchemaVersion.V3
     run_id: str = Field(min_length=1, max_length=128)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     scenario_name: str = Field(min_length=1, max_length=128)
