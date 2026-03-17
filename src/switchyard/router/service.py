@@ -8,13 +8,15 @@ from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
 from switchyard.control.locality import PrefixLocalityService
 from switchyard.router.features import extract_request_feature_vector
-from switchyard.router.policies import CandidateScore, rejection_reason, score_candidate
+from switchyard.router.policies import (
+    PolicyRegistry,
+    rejection_reason,
+)
 from switchyard.schemas.backend import BackendHealthState
 from switchyard.schemas.chat import ChatCompletionRequest
 from switchyard.schemas.routing import (
     AffinityDisposition,
     CircuitBreakerPhase,
-    PolicyReference,
     RequestContext,
     RolloutDisposition,
     RouteAnnotations,
@@ -42,12 +44,14 @@ class RouterService:
         session_affinity: SessionAffinityService | None = None,
         prefix_locality: PrefixLocalityService | None = None,
         canary_routing: CanaryRoutingService | None = None,
+        policy_registry: PolicyRegistry | None = None,
     ) -> None:
         self._registry = registry
         self._circuit_breaker = circuit_breaker
         self._session_affinity = session_affinity
         self._prefix_locality = prefix_locality
         self._canary_routing = canary_routing
+        self._policy_registry = policy_registry or PolicyRegistry()
 
     async def route(
         self,
@@ -59,7 +63,7 @@ class RouterService:
         rejected_backends: dict[str, str] = {}
         admission_limited_backends: dict[str, str] = {}
         protected_backends: dict[str, str] = {}
-        candidates: list[CandidateScore] = []
+        eligible_snapshots = []
         explanations: list[RouteCandidateExplanation] = []
         degraded_backends: list[str] = []
         annotations = RouteAnnotations()
@@ -71,7 +75,6 @@ class RouterService:
             request, context
         )
         context.request_features = request_features
-        policy_reference = PolicyReference(policy_id=context.policy.value)
         target_snapshot = await self._registry.snapshots_for_target(
             request.model,
             pinned_backend_name=context.internal_backend_pin,
@@ -132,43 +135,36 @@ class RouterService:
                     )
                 )
                 continue
-            candidate = score_candidate(snapshot=snapshot, policy=context.policy)
-            candidates.append(candidate)
-            explanations.append(
-                RouteCandidateExplanation(
-                    backend_name=snapshot.name,
-                    serving_target=request.model,
-                    eligibility_state=RouteEligibilityState.ELIGIBLE,
-                    score=round(candidate.score, 3),
-                    reason_codes=[RouteSelectionReasonCode.POLICY_SCORE],
-                    rationale=candidate.rationale,
-                    deployment=snapshot.deployment,
-                    engine_type=snapshot.capabilities.engine_type,
-                )
-            )
+            eligible_snapshots.append(snapshot)
 
-        if not candidates:
+        if not eligible_snapshots:
             msg = (
                 f"no backend available for model '{request.model}' "
                 f"under policy '{context.policy.value}'"
             )
             raise NoRouteAvailableError(msg)
 
-        ranked = sorted(
-            candidates,
-            key=lambda candidate: (
-                -candidate.score,
-                candidate.snapshot.health.latency_ms or float("inf"),
-                candidate.snapshot.name,
-            ),
+        primary_policy = self._policy_registry.resolve(context.policy)
+        primary_evaluation = primary_policy.evaluate(
+            request=request,
+            context=context,
+            candidates=eligible_snapshots,
         )
+        explanations.extend(
+            assessment.to_explanation(serving_target=request.model)
+            for assessment in primary_evaluation.assessments
+        )
+        ranked = primary_evaluation.ranked_backends()
+        assessment_by_backend = {
+            assessment.snapshot.name: assessment for assessment in primary_evaluation.assessments
+        }
         prefix_locality_signal = (
             None
             if self._prefix_locality is None
             else self._prefix_locality.inspect(
                 serving_target=request.model,
                 request_features=request_features,
-                candidate_backends=[candidate.snapshot.name for candidate in ranked],
+                candidate_backends=ranked,
                 sticky_backend_name=sticky_backend_name,
                 session_affinity_enabled=(
                     affinity_key is not None
@@ -184,9 +180,17 @@ class RouterService:
                 "prefix locality preferred backend differs from the current "
                 "session affinity binding"
             )
-        chosen = ranked[0]
-        chosen_rationale = chosen.rationale
-        selected_reason_codes = [RouteSelectionReasonCode.POLICY_SCORE]
+        shadow_evaluations = [
+            shadow_policy.evaluate(
+                request=request,
+                context=context,
+                candidates=eligible_snapshots,
+            ).to_shadow_explanation(serving_target=request.model)
+            for shadow_policy in self._policy_registry.shadow_policies
+        ]
+        chosen = primary_evaluation.selected_assessment()
+        chosen_rationale = list(primary_evaluation.selected_reason)
+        selected_reason_codes = list(primary_evaluation.selected_reason_codes)
         canary_policy = None
         if (
             context.internal_backend_pin is not None
@@ -197,9 +201,9 @@ class RouterService:
         if sticky_backend_name is not None:
             sticky_candidate = next(
                 (
-                    candidate
-                    for candidate in ranked
-                    if candidate.snapshot.name == sticky_backend_name
+                    assessment_by_backend[candidate_name]
+                    for candidate_name in ranked
+                    if candidate_name == sticky_backend_name
                 ),
                 None,
             )
@@ -211,9 +215,9 @@ class RouterService:
                 ]
                 selected_reason_codes = [RouteSelectionReasonCode.SESSION_AFFINITY]
                 fallback_backends = [
-                    candidate.snapshot.name
-                    for candidate in ranked
-                    if candidate.snapshot.name != sticky_backend_name
+                    candidate_name
+                    for candidate_name in ranked
+                    if candidate_name != sticky_backend_name
                 ]
                 annotations.affinity_disposition = AffinityDisposition.REUSED
             else:
@@ -229,7 +233,7 @@ class RouterService:
                     annotations.notes.append(reason)
                 if detail not in annotations.notes:
                     annotations.notes.append(detail)
-                fallback_backends = [candidate.snapshot.name for candidate in ranked[1:]]
+                fallback_backends = ranked[1:]
         else:
             canary_service = self._canary_routing
             if canary_service is not None:
@@ -250,9 +254,9 @@ class RouterService:
                 ):
                     canary_candidate = next(
                         (
-                            candidate
-                            for candidate in ranked
-                            if candidate.snapshot.name == canary_selection.selected_backend
+                            assessment_by_backend[candidate_name]
+                            for candidate_name in ranked
+                            if candidate_name == canary_selection.selected_backend
                         ),
                         None,
                     )
@@ -273,9 +277,9 @@ class RouterService:
                 ):
                     baseline_candidate = next(
                         (
-                            candidate
-                            for candidate in ranked
-                            if candidate.snapshot.name == canary_selection.selected_backend
+                            assessment_by_backend[candidate_name]
+                            for candidate_name in ranked
+                            if candidate_name == canary_selection.selected_backend
                         ),
                         None,
                     )
@@ -292,11 +296,12 @@ class RouterService:
                             "using scored baseline"
                         )
             fallback_backends = [
-                candidate.snapshot.name
-                for candidate in ranked
-                if candidate.snapshot.name != chosen.snapshot.name
+                candidate_name
+                for candidate_name in ranked
+                if candidate_name != chosen.snapshot.name
             ]
         considered_backends = [chosen.snapshot.name, *fallback_backends]
+        policy_reference = primary_evaluation.policy_reference
 
         return RouteDecision(
             backend_name=chosen.snapshot.name,
@@ -305,7 +310,7 @@ class RouterService:
             request_id=context.request_id,
             workload_shape=context.workload_shape,
             rationale=chosen_rationale,
-            score=round(chosen.score, 3),
+            score=None if chosen.score is None else round(chosen.score, 3),
             considered_backends=considered_backends,
             rejected_backends=rejected_backends,
             admission_limited_backends=admission_limited_backends,
@@ -352,6 +357,7 @@ class RouterService:
                 selected_backend=chosen.snapshot.name,
                 selection_reason_codes=selected_reason_codes,
                 selected_reason=chosen_rationale,
-                tie_breaker="score, latency_ms, backend_name",
+                tie_breaker=primary_evaluation.tie_breaker,
+                shadow_evaluations=shadow_evaluations,
             ),
         )

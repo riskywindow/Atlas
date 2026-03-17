@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -11,10 +12,12 @@ from switchyard.control.affinity import SessionAffinityService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
 from switchyard.control.locality import PrefixLocalityService
+from switchyard.router.policies import CandidateAssessment, PolicyEvaluation, PolicyRegistry
 from switchyard.router.service import NoRouteAvailableError, RouterService
 from switchyard.schemas.backend import (
     BackendCapabilities,
     BackendHealthState,
+    BackendStatusSnapshot,
     BackendType,
     DeviceClass,
     PerformanceHint,
@@ -30,6 +33,7 @@ from switchyard.schemas.routing import (
     RequestContext,
     RequestFeatureVector,
     RolloutDisposition,
+    RouteSelectionReasonCode,
     RoutingPolicy,
     SessionAffinityKey,
     TenantTier,
@@ -59,6 +63,56 @@ class FakeAffinityClock:
 
     def advance(self, seconds: float) -> None:
         self.value += timedelta(seconds=seconds)
+
+
+class ScoreOverridePolicy:
+    def __init__(
+        self,
+        *,
+        policy_id: str,
+        compatibility_policy: RoutingPolicy | None = None,
+        score_by_backend: dict[str, float],
+        reason_code: RouteSelectionReasonCode = RouteSelectionReasonCode.POLICY_SCORE,
+    ) -> None:
+        self.policy_reference = PolicyReference(
+            policy_id=policy_id,
+            policy_version="phase6.test",
+        )
+        self.compatibility_policy = compatibility_policy
+        self._score_by_backend = score_by_backend
+        self._reason_code = reason_code
+
+    def evaluate(
+        self,
+        *,
+        request: ChatCompletionRequest,
+        context: RequestContext,
+        candidates: Sequence[BackendStatusSnapshot],
+    ) -> PolicyEvaluation:
+        del request, context
+        assessments = sorted(
+            [
+                CandidateAssessment(
+                    snapshot=snapshot,
+                    score=self._score_by_backend[snapshot.name],
+                    eligible=True,
+                    rationale=[
+                        f"policy_id={self.policy_reference.policy_id}",
+                        f"score_override={self._score_by_backend[snapshot.name]:.3f}",
+                    ],
+                    reason_codes=[self._reason_code],
+                )
+                for snapshot in candidates
+            ],
+            key=lambda assessment: (-(assessment.score or float("-inf")), assessment.snapshot.name),
+        )
+        return PolicyEvaluation(
+            policy_reference=self.policy_reference,
+            assessments=assessments,
+            selected_backend=assessments[0].snapshot.name,
+            selected_reason_codes=[self._reason_code],
+            selected_reason=[f"selected_by={self.policy_reference.policy_id}"],
+        )
 
 
 def build_request(model: str = "mock-chat") -> ChatCompletionRequest:
@@ -999,3 +1053,134 @@ async def test_router_rejects_backend_when_request_exceeds_context_window() -> N
 
     assert decision.backend_name == "large-context"
     assert decision.rejected_backends["small-context"] == "request exceeds backend max context"
+
+
+@pytest.mark.asyncio
+async def test_router_compatibility_policy_uses_registry_wrapper() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="remote-fast",
+            latency_ms=5.0,
+            quality_tier=1,
+            device_class=DeviceClass.REMOTE,
+            performance_hint=PerformanceHint.LATENCY_OPTIMIZED,
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="local-balanced",
+            latency_ms=20.0,
+            quality_tier=3,
+            device_class=DeviceClass.CPU,
+            configured_priority=10,
+            configured_weight=2.0,
+            performance_hint=PerformanceHint.BALANCED,
+        )
+    )
+    router = RouterService(registry, policy_registry=PolicyRegistry())
+
+    decision = await router.route(build_request(), build_context(RoutingPolicy.BALANCED))
+
+    assert decision.backend_name == "local-balanced"
+    assert decision.policy_reference == PolicyReference(
+        policy_id="balanced",
+        policy_version="phase6.v1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_router_emits_custom_policy_reason_codes_and_versions() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="alpha",
+            latency_ms=20.0,
+            quality_tier=2,
+            device_class=DeviceClass.CPU,
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="beta",
+            latency_ms=10.0,
+            quality_tier=2,
+            device_class=DeviceClass.CPU,
+        )
+    )
+    custom_policy = ScoreOverridePolicy(
+        policy_id="heuristic-custom-v1",
+        compatibility_policy=RoutingPolicy.BALANCED,
+        score_by_backend={"alpha": 100.0, "beta": 10.0},
+    )
+    router = RouterService(
+        registry,
+        policy_registry=PolicyRegistry(primary_policies=[custom_policy]),
+    )
+
+    decision = await router.route(build_request(), build_context(RoutingPolicy.BALANCED))
+
+    assert decision.backend_name == "alpha"
+    assert decision.policy_reference == PolicyReference(
+        policy_id="heuristic-custom-v1",
+        policy_version="phase6.test",
+    )
+    assert decision.explanation is not None
+    assert decision.explanation.selection_reason_codes == [RouteSelectionReasonCode.POLICY_SCORE]
+    assert decision.explanation.selected_reason == ["selected_by=heuristic-custom-v1"]
+    candidate_scores = {
+        candidate.backend_name: candidate.score for candidate in decision.explanation.candidates
+    }
+    assert candidate_scores == {"alpha": 100.0, "beta": 10.0}
+
+
+@pytest.mark.asyncio
+async def test_router_records_shadow_policy_without_changing_primary_route() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="alpha",
+            latency_ms=20.0,
+            quality_tier=2,
+            device_class=DeviceClass.CPU,
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="beta",
+            latency_ms=10.0,
+            quality_tier=2,
+            device_class=DeviceClass.CPU,
+        )
+    )
+    primary_policy = ScoreOverridePolicy(
+        policy_id="primary-fixed",
+        compatibility_policy=RoutingPolicy.BALANCED,
+        score_by_backend={"alpha": 100.0, "beta": 10.0},
+    )
+    shadow_policy = ScoreOverridePolicy(
+        policy_id="shadow-predictive",
+        score_by_backend={"alpha": 5.0, "beta": 80.0},
+        reason_code=RouteSelectionReasonCode.SHADOW_POLICY_SCORE,
+    )
+    router = RouterService(
+        registry,
+        policy_registry=PolicyRegistry(
+            primary_policies=[primary_policy],
+            shadow_policies=[shadow_policy],
+        ),
+    )
+
+    decision = await router.route(build_request(), build_context(RoutingPolicy.BALANCED))
+
+    assert decision.backend_name == "alpha"
+    assert decision.explanation is not None
+    assert len(decision.explanation.shadow_evaluations) == 1
+    shadow = decision.explanation.shadow_evaluations[0]
+    assert shadow.policy_reference == PolicyReference(
+        policy_id="shadow-predictive",
+        policy_version="phase6.test",
+    )
+    assert shadow.selected_backend == "beta"
+    assert shadow.selection_reason_codes == [RouteSelectionReasonCode.SHADOW_POLICY_SCORE]
+    assert shadow.selected_reason == ["selected_by=shadow-predictive"]

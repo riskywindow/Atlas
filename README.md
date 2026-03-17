@@ -182,6 +182,23 @@ uv run python -m switchyard.bench.cli run-workload \
   --markdown-report
 ```
 
+8. Run offline policy simulation against captured benchmark artifacts:
+
+```bash
+uv run python -m switchyard.bench.cli simulate-policy \
+  benchmarks/20260317T000000Z_balanced.json \
+  --policy-id adaptive-balanced-v1 \
+  --objective balanced \
+  --mode recommend \
+  --require-sufficient-data \
+  --max-predicted-error-rate 0.10 \
+  --max-predicted-latency-regression-ms 25 \
+  --markdown-report
+```
+
+This produces a typed simulation artifact plus a markdown report with counterfactual
+route recommendations, guardrail blocks, and a compact rollout recommendation.
+
 Use the longer guides together:
 
 - [deployment.md](/Users/rishivinodkumar/Atlas/docs/deployment.md)

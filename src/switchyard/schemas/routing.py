@@ -156,6 +156,7 @@ class RouteSelectionReasonCode(StrEnum):
     """Stable reason codes for route selection and analysis."""
 
     POLICY_SCORE = "policy_score"
+    SHADOW_POLICY_SCORE = "shadow_policy_score"
     SESSION_AFFINITY = "session_affinity"
     CANARY_BASELINE = "canary_baseline"
     CANARY_SELECTED = "canary_selected"
@@ -555,6 +556,7 @@ class RouteExplanation(BaseModel):
     fallback_used: bool = False
     execution_events: list[str] = Field(default_factory=list)
     final_outcome: str | None = Field(default=None, min_length=1, max_length=128)
+    shadow_evaluations: list[ShadowPolicyExplanation] = Field(default_factory=list)
 
     def compact_reason(self) -> str:
         """Return a stable, compact explanation string for logs and metrics labels."""
@@ -570,6 +572,19 @@ class RouteExplanation(BaseModel):
         if self.final_outcome is not None:
             parts.append(f"outcome={self.final_outcome}")
         return " | ".join(parts)
+
+
+class ShadowPolicyExplanation(BaseModel):
+    """Non-binding shadow policy/scorer evaluation for the same request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    policy_reference: PolicyReference
+    selected_backend: str = Field(min_length=1, max_length=128)
+    candidates: list[RouteCandidateExplanation] = Field(min_length=1)
+    selection_reason_codes: list[RouteSelectionReasonCode] = Field(default_factory=list)
+    selected_reason: list[str] = Field(default_factory=list)
+    tie_breaker: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class RequestContext(BaseModel):

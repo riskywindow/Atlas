@@ -939,6 +939,142 @@ class HistoricalRouteEstimate(BaseModel):
     rationale: list[str] = Field(default_factory=list)
 
 
+class CounterfactualObjective(StrEnum):
+    """Explainable objectives for offline policy comparison."""
+
+    LATENCY = "latency"
+    THROUGHPUT = "throughput"
+    RELIABILITY = "reliability"
+    BALANCED = "balanced"
+
+
+class AdaptivePolicyMode(StrEnum):
+    """Safe rollout posture for adaptive policy recommendations."""
+
+    SHADOW = "shadow"
+    RECOMMEND = "recommend"
+    GUARDED = "guarded"
+
+
+class AdaptivePolicyGuardrails(BaseModel):
+    """Portable guardrails for safe adaptive recommendations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    require_sufficient_data: bool = True
+    max_predicted_error_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    max_predicted_latency_regression_ms: float | None = Field(default=None, ge=0.0)
+    require_observed_backend_evidence: bool = False
+
+
+class ExplainablePolicySpec(BaseModel):
+    """Serializable offline policy/scorer configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    policy_id: str = Field(min_length=1, max_length=128)
+    policy_version: str = Field(default="phase6.v1", min_length=1, max_length=64)
+    objective: CounterfactualObjective = CounterfactualObjective.BALANCED
+    mode: AdaptivePolicyMode = AdaptivePolicyMode.RECOMMEND
+    min_evidence_count: int = Field(default=3, ge=1, le=100_000)
+    guardrails: AdaptivePolicyGuardrails = Field(default_factory=AdaptivePolicyGuardrails)
+    rationale: list[str] = Field(default_factory=list)
+
+
+class CounterfactualCandidateScore(BaseModel):
+    """Explainable counterfactual score for one backend candidate."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    backend_name: str = Field(min_length=1, max_length=128)
+    score: float | None = None
+    eligible: bool = False
+    rejection_reason: str | None = Field(default=None, min_length=1, max_length=256)
+    estimate: HistoricalRouteEstimate | None = None
+    rationale: list[str] = Field(default_factory=list)
+
+
+class PolicyRecommendation(BaseModel):
+    """One explainable recommendation for a recorded request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    observed_backend: str = Field(min_length=1, max_length=128)
+    recommended_backend: str = Field(min_length=1, max_length=128)
+    recommendation_changed: bool = False
+    guardrail_blocked: bool = False
+    insufficient_data: bool = False
+    rationale: list[str] = Field(default_factory=list)
+
+
+class CounterfactualSimulationRecord(BaseModel):
+    """Per-request offline simulation result for one explainable policy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=128)
+    source_run_id: str | None = Field(default=None, min_length=1, max_length=128)
+    workload_item_id: str | None = Field(default=None, min_length=1, max_length=128)
+    source_trace_record_id: str | None = Field(default=None, min_length=1, max_length=128)
+    model_alias: str | None = Field(default=None, min_length=1, max_length=128)
+    request_class: RequestClass = RequestClass.STANDARD
+    request_features: RequestFeatureVector | None = None
+    observed_backend: str = Field(min_length=1, max_length=128)
+    observed_latency_ms: float = Field(ge=0.0)
+    observed_success: bool
+    candidate_scores: list[CounterfactualCandidateScore] = Field(min_length=1)
+    recommendation: PolicyRecommendation
+
+
+class CounterfactualSimulationSummary(BaseModel):
+    """Aggregate summary for one offline simulation run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_count: int = Field(ge=0)
+    changed_count: int = Field(ge=0)
+    unchanged_count: int = Field(ge=0)
+    insufficient_data_count: int = Field(ge=0)
+    guardrail_block_count: int = Field(ge=0)
+    observed_backend_counts: dict[str, int] = Field(default_factory=dict)
+    recommended_backend_counts: dict[str, int] = Field(default_factory=dict)
+    projected_avg_latency_ms: float | None = Field(default=None, ge=0.0)
+    projected_error_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    projected_avg_tokens_per_second: float | None = Field(default=None, ge=0.0)
+
+    @model_validator(mode="after")
+    def validate_counts(self) -> CounterfactualSimulationSummary:
+        if self.changed_count + self.unchanged_count != self.request_count:
+            msg = "changed_count + unchanged_count must equal request_count"
+            raise ValueError(msg)
+        return self
+
+
+class CounterfactualSimulationArtifact(BaseModel):
+    """Serializable offline simulation artifact for policy comparison."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: BenchmarkArtifactSchemaVersion = BenchmarkArtifactSchemaVersion.V3
+    simulation_id: str = Field(min_length=1, max_length=128)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    source_run_ids: list[str] = Field(default_factory=list)
+    historical_source_run_ids: list[str] = Field(default_factory=list)
+    policy: ExplainablePolicySpec
+    summary: CounterfactualSimulationSummary
+    records: list[CounterfactualSimulationRecord] = Field(default_factory=list)
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_records(self) -> CounterfactualSimulationArtifact:
+        if self.summary.request_count != len(self.records):
+            msg = "summary.request_count must match the number of simulation records"
+            raise ValueError(msg)
+        self.source_run_ids = sorted(set(self.source_run_ids))
+        self.historical_source_run_ids = sorted(set(self.historical_source_run_ids))
+        return self
+
+
 class BenchmarkEnvironmentMetadata(EnvironmentSnapshot):
     """Environment and config details needed to reproduce a benchmark run."""
 

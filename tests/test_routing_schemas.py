@@ -28,6 +28,7 @@ from switchyard.schemas.routing import (
     SessionAffinityKey,
     ShadowDisposition,
     ShadowPolicy,
+    ShadowPolicyExplanation,
     ShadowRouteEvidence,
     StickyRouteRecord,
     TenantIdentity,
@@ -219,6 +220,36 @@ def test_route_decision_valid_case() -> None:
             selection_reason_codes=[RouteSelectionReasonCode.POLICY_SCORE],
             selected_reason=["lowest observed latency"],
             tie_breaker="score, latency_ms, backend_name",
+            shadow_evaluations=[
+                ShadowPolicyExplanation(
+                    policy_reference=PolicyReference(
+                        policy_id="predictive-shadow",
+                        policy_version="phase6.test",
+                    ),
+                    selected_backend="mock-b",
+                    candidates=[
+                        RouteCandidateExplanation(
+                            backend_name="mock-a",
+                            serving_target="chat-default",
+                            eligibility_state=RouteEligibilityState.ELIGIBLE,
+                            score=1.0,
+                            reason_codes=[RouteSelectionReasonCode.SHADOW_POLICY_SCORE],
+                            rationale=["shadow score low"],
+                        ),
+                        RouteCandidateExplanation(
+                            backend_name="mock-b",
+                            serving_target="chat-default",
+                            eligibility_state=RouteEligibilityState.ELIGIBLE,
+                            score=99.0,
+                            reason_codes=[RouteSelectionReasonCode.SHADOW_POLICY_SCORE],
+                            rationale=["shadow score high"],
+                        ),
+                    ],
+                    selection_reason_codes=[RouteSelectionReasonCode.SHADOW_POLICY_SCORE],
+                    selected_reason=["shadow preferred mock-b"],
+                    tie_breaker="score, latency_ms, backend_name",
+                )
+            ],
         ),
     )
 
@@ -243,6 +274,7 @@ def test_route_decision_valid_case() -> None:
     )
     assert decision.execution_observation is not None
     assert decision.execution_observation.final_outcome == "succeeded"
+    assert decision.explanation.shadow_evaluations[0].selected_backend == "mock-b"
 
 
 def test_shadow_policy_rejects_multiple_target_kinds() -> None:

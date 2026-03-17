@@ -217,6 +217,89 @@ def test_generate_report_cli_writes_markdown_from_run_artifact(tmp_path: Path) -
     assert "## Route and Backend Distributions" in markdown
 
 
+def test_simulate_policy_cli_writes_artifact_and_markdown(tmp_path: Path) -> None:
+    runner = CliRunner()
+    artifact = BenchmarkRunArtifact(
+        run_id="simulation-source",
+        scenario=BenchmarkScenario(
+            name="simulation-scenario",
+            model="chat-shared",
+            model_alias="chat-shared",
+            policy=RoutingPolicy.BALANCED,
+            workload_shape=WorkloadShape.INTERACTIVE,
+            request_count=1,
+        ),
+        policy=RoutingPolicy.BALANCED,
+        execution_target=ExecutionTarget(
+            target_type=ExecutionTargetType.LOGICAL_ALIAS,
+            model_alias="chat-shared",
+        ),
+        backends_involved=["mock-a"],
+        backend_types_involved=["mock"],
+        model_aliases_involved=["chat-shared"],
+        request_count=1,
+        summary=BenchmarkSummary(
+            request_count=1,
+            success_count=1,
+            failure_count=0,
+            avg_latency_ms=15.0,
+            p50_latency_ms=15.0,
+            p95_latency_ms=15.0,
+            avg_ttft_ms=5.0,
+            p50_ttft_ms=5.0,
+            p95_ttft_ms=5.0,
+            total_output_tokens=4,
+            avg_output_tokens=4.0,
+            avg_tokens_per_second=8.0,
+            p95_tokens_per_second=8.0,
+            fallback_count=0,
+            chosen_backend_counts={"mock-a": 1},
+        ),
+        environment=BenchmarkEnvironmentMetadata(benchmark_mode="synthetic"),
+        records=[
+            BenchmarkRequestRecord(
+                request_id="req-1",
+                backend_name="mock-a",
+                backend_type="mock",
+                model_alias="chat-shared",
+                started_at=datetime(2026, 3, 16, tzinfo=UTC),
+                completed_at=datetime(2026, 3, 16, tzinfo=UTC),
+                latency_ms=15.0,
+                output_tokens=4,
+                tokens_per_second=8.0,
+                success=True,
+                status_code=200,
+                usage=UsageStats(prompt_tokens=5, completion_tokens=4, total_tokens=9),
+            )
+        ],
+    )
+    artifact_path = tmp_path / "source.json"
+    artifact_path.write_text(artifact.model_dump_json(indent=2), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "simulate-policy",
+            str(artifact_path),
+            "--policy-id",
+            "adaptive-balanced-v1",
+            "--markdown-report",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    simulation_path = Path(result.stdout.strip())
+    payload = json.loads(simulation_path.read_text(encoding="utf-8"))
+    assert payload["policy"]["policy_id"] == "adaptive-balanced-v1"
+    assert payload["summary"]["request_count"] == 1
+    assert "policy_recommendation" in payload["metadata"]
+    report_path = simulation_path.with_suffix(".md")
+    assert report_path.exists()
+    assert "# Switchyard Simulation Report:" in report_path.read_text(encoding="utf-8")
+
+
 def test_run_workload_cli_writes_artifact(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     runner = CliRunner()
     manifest = build_workload_manifest(

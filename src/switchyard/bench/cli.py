@@ -25,6 +25,7 @@ from switchyard.bench.artifacts import (
     load_captured_traces,
     render_artifact_bundle_markdown,
     render_comparison_report_markdown,
+    render_loaded_artifact_markdown,
     render_run_report_markdown,
     render_target_comparison_report_markdown,
     run_gateway_benchmark,
@@ -36,14 +37,23 @@ from switchyard.bench.artifacts import (
     write_json_model,
     write_markdown_report,
 )
+from switchyard.bench.simulation import (
+    recommend_policy_from_simulation,
+    simulate_policy_counterfactual,
+)
 from switchyard.bench.workloads import build_workload_manifest, default_workload_manifest_path
 from switchyard.config import Settings
 from switchyard.schemas.backend import BackendImageMetadata, DeploymentProfile
 from switchyard.schemas.benchmark import (
+    AdaptivePolicyGuardrails,
+    AdaptivePolicyMode,
     BenchmarkDeploymentTarget,
+    BenchmarkRunArtifact,
     BenchmarkWarmupConfig,
+    CounterfactualObjective,
     ExecutionTarget,
     ExecutionTargetType,
+    ExplainablePolicySpec,
     ReplayMode,
     WorkloadGenerationConfig,
     WorkloadPattern,
@@ -617,6 +627,89 @@ def compare_traces(
     typer.echo(output_path)
 
 
+@app.command("simulate-policy")
+def simulate_policy(
+    artifact_path: list[Path] = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="One or more benchmark run artifacts to evaluate.",
+    ),
+    history_artifact_path: list[Path] | None = typer.Option(
+        None,
+        "--history-artifact-path",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="Optional historical benchmark artifacts used as the estimator corpus.",
+    ),
+    policy_id: str = typer.Option(
+        "adaptive-balanced-v1",
+        help="Stable identifier for the simulated explainable policy.",
+    ),
+    objective: CounterfactualObjective = typer.Option(
+        CounterfactualObjective.BALANCED,
+        case_sensitive=False,
+        help="Counterfactual scoring objective.",
+    ),
+    mode: AdaptivePolicyMode = typer.Option(
+        AdaptivePolicyMode.RECOMMEND,
+        case_sensitive=False,
+        help="Safe rollout posture represented by the simulation output.",
+    ),
+    min_evidence_count: int = typer.Option(
+        3,
+        min=1,
+        help="Minimum historical evidence count required by the policy.",
+    ),
+    require_sufficient_data: bool = typer.Option(
+        True,
+        help="Reject candidates without enough historical evidence.",
+    ),
+    max_predicted_error_rate: float | None = typer.Option(
+        None,
+        min=0.0,
+        max=1.0,
+        help="Optional guardrail for predicted error rate.",
+    ),
+    max_predicted_latency_regression_ms: float | None = typer.Option(
+        None,
+        min=0.0,
+        help="Optional guardrail for latency regression versus the observed backend.",
+    ),
+    require_observed_backend_evidence: bool = typer.Option(
+        False,
+        help="Require sufficient evidence for the observed backend before recommending change.",
+    ),
+    output_dir: Path | None = typer.Option(
+        None,
+        help="Directory for the output artifact. Defaults to SWITCHYARD_BENCHMARK_OUTPUT_DIR.",
+    ),
+    markdown_report: bool = typer.Option(
+        False,
+        help="Also write a compact Markdown report next to the JSON artifact.",
+    ),
+) -> None:
+    """Run offline counterfactual policy simulation against benchmark artifacts."""
+
+    output_path = _simulate_policy_command(
+        artifact_paths=artifact_path,
+        history_artifact_paths=history_artifact_path,
+        policy_id=policy_id,
+        objective=objective,
+        mode=mode,
+        min_evidence_count=min_evidence_count,
+        require_sufficient_data=require_sufficient_data,
+        max_predicted_error_rate=max_predicted_error_rate,
+        max_predicted_latency_regression_ms=max_predicted_latency_regression_ms,
+        require_observed_backend_evidence=require_observed_backend_evidence,
+        output_dir=output_dir,
+        markdown_report=markdown_report,
+    )
+    typer.echo(output_path)
+
+
 @app.command("generate-report")
 def generate_report(
     artifact_path: list[Path] = typer.Argument(
@@ -967,6 +1060,63 @@ async def _compare_workload_command(
         write_markdown_report(
             render_target_comparison_report_markdown(artifact),
             default_markdown_report_path(resolved_output_dir, artifact.comparison_id),
+    )
+    return output_path
+
+
+def _simulate_policy_command(
+    *,
+    artifact_paths: list[Path],
+    history_artifact_paths: list[Path] | None,
+    policy_id: str,
+    objective: CounterfactualObjective,
+    mode: AdaptivePolicyMode,
+    min_evidence_count: int,
+    require_sufficient_data: bool,
+    max_predicted_error_rate: float | None,
+    max_predicted_latency_regression_ms: float | None,
+    require_observed_backend_evidence: bool,
+    output_dir: Path | None,
+    markdown_report: bool,
+) -> Path:
+    settings = Settings()
+    evaluation_artifacts = _load_run_artifacts(artifact_paths)
+    historical_artifacts = (
+        evaluation_artifacts
+        if not history_artifact_paths
+        else _load_run_artifacts(history_artifact_paths)
+    )
+    policy = ExplainablePolicySpec(
+        policy_id=policy_id,
+        objective=objective,
+        mode=mode,
+        min_evidence_count=min_evidence_count,
+        guardrails=AdaptivePolicyGuardrails(
+            require_sufficient_data=require_sufficient_data,
+            max_predicted_error_rate=max_predicted_error_rate,
+            max_predicted_latency_regression_ms=max_predicted_latency_regression_ms,
+            require_observed_backend_evidence=require_observed_backend_evidence,
+        ),
+        rationale=[
+            "offline simulation uses typed historical route estimates from benchmark artifacts",
+            "guardrails keep adaptive recommendations explainable and reversible",
+        ],
+    )
+    artifact = simulate_policy_counterfactual(
+        evaluation_artifacts=evaluation_artifacts,
+        history_artifacts=historical_artifacts,
+        policy=policy,
+    )
+    artifact.metadata["policy_recommendation"] = recommend_policy_from_simulation(artifact)
+    resolved_output_dir = output_dir or settings.benchmark_output_dir
+    output_path = write_json_model(
+        artifact,
+        resolved_output_dir / f"{artifact.simulation_id}.json",
+    )
+    if markdown_report:
+        write_markdown_report(
+            render_loaded_artifact_markdown(artifact),
+            default_markdown_report_path(resolved_output_dir, artifact.simulation_id),
         )
     return output_path
 
@@ -1073,6 +1223,17 @@ def _generate_report_command(
     markdown = render_artifact_bundle_markdown(artifacts)
     resolved_output_path = output_path or default_generated_report_path(artifact_paths)
     return write_markdown_report(markdown, resolved_output_path)
+
+
+def _load_run_artifacts(artifact_paths: list[Path]) -> list[BenchmarkRunArtifact]:
+    artifacts: list[BenchmarkRunArtifact] = []
+    for path in artifact_paths:
+        artifact = load_benchmark_artifact_model(path)
+        if not isinstance(artifact, BenchmarkRunArtifact):
+            msg = f"{path} is not a benchmark run artifact"
+            raise typer.BadParameter(msg)
+        artifacts.append(artifact)
+    return artifacts
 
 
 def _control_plane_image_metadata(

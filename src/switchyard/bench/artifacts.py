@@ -57,6 +57,7 @@ from switchyard.schemas.benchmark import (
     CapturedTraceRecord,
     ComparisonSourceKind,
     ControlPlaneReportMetadata,
+    CounterfactualSimulationArtifact,
     DeployedTopologyEndpoint,
     ExecutionTarget,
     ExecutionTargetType,
@@ -1102,10 +1103,17 @@ def write_markdown_report(markdown: str, output_path: Path) -> Path:
 
 def load_benchmark_artifact_model(
     artifact_path: Path,
-) -> BenchmarkRunArtifact | BenchmarkComparisonArtifact | BenchmarkTargetComparisonArtifact:
+) -> (
+    BenchmarkRunArtifact
+    | BenchmarkComparisonArtifact
+    | BenchmarkTargetComparisonArtifact
+    | CounterfactualSimulationArtifact
+):
     """Load a benchmark or comparison artifact from disk."""
 
     payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    if "simulation_id" in payload:
+        return CounterfactualSimulationArtifact.model_validate(payload)
     if "comparison_id" in payload:
         return BenchmarkTargetComparisonArtifact.model_validate(payload)
     if "scenario_name" in payload and "results" in payload:
@@ -1454,11 +1462,66 @@ def render_target_comparison_report_markdown(
     return "\n".join(lines)
 
 
+def render_simulation_report_markdown(artifact: CounterfactualSimulationArtifact) -> str:
+    """Render a compact Markdown report for an offline simulation artifact."""
+
+    recommendation = (
+        "Keep baseline"
+        if artifact.summary.changed_count == 0
+        else (
+            "Bounded rollout candidate"
+            if artifact.summary.changed_count >= max(1, artifact.summary.request_count // 4)
+            else "Recommendation mode candidate"
+        )
+    )
+    lines = [
+        f"# Switchyard Simulation Report: {artifact.simulation_id}",
+        "",
+        "## Run Metadata",
+        f"- Schema version: `{artifact.schema_version.value}`",
+        f"- Timestamp: `{artifact.timestamp.isoformat()}`",
+        f"- Policy ID: `{artifact.policy.policy_id}`",
+        f"- Policy version: `{artifact.policy.policy_version}`",
+        f"- Mode: `{artifact.policy.mode.value}`",
+        f"- Objective: `{artifact.policy.objective.value}`",
+        f"- Minimum evidence count: `{artifact.policy.min_evidence_count}`",
+        f"- Evaluation source runs: `{', '.join(artifact.source_run_ids) or 'none'}`",
+        f"- Historical source runs: `{', '.join(artifact.historical_source_run_ids) or 'none'}`",
+        "",
+        "## Summary",
+        f"- Requests evaluated: `{artifact.summary.request_count}`",
+        f"- Route changes recommended: `{artifact.summary.changed_count}`",
+        f"- Guardrail blocks: `{artifact.summary.guardrail_block_count}`",
+        f"- Insufficient-data requests: `{artifact.summary.insufficient_data_count}`",
+        f"- Projected average latency: `{artifact.summary.projected_avg_latency_ms}`",
+        f"- Projected error rate: `{artifact.summary.projected_error_rate}`",
+        (
+            "- Projected average tokens/sec: "
+            f"`{artifact.summary.projected_avg_tokens_per_second}`"
+        ),
+        "",
+        "## Backend Shifts",
+        f"- Observed backends: {_format_distribution(artifact.summary.observed_backend_counts)}",
+        (
+            "- Recommended backends: "
+            f"{_format_distribution(artifact.summary.recommended_backend_counts)}"
+        ),
+        "",
+        "## Recommendation",
+        f"- Operator posture: `{recommendation}`",
+    ]
+    if artifact.policy.rationale:
+        lines.extend(["", "## Policy Rationale"])
+        lines.extend(f"- {item}" for item in artifact.policy.rationale)
+    return "\n".join(lines)
+
+
 def render_loaded_artifact_markdown(
     artifact: (
         BenchmarkRunArtifact
         | BenchmarkComparisonArtifact
         | BenchmarkTargetComparisonArtifact
+        | CounterfactualSimulationArtifact
     ),
 ) -> str:
     """Render markdown for any supported benchmark artifact type."""
@@ -1467,12 +1530,17 @@ def render_loaded_artifact_markdown(
         return render_run_report_markdown(artifact)
     if isinstance(artifact, BenchmarkTargetComparisonArtifact):
         return render_target_comparison_report_markdown(artifact)
+    if isinstance(artifact, CounterfactualSimulationArtifact):
+        return render_simulation_report_markdown(artifact)
     return render_comparison_report_markdown(artifact)
 
 
 def render_artifact_bundle_markdown(
     artifacts: list[
-        BenchmarkRunArtifact | BenchmarkComparisonArtifact | BenchmarkTargetComparisonArtifact
+        BenchmarkRunArtifact
+        | BenchmarkComparisonArtifact
+        | BenchmarkTargetComparisonArtifact
+        | CounterfactualSimulationArtifact
     ],
 ) -> str:
     """Render a compact markdown bundle for one or more artifacts."""
