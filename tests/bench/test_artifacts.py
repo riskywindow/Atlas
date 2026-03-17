@@ -222,6 +222,24 @@ async def test_run_gateway_benchmark_captures_deployed_topology_metadata() -> No
                 "active_bindings": 0,
                 "bindings_by_target": {},
             },
+            "routing_features": {
+                "feature_version": "phase6.v2",
+                "input_length_buckets": ["tiny", "short", "medium", "long", "very_long"],
+                "history_depth_buckets": ["single_turn", "short_history", "deep_history"],
+                "workload_tags": [
+                    "short_chat",
+                    "long_context",
+                    "repeated_prefix",
+                    "burst_candidate",
+                    "session_continuation",
+                    "streaming",
+                    "latency_sensitive",
+                    "bulk",
+                    "priority_tenant",
+                ],
+                "prefix_fingerprint_algorithm": "sha256_truncated_16_hex",
+                "prefix_plaintext_retained": False,
+            },
         }
 
     @app.post("/v1/chat/completions")

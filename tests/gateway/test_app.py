@@ -2118,3 +2118,5 @@ def test_admin_runtime_endpoint_reports_phase4_runtime_state() -> None:
     assert payload["session_affinity"]["enabled"] is True
     assert payload["session_affinity"]["active_bindings"] == 0
     assert payload["session_affinity"]["bindings_by_target"] == {}
+    assert payload["routing_features"]["feature_version"] == "phase6.v2"
+    assert "repeated_prefix" in payload["routing_features"]["workload_tags"]

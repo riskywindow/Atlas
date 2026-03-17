@@ -33,6 +33,7 @@ from switchyard.schemas.routing import (
     TenantTier,
     WeightedBackendAllocation,
     WorkloadShape,
+    WorkloadTag,
 )
 
 
@@ -189,6 +190,7 @@ async def test_router_skips_unavailable_backend() -> None:
     assert decision.request_features is not None
     assert decision.request_features.locality_key
     assert decision.explanation.request_features == decision.request_features
+    assert WorkloadTag.SHORT_CHAT in decision.request_features.workload_tags
     assert decision.policy_reference == PolicyReference(
         policy_id="latency_first",
         policy_version="phase6.v1",

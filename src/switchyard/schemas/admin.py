@@ -8,7 +8,14 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
 from switchyard.schemas.backend import BackendImageMetadata, DeploymentProfile
-from switchyard.schemas.routing import CanaryPolicy, CircuitBreakerState, ShadowPolicy
+from switchyard.schemas.routing import (
+    CanaryPolicy,
+    CircuitBreakerState,
+    HistoryDepthBucket,
+    InputLengthBucket,
+    ShadowPolicy,
+    WorkloadTag,
+)
 
 
 class BackendRuntimeSummary(BaseModel):
@@ -110,6 +117,19 @@ class SessionAffinityRuntimeSummary(BaseModel):
     bindings_by_target: dict[str, int] = Field(default_factory=dict)
 
 
+class RoutingFeatureRuntimeSummary(BaseModel):
+    """Stable request-feature extraction contract exposed at runtime."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    feature_version: str = Field(min_length=1, max_length=32)
+    input_length_buckets: list[InputLengthBucket] = Field(default_factory=list)
+    history_depth_buckets: list[HistoryDepthBucket] = Field(default_factory=list)
+    workload_tags: list[WorkloadTag] = Field(default_factory=list)
+    prefix_fingerprint_algorithm: str = Field(min_length=1, max_length=64)
+    prefix_plaintext_retained: bool = False
+
+
 class RuntimeInspectionResponse(BaseModel):
     """Top-level runtime inspection payload."""
 
@@ -122,6 +142,7 @@ class RuntimeInspectionResponse(BaseModel):
     canary_routing: CanaryRoutingRuntimeSummary
     shadow_routing: ShadowRoutingRuntimeSummary
     session_affinity: SessionAffinityRuntimeSummary
+    routing_features: RoutingFeatureRuntimeSummary
 
 
 class DiagnosticStatus(StrEnum):

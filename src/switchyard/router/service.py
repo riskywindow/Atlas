@@ -64,7 +64,10 @@ class RouterService:
         sticky_backend_name: str | None = None
         sticky_route = None
         sticky_lookup_reason: str | None = None
-        request_features = extract_request_feature_vector(request, context)
+        request_features = context.request_features or extract_request_feature_vector(
+            request, context
+        )
+        context.request_features = request_features
         policy_reference = PolicyReference(policy_id=context.policy.value)
         target_snapshot = await self._registry.snapshots_for_target(
             request.model,

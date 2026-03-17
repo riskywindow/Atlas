@@ -42,6 +42,38 @@ class WorkloadShape(StrEnum):
     EVALUATION = "evaluation"
 
 
+class InputLengthBucket(StrEnum):
+    """Coarse prompt-size buckets for deterministic routing features."""
+
+    TINY = "tiny"
+    SHORT = "short"
+    MEDIUM = "medium"
+    LONG = "long"
+    VERY_LONG = "very_long"
+
+
+class HistoryDepthBucket(StrEnum):
+    """Coarse conversation-history buckets for deterministic routing features."""
+
+    SINGLE_TURN = "single_turn"
+    SHORT_HISTORY = "short_history"
+    DEEP_HISTORY = "deep_history"
+
+
+class WorkloadTag(StrEnum):
+    """Explainable workload tags derived without model inference."""
+
+    SHORT_CHAT = "short_chat"
+    LONG_CONTEXT = "long_context"
+    REPEATED_PREFIX = "repeated_prefix"
+    BURST_CANDIDATE = "burst_candidate"
+    SESSION_CONTINUATION = "session_continuation"
+    STREAMING = "streaming"
+    LATENCY_SENSITIVE = "latency_sensitive"
+    BULK = "bulk"
+    PRIORITY_TENANT = "priority_tenant"
+
+
 class RouteEligibilityState(StrEnum):
     """Eligibility state for a concrete backend deployment during routing."""
 
@@ -352,7 +384,7 @@ class RequestFeatureVector(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    feature_version: str = Field(default="phase6.v1", min_length=1, max_length=32)
+    feature_version: str = Field(default="phase6.v2", min_length=1, max_length=32)
     message_count: int = Field(ge=1)
     system_message_count: int = Field(default=0, ge=0)
     user_message_count: int = Field(default=0, ge=0)
@@ -362,7 +394,14 @@ class RequestFeatureVector(BaseModel):
     prompt_token_estimate: int = Field(ge=0)
     max_output_tokens: int = Field(ge=1)
     expected_total_tokens: int = Field(ge=1)
+    input_length_bucket: InputLengthBucket = InputLengthBucket.SHORT
+    history_depth_bucket: HistoryDepthBucket = HistoryDepthBucket.SINGLE_TURN
+    workload_tags: list[WorkloadTag] = Field(default_factory=list)
     stream: bool = False
+    request_class: RequestClass = RequestClass.STANDARD
+    tenant_tier: TenantTier = TenantTier.STANDARD
+    internal_backend_pinned: bool = False
+    conversation_continuation: bool = False
     repeated_prefix_candidate: bool = False
     prefix_character_count: int = Field(default=0, ge=0)
     prefix_fingerprint: str | None = Field(default=None, min_length=8, max_length=64)
@@ -503,6 +542,7 @@ class RequestContext(BaseModel):
     session_id: str | None = Field(default=None, min_length=1, max_length=128)
     tenant: TenantIdentity | None = None
     session_affinity_key: SessionAffinityKey | None = None
+    request_features: RequestFeatureVector | None = None
 
     @model_validator(mode="after")
     def validate_phase4_context(self) -> RequestContext:

@@ -69,6 +69,7 @@ from switchyard.schemas.routing import (
     ShadowRouteEvidence,
     TopologySnapshotReference,
     WorkloadShape,
+    WorkloadTag,
 )
 
 
@@ -103,6 +104,7 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
             prompt_token_estimate=10,
             max_output_tokens=256,
             expected_total_tokens=266,
+            workload_tags=[WorkloadTag.REPEATED_PREFIX],
             repeated_prefix_candidate=True,
             prefix_character_count=32,
             prefix_fingerprint="feedfacecafebeef",
@@ -139,6 +141,7 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
                 prompt_token_estimate=10,
                 max_output_tokens=256,
                 expected_total_tokens=266,
+                workload_tags=[WorkloadTag.REPEATED_PREFIX],
                 repeated_prefix_candidate=True,
                 prefix_character_count=32,
                 prefix_fingerprint="feedfacecafebeef",
@@ -284,8 +287,11 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
     assert payload["records"][0]["cache_observation"]["supports_prefix_cache"] is True
     assert payload["records"][0]["route_candidate_count"] == 2
     assert payload["records"][0]["route_decision"]["request_features"]["feature_version"] == (
-        "phase6.v1"
+        "phase6.v2"
     )
+    assert "repeated_prefix" in payload["records"][0]["route_decision"]["request_features"][
+        "workload_tags"
+    ]
     assert payload["records"][0]["execution_observation"]["queue_delay_ms"] == 5.0
     assert payload["records"][0]["topology_reference"]["topology_snapshot_id"] == (
         "topology-run-1"

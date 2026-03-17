@@ -19,6 +19,7 @@ from switchyard.diagnostics import (
 )
 from switchyard.gateway.dependencies import GatewayServices, get_services
 from switchyard.logging import bind_request_context, get_logger
+from switchyard.router.features import routing_feature_runtime_summary
 from switchyard.schemas.admin import (
     DeploymentDiagnosticsResponse,
     RuntimeInspectionResponse,
@@ -110,6 +111,7 @@ async def admin_runtime(
         canary_routing=services.canary.inspect_state(),
         shadow_routing=services.shadow.inspect_state(),
         session_affinity=services.session_affinity.inspect_state(),
+        routing_features=routing_feature_runtime_summary(),
     )
 
 
