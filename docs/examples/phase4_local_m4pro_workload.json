@@ -1,0 +1,95 @@
+{
+  "name": "phase4_local_m4pro",
+  "model": "chat-shared",
+  "model_alias": "chat-shared",
+  "family": "mixed",
+  "policy": "balanced",
+  "workload_shape": "interactive",
+  "request_count": 6,
+  "input_messages_per_request": 1,
+  "stream": false,
+  "workload_generation": {
+    "pattern": "uniform",
+    "seed": 21,
+    "burst_size": 1
+  },
+  "items": [
+    {
+      "item_id": "phase4-local-0001",
+      "family": "tenant_contention",
+      "prompt": "Tenant contention request 1: summarize the routing recommendation in one short paragraph.",
+      "metadata": {
+        "family": "tenant_contention",
+        "target_model_alias": "chat-shared",
+        "tenant_id": "tenant-priority",
+        "request_class": "latency_sensitive",
+        "burst_group": "1"
+      }
+    },
+    {
+      "item_id": "phase4-local-0002",
+      "family": "tenant_contention",
+      "prompt": "Tenant contention request 2: summarize the routing recommendation in one short paragraph.",
+      "metadata": {
+        "family": "tenant_contention",
+        "target_model_alias": "chat-shared",
+        "tenant_id": "tenant-standard",
+        "request_class": "bulk",
+        "burst_group": "1"
+      }
+    },
+    {
+      "item_id": "phase4-local-0003",
+      "family": "session_stickiness",
+      "prompt": "Conversation turn 1 for session-local-01: continue the troubleshooting thread in two lines.",
+      "metadata": {
+        "family": "session_stickiness",
+        "target_model_alias": "chat-shared",
+        "tenant_id": "tenant-chat",
+        "request_class": "standard",
+        "session_id": "session-local-01",
+        "conversation_turn": "1"
+      }
+    },
+    {
+      "item_id": "phase4-local-0004",
+      "family": "session_stickiness",
+      "prompt": "Conversation turn 2 for session-local-01: continue the troubleshooting thread in two lines.",
+      "metadata": {
+        "family": "session_stickiness",
+        "target_model_alias": "chat-shared",
+        "tenant_id": "tenant-chat",
+        "request_class": "standard",
+        "session_id": "session-local-01",
+        "conversation_turn": "2"
+      }
+    },
+    {
+      "item_id": "phase4-local-0005",
+      "family": "canary_rollout",
+      "prompt": "Canary request: explain rollout safety checks in two concise lines.",
+      "metadata": {
+        "family": "canary_rollout",
+        "target_model_alias": "chat-shared",
+        "tenant_id": "tenant-rollout",
+        "request_class": "latency_sensitive",
+        "session_id": "canary-session-local-01",
+        "rollout_bucket_key": "canary-session-local-01"
+      }
+    },
+    {
+      "item_id": "phase4-local-0006",
+      "family": "shadow_traffic",
+      "prompt": "Shadow-eligible request: summarize the answer in one sentence.",
+      "metadata": {
+        "family": "shadow_traffic",
+        "target_model_alias": "chat-shared",
+        "tenant_id": "tenant-shadow",
+        "request_class": "standard",
+        "session_id": "shadow-session-local-01",
+        "shadow_opt_in": "true"
+      }
+    }
+  ],
+  "scenario_seed": 21
+}

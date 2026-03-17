@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+configMapGenerator:
+  - name: switchyard-settings
+    envs:
+      - settings.env
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+images:
+  - name: localhost:5001/switchyard-control-plane
+    newTag: dev

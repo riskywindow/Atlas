@@ -2,16 +2,61 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request, Response, status
+import asyncio
+import json
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
+from time import perf_counter
 
+from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response, status
+from fastapi.responses import StreamingResponse
+
+from switchyard.adapters.base import BackendAdapter
+from switchyard.control.admission import AdmissionLease, AdmissionRejectedError
+from switchyard.diagnostics import (
+    collect_deployment_diagnostics,
+    collect_runtime_backend_summaries,
+)
 from switchyard.gateway.dependencies import GatewayServices, get_services
-from switchyard.logging import get_logger
+from switchyard.logging import bind_request_context, get_logger
+from switchyard.schemas.admin import (
+    DeploymentDiagnosticsResponse,
+    RuntimeInspectionResponse,
+)
 from switchyard.schemas.backend import BackendHealthState
-from switchyard.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
-from switchyard.schemas.routing import RequestContext
+from switchyard.schemas.benchmark import ExecutionTarget, ExecutionTargetType
+from switchyard.schemas.chat import (
+    ChatCompletionChunk,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+)
+from switchyard.schemas.routing import (
+    AffinityDisposition,
+    RequestClass,
+    RequestContext,
+    RolloutDisposition,
+    RouteAnnotations,
+    RouteDecision,
+    RoutingPolicy,
+    SessionAffinityKey,
+    TenantTier,
+    WorkloadShape,
+)
+from switchyard.telemetry import BackendLabels, estimate_token_count
 
 router = APIRouter()
 logger = get_logger(__name__)
+
+
+class InvalidRequestContextError(ValueError):
+    """Raised when request-scoped routing metadata cannot be parsed."""
+
+
+class BackendExecutionExhaustedError(RuntimeError):
+    """Raised when all routed backend candidates fail execution."""
+
+
+_FALLBACK_RETRY_BUDGET = 1
 
 
 @router.get("/healthz")
@@ -50,34 +95,1092 @@ async def readyz(
     return {"status": "ready", "adapters": services.registry.names()}
 
 
+@router.get("/admin/runtime", response_model=RuntimeInspectionResponse)
+async def admin_runtime(
+    services: GatewayServices = Depends(get_services),
+) -> RuntimeInspectionResponse:
+    """Return a lightweight read-only snapshot of runtime control-plane state."""
+
+    return RuntimeInspectionResponse(
+        backends=await collect_runtime_backend_summaries(services.registry),
+        admission=await services.admission.inspect_state(),
+        circuit_breakers=services.circuit_breaker.inspect_state(),
+        canary_routing=services.canary.inspect_state(),
+        shadow_routing=services.shadow.inspect_state(),
+        session_affinity=services.session_affinity.inspect_state(),
+    )
+
+
+@router.get("/admin/deployment", response_model=DeploymentDiagnosticsResponse)
+async def admin_deployment(
+    services: GatewayServices = Depends(get_services),
+) -> DeploymentDiagnosticsResponse:
+    """Return deployment-aware diagnostics rooted in current runtime truth."""
+
+    return await collect_deployment_diagnostics(
+        services.settings,
+        registry=services.registry,
+    )
+
+
 @router.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def create_chat_completion(
     chat_request: ChatCompletionRequest,
     request: Request,
+    response: Response,
+    background_tasks: BackgroundTasks,
     services: GatewayServices = Depends(get_services),
-) -> ChatCompletionResponse:
+) -> ChatCompletionResponse | StreamingResponse:
     """Route a chat completion request and invoke the selected backend."""
 
     request_id = request.state.request_id
-    route_context = RequestContext(request_id=request_id)
-    decision = await services.router.route(chat_request, route_context)
-    services.telemetry.record_route_decision(
+    request_timestamp = datetime.now(UTC)
+    route_context = RequestContext(
+        request_id=request_id,
+        policy=_resolve_request_policy(
+            request=request,
+            default_policy=services.settings.default_routing_policy,
+        ),
+        workload_shape=_resolve_workload_shape(request),
+        request_class=_resolve_request_class(request),
+        internal_backend_pin=_resolve_internal_backend_pin(request),
+        tenant_id=_resolve_tenant_id(request),
+        tenant_tier=_resolve_tenant_tier(request),
+        session_id=_resolve_session_id(request),
+    )
+    execution_target = _execution_target_from_context(
+        model_alias=chat_request.model,
+        context=route_context,
+    )
+    admission_lease = await _admit_request(
+        chat_request=chat_request,
+        context=route_context,
+        services=services,
+        request_timestamp=request_timestamp,
+        execution_target=execution_target,
+    )
+    route_started = perf_counter()
+    try:
+        decision = await services.router.route(chat_request, route_context)
+    except Exception as exc:
+        await services.trace_capture.capture_chat_completion(
+            request_timestamp=request_timestamp,
+            request_id=request_id,
+            logical_alias=chat_request.model,
+            execution_target=execution_target,
+            request_context=route_context,
+            route_decision=None,
+            chosen_backend=None,
+            stream=chat_request.stream,
+            status_code=503,
+            latency_ms=(perf_counter() - route_started) * 1000,
+            ttft_ms=None,
+            output_tokens=None,
+            fallback_used=False,
+            error=str(exc),
+            error_category="route_error",
+            request_payload=chat_request,
+            response_payload=None,
+            admission_decision=admission_lease.decision,
+        )
+        await services.admission.release(admission_lease)
+        raise
+    decision.admission_decision = admission_lease.decision
+    if decision.telemetry_metadata is not None:
+        decision.telemetry_metadata.admission_control_enabled = services.admission.enabled
+    route_reason = (
+        decision.explanation.compact_reason()
+        if decision.explanation is not None
+        else "; ".join(decision.rationale)
+    )
+    route_record = services.telemetry.record_route_decision(
+        request_id=request_id,
+        tenant_id=route_context.tenant_id,
+        session_id=route_context.session_id,
+        requested_model=chat_request.model,
+        serving_target=decision.serving_target,
         policy=decision.policy.value,
         backend_name=decision.backend_name,
+        considered_backends=decision.considered_backends,
+        fallback_backends=decision.fallback_backends,
+        rejected_backends=decision.rejected_backends,
+        admission_limited_backends=decision.admission_limited_backends,
+        protected_backends=decision.protected_backends,
+        degraded_backends=decision.degraded_backends,
+        route_reason=route_reason,
+        route_latency_ms=(perf_counter() - route_started) * 1000,
     )
     logger.info(
         "route_decision",
+        serving_target=decision.serving_target,
         chosen_backend=decision.backend_name,
         route_policy=decision.policy.value,
+        tenant_id=route_context.tenant_id,
+        tenant_tier=route_context.tenant_tier.value,
+        request_class=route_context.request_class.value,
+        session_id=route_context.session_id,
+        requested_model=chat_request.model,
+        candidate_backend_count=route_record.candidate_backend_count,
         considered_backends=decision.considered_backends,
         fallback_backends=decision.fallback_backends,
+        admission_limited_backends=decision.admission_limited_backends,
+        protected_backends=decision.protected_backends,
+        degraded_backends=decision.degraded_backends,
+        affinity_disposition=(
+            decision.annotations.affinity_disposition.value
+            if decision.annotations is not None
+            else AffinityDisposition.NOT_REQUESTED.value
+        ),
+        sticky_backend=(
+            decision.sticky_route.backend_name if decision.sticky_route is not None else None
+        ),
+        affinity_notes=decision.annotations.notes if decision.annotations is not None else [],
+        rollout_disposition=(
+            decision.annotations.rollout_disposition.value
+            if decision.annotations is not None
+            else RolloutDisposition.NONE.value
+        ),
+        canary_policy=(
+            decision.canary_policy.policy_name if decision.canary_policy is not None else None
+        ),
+        fallback_occurred=route_record.fallback_occurred,
+        route_reason=route_record.route_reason,
+        route_latency_ms=route_record.route_latency_ms,
     )
-    adapter = services.registry.get(decision.backend_name)
-    chat_response = await adapter.generate(chat_request, route_context)
+    if chat_request.stream:
+        return StreamingResponse(
+            _stream_chat_completion(
+                chat_request=chat_request,
+                context=route_context,
+                request=request,
+                services=services,
+                decision=decision,
+                request_timestamp=request_timestamp,
+                execution_target=execution_target,
+                admission_lease=admission_lease,
+            ),
+            media_type="text/event-stream",
+            headers={
+                "cache-control": "no-cache",
+                "x-accel-buffering": "no",
+                "x-switchyard-admission-decision": admission_lease.decision.model_dump_json(
+                    exclude_none=True
+                ),
+                **_route_metadata_headers(decision),
+            },
+        )
+
+    try:
+        chat_response, final_backend_name = await _generate_with_fallback(
+            chat_request=chat_request,
+            context=route_context,
+            services=services,
+            decision=decision,
+            route=request.url.path,
+            method=request.method,
+        )
+    except Exception as exc:
+        await services.trace_capture.capture_chat_completion(
+            request_timestamp=request_timestamp,
+            request_id=request_id,
+            logical_alias=chat_request.model,
+            execution_target=execution_target,
+            request_context=route_context,
+            route_decision=decision,
+            chosen_backend=decision.explanation.executed_backend if decision.explanation else None,
+            stream=False,
+            status_code=503,
+            latency_ms=(perf_counter() - route_started) * 1000,
+            ttft_ms=None,
+            output_tokens=None,
+            fallback_used=decision.explanation.fallback_used if decision.explanation else False,
+            error=str(exc),
+            error_category="execution_error",
+            request_payload=chat_request,
+            response_payload=None,
+        )
+        await services.admission.release(admission_lease)
+        raise
+    await services.admission.release(admission_lease)
+    execution = services.telemetry.state.backend_execution_records[-1]
+    logger.info(
+        "backend_execution_completed",
+        streaming=False,
+        chosen_backend=final_backend_name,
+        response_id=chat_response.id,
+        total_latency_ms=execution.total_latency_ms,
+        ttft_ms=execution.ttft_ms,
+        output_tokens=execution.output_tokens,
+        tokens_per_second=execution.tokens_per_second,
+    )
     logger.info(
         "chat_completion_succeeded",
-        chosen_backend=decision.backend_name,
-        route_policy=decision.policy.value,
+        chosen_backend=final_backend_name,
         response_id=chat_response.id,
     )
+    _schedule_shadow_traffic(
+        background_tasks=background_tasks,
+        services=services,
+        chat_request=chat_request,
+        context=route_context,
+        decision=decision,
+        primary_backend_name=final_backend_name,
+    )
+    for key, value in _route_metadata_headers(decision).items():
+        response.headers[key] = value
+    response.headers["x-switchyard-admission-decision"] = admission_lease.decision.model_dump_json(
+        exclude_none=True
+    )
+    await services.trace_capture.capture_chat_completion(
+        request_timestamp=request_timestamp,
+        request_id=request_id,
+        logical_alias=chat_request.model,
+        execution_target=execution_target,
+        request_context=route_context,
+        route_decision=decision,
+        chosen_backend=final_backend_name,
+        stream=False,
+        status_code=200,
+        latency_ms=execution.total_latency_ms,
+        ttft_ms=execution.ttft_ms,
+        output_tokens=execution.output_tokens,
+        fallback_used=decision.explanation.fallback_used if decision.explanation else False,
+        error=None,
+        error_category=None,
+        request_payload=chat_request,
+        response_payload=chat_response,
+    )
     return chat_response
+
+
+async def _stream_chat_completion(
+    *,
+    chat_request: ChatCompletionRequest,
+    context: RequestContext,
+    request: Request,
+    services: GatewayServices,
+    decision: RouteDecision,
+    request_timestamp: datetime,
+    execution_target: ExecutionTarget,
+    admission_lease: AdmissionLease,
+) -> AsyncIterator[str]:
+    decision_policy = decision.policy.value
+    route_backends = _route_backends_for_execution(decision)
+    stream_started = perf_counter()
+
+    try:
+        for attempt_number, backend_name in enumerate(route_backends, start=1):
+            adapter = services.registry.get(backend_name)
+            (
+                breaker_allowed,
+                breaker_state,
+                breaker_reason,
+            ) = services.circuit_breaker.begin_execution(backend_name)
+            if not breaker_allowed:
+                decision.protected_backends[backend_name] = (
+                    breaker_reason or "backend circuit is open"
+                )
+                services.telemetry.record_route_attempt(
+                    request_id=context.request_id,
+                    policy=decision_policy,
+                    backend_name=backend_name,
+                    attempt_number=attempt_number,
+                    selected_by_router=attempt_number == 1,
+                    outcome="skipped_circuit_open",
+                    error=breaker_reason,
+                )
+                logger.warning(
+                    "route_fallback_skipped_protected_backend",
+                    backend_name=backend_name,
+                    attempt_number=attempt_number,
+                    breaker_phase=breaker_state.phase.value,
+                    error=breaker_reason,
+                )
+                continue
+            decision.circuit_breaker_state = breaker_state
+            labels = await _resolve_backend_labels(
+                adapter=adapter,
+                requested_model=chat_request.model,
+            )
+            bind_request_context(
+                chosen_backend=labels.backend_name,
+                backend_type=labels.backend_type,
+                model=labels.model,
+                model_identifier=labels.model_identifier,
+                execution_mode=labels.execution_mode,
+                worker_transport=labels.worker_transport,
+                route_policy=decision_policy,
+            )
+            if await _is_backend_unavailable(adapter):
+                _append_execution_event(
+                    decision,
+                    f"attempt={attempt_number} backend={backend_name} outcome=skipped_unhealthy",
+                )
+                services.telemetry.record_route_attempt(
+                    request_id=context.request_id,
+                    policy=decision_policy,
+                    backend_name=backend_name,
+                    attempt_number=attempt_number,
+                    selected_by_router=attempt_number == 1,
+                    outcome="skipped_unhealthy",
+                    error="backend health is unavailable",
+                )
+                if attempt_number == len(route_backends):
+                    break
+                logger.warning(
+                    "route_fallback_skipped_unhealthy_backend",
+                    backend_name=backend_name,
+                    attempt_number=attempt_number,
+                    fallback_used=attempt_number > 1,
+                )
+                continue
+
+            logger.info("backend_execution_started", backend_name=backend_name, streaming=True)
+            execution_start = perf_counter()
+            ttft_ms: float | None = None
+            output_fragments: list[str] = []
+            response_id: str | None = None
+            emitted_chunk = False
+            try:
+                async for chunk in adapter.stream_generate(chat_request, context):
+                    emitted_chunk = True
+                    response_id = chunk.id
+                    if ttft_ms is None and _chunk_has_visible_tokens(chunk):
+                        ttft_ms = (perf_counter() - execution_start) * 1000
+                    output_fragments.extend(_chunk_content_fragments(chunk))
+                    yield _format_sse_event(chunk)
+            except Exception as exc:
+                event = (
+                    f"attempt={attempt_number} backend={backend_name} "
+                    f"outcome=failed error={str(exc)}"
+                )
+                _append_execution_event(decision, event)
+                services.telemetry.record_route_attempt(
+                    request_id=context.request_id,
+                    policy=decision_policy,
+                    backend_name=backend_name,
+                    attempt_number=attempt_number,
+                    selected_by_router=attempt_number == 1,
+                    outcome="failed",
+                    error=str(exc),
+                )
+                logger.warning(
+                    "route_fallback_backend_failed",
+                    backend_name=backend_name,
+                    attempt_number=attempt_number,
+                    error=str(exc),
+                    fallback_used=attempt_number > 1,
+                )
+                if emitted_chunk:
+                    _set_execution_outcome(
+                        decision,
+                        executed_backend=backend_name,
+                        fallback_used=attempt_number > 1,
+                        final_outcome="failed_after_stream_started",
+                    )
+                    await services.trace_capture.capture_chat_completion(
+                        request_timestamp=request_timestamp,
+                        request_id=context.request_id,
+                        logical_alias=chat_request.model,
+                        execution_target=execution_target,
+                        request_context=context,
+                        route_decision=decision,
+                        chosen_backend=backend_name,
+                        stream=True,
+                        status_code=503,
+                        latency_ms=(perf_counter() - execution_start) * 1000,
+                        ttft_ms=ttft_ms,
+                        output_tokens=estimate_token_count("".join(output_fragments).strip()),
+                        fallback_used=attempt_number > 1,
+                        error=str(exc),
+                error_category="stream_error",
+                        request_payload=chat_request,
+                        response_payload="".join(output_fragments).strip(),
+                    )
+                    services.circuit_breaker.record_failure(
+                        backend_name,
+                        reason=_classify_backend_failure(exc),
+                    )
+                    raise
+                services.circuit_breaker.record_failure(
+                    backend_name,
+                    reason=_classify_backend_failure(exc),
+                )
+                continue
+
+            _append_execution_event(
+                decision,
+                f"attempt={attempt_number} backend={backend_name} outcome=succeeded",
+            )
+            services.telemetry.record_route_attempt(
+                request_id=context.request_id,
+                policy=decision_policy,
+                backend_name=backend_name,
+                attempt_number=attempt_number,
+                selected_by_router=attempt_number == 1,
+                outcome="succeeded",
+            )
+            execution = services.telemetry.record_backend_execution(
+                route=request.url.path,
+                method=request.method,
+                status_code=200,
+                streaming=True,
+                labels=labels,
+                total_latency_ms=(perf_counter() - execution_start) * 1000,
+                ttft_ms=ttft_ms,
+                output_tokens=estimate_token_count("".join(output_fragments).strip()),
+            )
+            logger.info(
+                "backend_execution_completed",
+                streaming=True,
+                chosen_backend=backend_name,
+                response_id=response_id,
+                total_latency_ms=execution.total_latency_ms,
+                ttft_ms=execution.ttft_ms,
+                output_tokens=execution.output_tokens,
+                tokens_per_second=execution.tokens_per_second,
+            )
+            logger.info(
+                "chat_completion_stream_finished",
+                chosen_backend=backend_name,
+                route_policy=decision_policy,
+                response_id=response_id,
+                fallback_used=attempt_number > 1,
+            )
+            _set_execution_outcome(
+                decision,
+                executed_backend=backend_name,
+                fallback_used=attempt_number > 1,
+                final_outcome="succeeded",
+            )
+            _update_session_affinity(
+                services=services,
+                context=context,
+                decision=decision,
+                backend_name=backend_name,
+                fallback_used=attempt_number > 1,
+            )
+            _launch_streaming_shadow_traffic(
+                services=services,
+                chat_request=chat_request,
+                context=context,
+                decision=decision,
+                primary_backend_name=backend_name,
+            )
+            await services.trace_capture.capture_chat_completion(
+                request_timestamp=request_timestamp,
+                request_id=context.request_id,
+                logical_alias=chat_request.model,
+                execution_target=execution_target,
+                request_context=context,
+                route_decision=decision,
+                chosen_backend=backend_name,
+                stream=True,
+                status_code=200,
+                latency_ms=execution.total_latency_ms,
+                ttft_ms=execution.ttft_ms,
+                output_tokens=execution.output_tokens,
+                fallback_used=attempt_number > 1,
+                error=None,
+                error_category=None,
+                request_payload=chat_request,
+                response_payload="".join(output_fragments).strip(),
+            )
+            services.circuit_breaker.record_success(backend_name)
+            yield "data: [DONE]\n\n"
+            return
+
+        msg = (
+            f"all backend candidates failed for model '{chat_request.model}' "
+            f"under policy '{decision_policy}'"
+        )
+        _set_execution_outcome(
+            decision,
+            executed_backend=None,
+            fallback_used=bool(decision.fallback_backends),
+            final_outcome="failed_no_safe_fallback",
+        )
+        await services.trace_capture.capture_chat_completion(
+            request_timestamp=request_timestamp,
+            request_id=context.request_id,
+            logical_alias=chat_request.model,
+            execution_target=execution_target,
+            request_context=context,
+            route_decision=decision,
+            chosen_backend=None,
+            stream=True,
+            status_code=503,
+            latency_ms=(perf_counter() - stream_started) * 1000,
+            ttft_ms=None,
+            output_tokens=None,
+            fallback_used=bool(decision.fallback_backends),
+            error=msg,
+            error_category="execution_error",
+            request_payload=chat_request,
+            response_payload=None,
+        )
+        raise BackendExecutionExhaustedError(msg)
+    finally:
+        await services.admission.release(admission_lease)
+
+
+async def _generate_with_fallback(
+    *,
+    chat_request: ChatCompletionRequest,
+    context: RequestContext,
+    services: GatewayServices,
+    decision: RouteDecision,
+    route: str,
+    method: str,
+) -> tuple[ChatCompletionResponse, str]:
+    decision_policy = decision.policy.value
+    execution_errors: list[str] = []
+
+    for attempt_number, backend_name in enumerate(_route_backends_for_execution(decision), start=1):
+        adapter = services.registry.get(backend_name)
+        (
+            breaker_allowed,
+            breaker_state,
+            breaker_reason,
+        ) = services.circuit_breaker.begin_execution(backend_name)
+        if not breaker_allowed:
+            decision.protected_backends[backend_name] = (
+                breaker_reason or "backend circuit is open"
+            )
+            services.telemetry.record_route_attempt(
+                request_id=context.request_id,
+                policy=decision_policy,
+                backend_name=backend_name,
+                attempt_number=attempt_number,
+                selected_by_router=attempt_number == 1,
+                outcome="skipped_circuit_open",
+                error=breaker_reason,
+            )
+            logger.warning(
+                "route_fallback_skipped_protected_backend",
+                backend_name=backend_name,
+                attempt_number=attempt_number,
+                breaker_phase=breaker_state.phase.value,
+                error=breaker_reason,
+            )
+            continue
+        decision.circuit_breaker_state = breaker_state
+        labels = await _resolve_backend_labels(adapter=adapter, requested_model=chat_request.model)
+        bind_request_context(
+            chosen_backend=labels.backend_name,
+            backend_type=labels.backend_type,
+            model=labels.model,
+            model_identifier=labels.model_identifier,
+            execution_mode=labels.execution_mode,
+            worker_transport=labels.worker_transport,
+            route_policy=decision_policy,
+        )
+        if await _is_backend_unavailable(adapter):
+            error = "backend health is unavailable"
+            execution_errors.append(f"{backend_name}: {error}")
+            _append_execution_event(
+                decision,
+                f"attempt={attempt_number} backend={backend_name} outcome=skipped_unhealthy",
+            )
+            services.telemetry.record_route_attempt(
+                request_id=context.request_id,
+                policy=decision_policy,
+                backend_name=backend_name,
+                attempt_number=attempt_number,
+                selected_by_router=attempt_number == 1,
+                outcome="skipped_unhealthy",
+                error=error,
+            )
+            logger.warning(
+                "route_fallback_skipped_unhealthy_backend",
+                backend_name=backend_name,
+                attempt_number=attempt_number,
+                fallback_used=attempt_number > 1,
+            )
+            continue
+
+        logger.info("backend_execution_started", backend_name=backend_name, streaming=False)
+        execution_start = perf_counter()
+        try:
+            chat_response = await adapter.generate(chat_request, context)
+        except Exception as exc:
+            execution_errors.append(f"{backend_name}: {exc}")
+            _append_execution_event(
+                decision,
+                f"attempt={attempt_number} backend={backend_name} outcome=failed error={str(exc)}",
+            )
+            services.telemetry.record_route_attempt(
+                request_id=context.request_id,
+                policy=decision_policy,
+                backend_name=backend_name,
+                attempt_number=attempt_number,
+                selected_by_router=attempt_number == 1,
+                outcome="failed",
+                error=str(exc),
+            )
+            logger.warning(
+                "route_fallback_backend_failed",
+                backend_name=backend_name,
+                attempt_number=attempt_number,
+                error=str(exc),
+                fallback_used=attempt_number > 1,
+            )
+            services.circuit_breaker.record_failure(
+                backend_name,
+                reason=_classify_backend_failure(exc),
+            )
+            continue
+
+        _append_execution_event(
+            decision,
+            f"attempt={attempt_number} backend={backend_name} outcome=succeeded",
+        )
+        services.telemetry.record_route_attempt(
+            request_id=context.request_id,
+            policy=decision_policy,
+            backend_name=backend_name,
+            attempt_number=attempt_number,
+            selected_by_router=attempt_number == 1,
+            outcome="succeeded",
+        )
+        services.telemetry.record_backend_execution(
+            route=route,
+            method=method,
+            status_code=200,
+            streaming=False,
+            labels=labels,
+            total_latency_ms=(perf_counter() - execution_start) * 1000,
+            ttft_ms=None,
+            output_tokens=chat_response.usage.completion_tokens,
+        )
+        _set_execution_outcome(
+            decision,
+            executed_backend=backend_name,
+            fallback_used=attempt_number > 1,
+            final_outcome="succeeded",
+        )
+        _update_session_affinity(
+            services=services,
+            context=context,
+            decision=decision,
+            backend_name=backend_name,
+            fallback_used=attempt_number > 1,
+        )
+        services.circuit_breaker.record_success(backend_name)
+        return chat_response, backend_name
+
+    msg = (
+        f"all backend candidates failed for model '{chat_request.model}' "
+        f"under policy '{decision_policy}': {'; '.join(execution_errors)}"
+    )
+    _set_execution_outcome(
+        decision,
+        executed_backend=None,
+        fallback_used=bool(decision.fallback_backends),
+        final_outcome="failed_no_safe_fallback",
+    )
+    raise BackendExecutionExhaustedError(msg)
+
+
+def _format_sse_event(chunk: ChatCompletionChunk) -> str:
+    payload = json.dumps(chunk.model_dump(mode="json"), separators=(",", ":"))
+    return f"data: {payload}\n\n"
+
+
+async def _resolve_backend_labels(
+    *,
+    adapter: BackendAdapter,
+    requested_model: str,
+) -> BackendLabels:
+    status = await adapter.status()
+    default_model = status.capabilities.default_model or requested_model
+    model_identifier = (
+        status.capabilities.model_aliases.get(requested_model)
+        or status.capabilities.model_aliases.get(default_model)
+        or status.metadata.get("model_identifier")
+        or default_model
+    )
+    return BackendLabels(
+        backend_name=adapter.name,
+        backend_type=status.capabilities.backend_type.value,
+        model=requested_model,
+        model_identifier=model_identifier,
+        execution_mode=status.metadata.get("execution_mode", "in_process"),
+        worker_transport=status.metadata.get("worker_transport", "in_process"),
+    )
+
+
+async def _is_backend_unavailable(adapter: BackendAdapter) -> bool:
+    health = await adapter.health()
+    return health.state is BackendHealthState.UNAVAILABLE
+
+
+def _route_backends_for_execution(decision: RouteDecision) -> list[str]:
+    return [decision.backend_name, *decision.fallback_backends[:_FALLBACK_RETRY_BUDGET]]
+
+
+def _classify_backend_failure(exc: Exception) -> str:
+    if isinstance(exc, TimeoutError | asyncio.TimeoutError):
+        return "timeout_like_failure"
+    return "invocation_failure"
+
+
+def _append_execution_event(decision: RouteDecision, event: str) -> None:
+    if decision.explanation is None:
+        return
+    decision.explanation.execution_events.append(event)
+
+
+def _set_execution_outcome(
+    decision: RouteDecision,
+    *,
+    executed_backend: str | None,
+    fallback_used: bool,
+    final_outcome: str,
+) -> None:
+    if decision.explanation is None:
+        return
+    decision.explanation.executed_backend = executed_backend
+    decision.explanation.fallback_used = fallback_used
+    decision.explanation.final_outcome = final_outcome
+
+
+def _update_session_affinity(
+    *,
+    services: GatewayServices,
+    context: RequestContext,
+    decision: RouteDecision,
+    backend_name: str,
+    fallback_used: bool,
+) -> None:
+    if context.session_id is None or context.internal_backend_pin is not None:
+        return
+    if not services.session_affinity.enabled:
+        return
+    if decision.canary_policy is not None and decision.canary_policy.enabled:
+        _ensure_route_annotations(decision).notes.append(
+            "session affinity update skipped because canary routing is active"
+        )
+        return
+    affinity_key = decision.session_affinity_key or SessionAffinityKey(
+        tenant_id=context.tenant_id,
+        session_id=context.session_id,
+        serving_target=decision.serving_target,
+    )
+    previous_backend = (
+        decision.sticky_route.backend_name if decision.sticky_route is not None else None
+    )
+    decision.session_affinity_key = affinity_key
+    decision.sticky_route = services.session_affinity.bind(
+        affinity_key,
+        backend_name=backend_name,
+        reason=(
+            f"sticky route rebound after failover from '{previous_backend}'"
+            if fallback_used and previous_backend is not None and previous_backend != backend_name
+            else "sticky route refreshed after successful execution"
+        ),
+    )
+    annotations = _ensure_route_annotations(decision)
+    if previous_backend == backend_name:
+        if annotations.affinity_disposition is AffinityDisposition.NOT_REQUESTED:
+            annotations.affinity_disposition = AffinityDisposition.CREATED
+        return
+    if fallback_used and previous_backend is not None:
+        annotations.notes.append(
+            f"sticky backend failover from '{previous_backend}' to '{backend_name}'"
+        )
+    annotations.affinity_disposition = AffinityDisposition.CREATED
+
+
+def _schedule_shadow_traffic(
+    *,
+    background_tasks: BackgroundTasks,
+    services: GatewayServices,
+    chat_request: ChatCompletionRequest,
+    context: RequestContext,
+    decision: RouteDecision,
+    primary_backend_name: str,
+) -> None:
+    plan = services.shadow.plan(
+        request=chat_request,
+        context=context,
+        decision=decision,
+        primary_backend_name=primary_backend_name,
+    )
+    if plan is None:
+        return
+    background_tasks.add_task(
+        services.shadow.execute_plan,
+        plan=plan,
+        request=chat_request,
+        context=context,
+        registry=services.registry,
+        router=services.router,
+        telemetry=services.telemetry,
+    )
+
+
+def _launch_streaming_shadow_traffic(
+    *,
+    services: GatewayServices,
+    chat_request: ChatCompletionRequest,
+    context: RequestContext,
+    decision: RouteDecision,
+    primary_backend_name: str,
+) -> None:
+    plan = services.shadow.plan(
+        request=chat_request,
+        context=context,
+        decision=decision,
+        primary_backend_name=primary_backend_name,
+    )
+    if plan is None:
+        return
+    services.shadow.launch(
+        plan=plan,
+        request=chat_request,
+        context=context,
+        registry=services.registry,
+        router=services.router,
+        telemetry=services.telemetry,
+    )
+
+
+def _ensure_route_annotations(decision: RouteDecision) -> RouteAnnotations:
+    if decision.annotations is None:
+        decision.annotations = RouteAnnotations()
+    return decision.annotations
+
+
+def _chunk_has_visible_tokens(chunk: ChatCompletionChunk) -> bool:
+    return any(
+        choice.delta.content is not None and choice.delta.content.strip() != ""
+        for choice in chunk.choices
+    )
+
+
+def _chunk_content_fragments(chunk: ChatCompletionChunk) -> list[str]:
+    return [
+        choice.delta.content
+        for choice in chunk.choices
+        if choice.delta.content is not None and choice.delta.content != ""
+    ]
+
+
+def _resolve_request_policy(
+    *,
+    request: Request,
+    default_policy: RoutingPolicy,
+) -> RoutingPolicy:
+    raw_policy = request.headers.get("x-switchyard-routing-policy")
+    if raw_policy is None:
+        return default_policy
+    try:
+        return RoutingPolicy(raw_policy)
+    except ValueError as exc:
+        msg = (
+            "invalid x-switchyard-routing-policy header: "
+            f"{raw_policy!r}. Expected one of: "
+            f"{', '.join(policy.value for policy in RoutingPolicy)}"
+        )
+        raise InvalidRequestContextError(msg) from exc
+
+
+def _resolve_workload_shape(request: Request) -> WorkloadShape:
+    raw_workload = request.headers.get("x-switchyard-workload-shape")
+    if raw_workload is None:
+        return WorkloadShape.INTERACTIVE
+    try:
+        return WorkloadShape(raw_workload)
+    except ValueError as exc:
+        msg = (
+            "invalid x-switchyard-workload-shape header: "
+            f"{raw_workload!r}. Expected one of: "
+            f"{', '.join(shape.value for shape in WorkloadShape)}"
+        )
+        raise InvalidRequestContextError(msg) from exc
+
+
+def _resolve_request_class(request: Request) -> RequestClass:
+    raw_request_class = request.headers.get("x-switchyard-request-class")
+    if raw_request_class is None:
+        return RequestClass.STANDARD
+    try:
+        return RequestClass(raw_request_class)
+    except ValueError as exc:
+        msg = (
+            "invalid x-switchyard-request-class header: "
+            f"{raw_request_class!r}. Expected one of: "
+            f"{', '.join(request_class.value for request_class in RequestClass)}"
+        )
+        raise InvalidRequestContextError(msg) from exc
+
+
+def _resolve_internal_backend_pin(request: Request) -> str | None:
+    raw_backend_pin = request.headers.get("x-switchyard-internal-backend-pin")
+    if raw_backend_pin is None:
+        return None
+    normalized = raw_backend_pin.strip()
+    if not normalized:
+        msg = "invalid x-switchyard-internal-backend-pin header: value must not be empty"
+        raise InvalidRequestContextError(msg)
+    return normalized
+
+
+def _resolve_tenant_id(request: Request) -> str:
+    raw_tenant_id = request.headers.get("x-switchyard-tenant-id")
+    if raw_tenant_id is None:
+        return "default"
+    normalized = raw_tenant_id.strip()
+    if not normalized:
+        msg = "invalid x-switchyard-tenant-id header: value must not be empty"
+        raise InvalidRequestContextError(msg)
+    return normalized
+
+
+def _resolve_tenant_tier(request: Request) -> TenantTier:
+    raw_tenant_tier = request.headers.get("x-switchyard-tenant-tier")
+    if raw_tenant_tier is None:
+        return TenantTier.STANDARD
+    try:
+        return TenantTier(raw_tenant_tier)
+    except ValueError as exc:
+        msg = (
+            "invalid x-switchyard-tenant-tier header: "
+            f"{raw_tenant_tier!r}. Expected one of: "
+            f"{', '.join(tier.value for tier in TenantTier)}"
+        )
+        raise InvalidRequestContextError(msg) from exc
+
+
+def _resolve_session_id(request: Request) -> str | None:
+    raw_session_id = request.headers.get("x-switchyard-session-id")
+    if raw_session_id is None:
+        return None
+    normalized = raw_session_id.strip()
+    if not normalized:
+        msg = "invalid x-switchyard-session-id header: value must not be empty"
+        raise InvalidRequestContextError(msg)
+    return normalized
+
+
+def _route_metadata_headers(decision: RouteDecision) -> dict[str, str]:
+    payload = json.dumps(
+        decision.model_dump(mode="json", exclude_none=True),
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return {
+        "x-switchyard-route-decision": payload,
+        "x-switchyard-route-selected-backend": decision.backend_name,
+    }
+
+
+async def _admit_request(
+    *,
+    chat_request: ChatCompletionRequest,
+    context: RequestContext,
+    services: GatewayServices,
+    request_timestamp: datetime,
+    execution_target: ExecutionTarget,
+) -> AdmissionLease:
+    try:
+        lease = await services.admission.acquire(
+            context,
+            serving_target=chat_request.model,
+        )
+    except AdmissionRejectedError as exc:
+        queue_depth = 0
+        if exc.decision.queue_snapshot is not None:
+            queue_depth = exc.decision.queue_snapshot.current_depth
+        services.telemetry.record_admission_decision(
+            request_id=context.request_id,
+            tenant_id=context.tenant_id,
+            request_class=context.request_class.value,
+            state=exc.decision.state.value,
+            reason_code=(
+                None if exc.decision.reason_code is None else exc.decision.reason_code.value
+            ),
+            queue_depth=queue_depth,
+            queue_wait_ms=exc.decision.queue_wait_ms,
+            status_code=exc.status_code,
+        )
+        logger.warning(
+            "admission_rejected",
+            tenant_id=context.tenant_id,
+            request_class=context.request_class.value,
+            session_id=context.session_id,
+            reason_code=(
+                None if exc.decision.reason_code is None else exc.decision.reason_code.value
+            ),
+            queue_depth=queue_depth,
+            status_code=exc.status_code,
+        )
+        await services.trace_capture.capture_chat_completion(
+            request_timestamp=request_timestamp,
+            request_id=context.request_id,
+            logical_alias=chat_request.model,
+            execution_target=execution_target,
+            request_context=context,
+            route_decision=None,
+            chosen_backend=None,
+            stream=chat_request.stream,
+            status_code=exc.status_code,
+            latency_ms=0.0,
+            ttft_ms=None,
+            output_tokens=None,
+            fallback_used=False,
+            error=str(exc),
+            error_category="admission_rejected",
+            request_payload=chat_request,
+            response_payload=None,
+            admission_decision=exc.decision,
+        )
+        raise
+
+    queue_depth = 0
+    if lease.decision.queue_snapshot is not None:
+        queue_depth = lease.decision.queue_snapshot.current_depth
+    services.telemetry.record_admission_decision(
+        request_id=context.request_id,
+        tenant_id=context.tenant_id,
+        request_class=context.request_class.value,
+        state=lease.decision.state.value,
+        reason_code=(
+            None if lease.decision.reason_code is None else lease.decision.reason_code.value
+        ),
+        queue_depth=queue_depth,
+        queue_wait_ms=lease.decision.queue_wait_ms,
+        status_code=200,
+    )
+    logger.info(
+        "admission_decision",
+        tenant_id=context.tenant_id,
+        request_class=context.request_class.value,
+        session_id=context.session_id,
+        state=lease.decision.state.value,
+        reason_code=(
+            None if lease.decision.reason_code is None else lease.decision.reason_code.value
+        ),
+        queue_depth=queue_depth,
+        queue_wait_ms=lease.decision.queue_wait_ms,
+    )
+    return lease
+
+
+def _execution_target_from_context(
+    *,
+    model_alias: str,
+    context: RequestContext,
+) -> ExecutionTarget:
+    if context.internal_backend_pin is not None:
+        return ExecutionTarget(
+            target_type=ExecutionTargetType.PINNED_BACKEND,
+            model_alias=model_alias,
+            pinned_backend=context.internal_backend_pin,
+        )
+    return ExecutionTarget(
+        target_type=ExecutionTargetType.ROUTING_POLICY,
+        model_alias=model_alias,
+        routing_policy=context.policy,
+    )

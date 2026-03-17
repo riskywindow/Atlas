@@ -2,10 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Protocol
 
-from switchyard.schemas.backend import BackendCapabilities, BackendHealth, BackendType
-from switchyard.schemas.chat import ChatCompletionRequest, ChatCompletionResponse
+from switchyard.schemas.backend import (
+    BackendCapabilities,
+    BackendHealth,
+    BackendStatusSnapshot,
+    BackendType,
+)
+from switchyard.schemas.chat import (
+    ChatCompletionChunk,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+)
 from switchyard.schemas.routing import RequestContext
 
 
@@ -21,6 +31,9 @@ class BackendAdapter(Protocol):
     async def capabilities(self) -> BackendCapabilities:
         """Return the backend's declared capabilities."""
 
+    async def status(self) -> BackendStatusSnapshot:
+        """Return a point-in-time backend status snapshot."""
+
     async def warmup(self, model_id: str | None = None) -> None:
         """Perform adapter-specific warmup."""
 
@@ -30,3 +43,10 @@ class BackendAdapter(Protocol):
         context: RequestContext,
     ) -> ChatCompletionResponse:
         """Generate a chat completion response."""
+
+    def stream_generate(
+        self,
+        request: ChatCompletionRequest,
+        context: RequestContext,
+    ) -> AsyncIterator[ChatCompletionChunk]:
+        """Yield streamed chat completion chunks."""

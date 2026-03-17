@@ -1,0 +1,40 @@
+{
+  "name": "phase5_kind_smoke",
+  "model": "chat-smoke",
+  "model_alias": "chat-smoke",
+  "family": "short_chat",
+  "policy": "balanced",
+  "workload_shape": "interactive",
+  "request_count": 2,
+  "input_messages_per_request": 1,
+  "stream": false,
+  "max_output_tokens": 64,
+  "temperature": 0.0,
+  "top_p": 1.0,
+  "workload_generation": {
+    "pattern": "uniform",
+    "seed": 29,
+    "burst_size": 1
+  },
+  "items": [
+    {
+      "item_id": "kind-0001",
+      "family": "short_chat",
+      "prompt": "Reply with the word ready.",
+      "metadata": {
+        "tenant_id": "tenant-kind-smoke",
+        "request_class": "standard"
+      }
+    },
+    {
+      "item_id": "kind-0002",
+      "family": "short_chat",
+      "prompt": "Reply with the word routed.",
+      "metadata": {
+        "tenant_id": "tenant-kind-smoke",
+        "request_class": "standard"
+      }
+    }
+  ],
+  "scenario_seed": 29
+}

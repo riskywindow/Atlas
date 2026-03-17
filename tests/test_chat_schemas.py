@@ -2,6 +2,9 @@ from pydantic import ValidationError
 
 from switchyard.schemas.chat import (
     ChatCompletionChoice,
+    ChatCompletionChunk,
+    ChatCompletionChunkChoice,
+    ChatCompletionChunkDelta,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatMessage,
@@ -49,3 +52,34 @@ def test_chat_response_rejects_non_assistant_choice() -> None:
         assert "assistant" in str(exc)
     else:
         raise AssertionError("ChatCompletionChoice should reject non-assistant messages")
+
+
+def test_chat_stream_chunk_serializes() -> None:
+    chunk = ChatCompletionChunk(
+        id="chunk_123",
+        model="mock-chat",
+        choices=[
+            ChatCompletionChunkChoice(
+                index=0,
+                delta=ChatCompletionChunkDelta(role=ChatRole.ASSISTANT, content="Hi"),
+            )
+        ],
+        backend_name="mock-backend",
+    )
+
+    payload = chunk.model_dump(mode="json")
+
+    assert payload["choices"][0]["delta"]["role"] == "assistant"
+    assert payload["choices"][0]["delta"]["content"] == "Hi"
+
+
+def test_chat_stream_chunk_rejects_empty_delta() -> None:
+    try:
+        ChatCompletionChunkChoice(
+            index=0,
+            delta=ChatCompletionChunkDelta(),
+        )
+    except ValidationError as exc:
+        assert "role and/or content" in str(exc)
+    else:
+        raise AssertionError("ChatCompletionChunkDelta should reject empty deltas")

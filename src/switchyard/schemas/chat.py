@@ -1,4 +1,4 @@
-"""Chat request and response schemas."""
+"""Chat request, response, and streaming schemas."""
 
 from __future__ import annotations
 
@@ -76,6 +76,48 @@ class ChatCompletionChoice(BaseModel):
     def validate_assistant_message(self) -> ChatCompletionChoice:
         if self.message.role is not ChatRole.ASSISTANT:
             msg = "completion choices must contain assistant messages"
+            raise ValueError(msg)
+        return self
+
+
+class ChatCompletionChunkDelta(BaseModel):
+    """Incremental content emitted during streamed generation."""
+
+    role: ChatRole | None = None
+    content: str | None = None
+
+    @model_validator(mode="after")
+    def validate_delta(self) -> ChatCompletionChunkDelta:
+        if self.role is None and self.content is None:
+            msg = "chunk deltas must include role and/or content"
+            raise ValueError(msg)
+        return self
+
+
+class ChatCompletionChunkChoice(BaseModel):
+    """One streamed chunk for a response choice."""
+
+    index: int = Field(ge=0)
+    delta: ChatCompletionChunkDelta
+    finish_reason: FinishReason | None = None
+
+
+class ChatCompletionChunk(BaseModel):
+    """OpenAI-like streamed chat completion chunk emitted by Switchyard."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=128)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    model: str = Field(min_length=1, max_length=128)
+    choices: list[ChatCompletionChunkChoice] = Field(min_length=1)
+    backend_name: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_finish_reason_usage(self) -> ChatCompletionChunk:
+        finish_count = sum(choice.finish_reason is not None for choice in self.choices)
+        if finish_count > 1:
+            msg = "at most one chunk choice may include a finish_reason"
             raise ValueError(msg)
         return self
 

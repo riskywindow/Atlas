@@ -1,0 +1,58 @@
+{
+  "name": "phase5_compose_short_chat",
+  "model": "chat-shared",
+  "model_alias": "chat-shared",
+  "family": "short_chat",
+  "policy": "balanced",
+  "workload_shape": "interactive",
+  "request_count": 4,
+  "input_messages_per_request": 1,
+  "stream": false,
+  "max_output_tokens": 128,
+  "temperature": 0.2,
+  "top_p": 1.0,
+  "workload_generation": {
+    "pattern": "uniform",
+    "seed": 17,
+    "burst_size": 1
+  },
+  "items": [
+    {
+      "item_id": "compose-0001",
+      "family": "short_chat",
+      "prompt": "Summarize why explicit worker inventory matters for a control plane.",
+      "metadata": {
+        "tenant_id": "tenant-compose-a",
+        "request_class": "standard"
+      }
+    },
+    {
+      "item_id": "compose-0002",
+      "family": "short_chat",
+      "prompt": "Explain the difference between a control-plane gateway and a host-native worker.",
+      "metadata": {
+        "tenant_id": "tenant-compose-a",
+        "request_class": "standard"
+      }
+    },
+    {
+      "item_id": "compose-0003",
+      "family": "short_chat",
+      "prompt": "List two reasons to keep Apple GPU workers host-native on macOS.",
+      "metadata": {
+        "tenant_id": "tenant-compose-b",
+        "request_class": "latency_sensitive"
+      }
+    },
+    {
+      "item_id": "compose-0004",
+      "family": "short_chat",
+      "prompt": "Give one sentence about how Compose can address host.docker.internal workers.",
+      "metadata": {
+        "tenant_id": "tenant-compose-b",
+        "request_class": "latency_sensitive"
+      }
+    }
+  ],
+  "scenario_seed": 17
+}

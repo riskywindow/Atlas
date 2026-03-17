@@ -15,24 +15,53 @@ The goal is **not** to build a thin LLM wrapper. The goal is to build a serious 
 ---
 
 ## Current phase
-**Phase 0: foundation and contracts**
+**Phase 5: portable worker inventory and deployment paths**
 
-This phase should create the repo skeleton, shared contracts, mock backend, gateway skeleton, routing primitives, telemetry scaffolding, and benchmark artifact format.
+Phase 5 builds on the Phase 4 routing and benchmarking core with explicit
+network-addressable worker endpoints, portable backend-instance inventory, stronger
+isolation of Apple-specific backend dependencies from the control plane, and
+deployment-aware local run paths. The system should still be Mac-first for real local
+backends, but the control plane, contracts, and benchmark artifacts now need to model
+future remote workers and mixed deployment topologies directly.
 
-### Definition of done for Phase 0
-Phase 0 is complete when all of the following are true:
-1. The repo has a clean Python workspace with linting, typing, and tests.
-2. There is a shared domain model for requests, responses, route decisions, backend capabilities, backend health, and benchmark artifacts.
-3. There is a `BackendAdapter` interface / protocol and a deterministic `MockBackendAdapter` implementation.
-4. There is a FastAPI gateway with:
-   - `GET /healthz`
-   - `GET /readyz`
-   - `POST /v1/chat/completions`
-5. The gateway can serve a chat-completions-style response using the mock backend.
-6. Routing logic exists as a separate module from the HTTP layer.
-7. Structured logging and basic telemetry hooks exist.
-8. A benchmark artifact can be written to disk in a reproducible JSON format.
-9. The project can be booted locally with a short, documented dev flow.
+Phase 5 is explicitly about making the control plane deployable and portable without
+overengineering. Containerization, Docker Compose, a `kind` path, and worker inventory
+must show up in typed contracts, config, docs, and tests rather than living as implied
+tribal knowledge.
+
+### Definition of done for Phase 5
+Phase 5 is complete when all of the following are true:
+1. The repo keeps a clean Python workspace with linting, typing, and tests.
+2. There are at least two real backend adapter paths behind the shared contracts:
+   - `mlx_lm`
+   - `vllm_metal`
+3. Local model registration supports multiple configured backends without coupling the
+   control plane to Apple-specific runtime details.
+4. The FastAPI gateway still serves `GET /healthz`, `GET /readyz`, and
+   `POST /v1/chat/completions`, now with health-aware fallback across routed candidates.
+5. Router policy modes, overload admission, backend protection, and progressive-delivery
+   decisions remain outside the HTTP layer and are benchmarkable without spinning up the
+   API.
+6. Structured logging and telemetry include route-level decision, overload, fallback,
+   circuit-breaker, and degradation signals.
+7. Session affinity can keep multi-turn chat on a stable serving path without coupling
+   the control plane to hardware-specific logic.
+8. Shadow traffic and canary routing stay explicit, bounded, and safe by default for
+   local and CI workflows.
+   Shadow traffic must never change the primary user-visible response path.
+9. Typed backend inventory can describe multiple backend instances per deployment,
+   including explicit network endpoints for future remote or containerized workers.
+10. Apple-specific imports stay lazy and optional so CI-friendly tests do not require
+   Apple GPU hardware and portable control-plane images do not pull those dependencies in
+   by default.
+11. The control plane has a containerized local deployment path, a Docker Compose stack,
+   and a documented `kind` path that preserve the single-workspace developer model.
+12. Benchmark and replay tooling can compare aliases, policies, pinned backends,
+   deployment variants, and progressive-delivery variants with machine-readable
+   artifacts and readable markdown reports.
+13. Deployment docs and runbooks cover local host-native backends, containerized control
+   plane operation, and future remote-worker extension points without assuming Apple GPU
+   access in CI.
 
 ---
 
@@ -42,16 +71,22 @@ Phase 0 is complete when all of the following are true:
 - Primary development machine: **Apple Silicon Mac (M4 Pro, 24GB RAM)**.
 - During the Mac-first phase, **real model backends should run host-native on macOS**.
 - Containerized services are fine for infra such as Postgres, Redis, Prometheus, Grafana, and the OpenTelemetry Collector.
-- Do **not** add CUDA-only or Triton-only runtime dependencies in Phase 0.
+- Do **not** add CUDA-only or Triton-only runtime dependencies in Phase 5.
 - Keep the design explicitly portable so later phases can add `vllm_cuda` or other remote GPU workers.
 
 ### Scope constraints
-- Phase 0 should **not** integrate real MLX-LM or vLLM-Metal yet unless required for a tiny smoke-test stub.
-- Use **mocked or simulated backends** for the foundation work.
-- Avoid premature multi-service complexity. In Phase 0, a **single Python workspace** is preferred over many separate packages.
+- Phase 5 should preserve **two real Mac-native backend paths** behind the same adapter boundary:
+  - `mlx_lm`
+  - `vllm_metal`
+- A single logical model alias may map to multiple backend implementations. Registration, routing, and benchmarks should preserve that abstraction instead of assuming one alias implies one runtime.
+- A single logical backend deployment may map to multiple explicit worker instances with
+  distinct network addresses. Inventory should stay typed and portable to future remote
+  workers.
+- Avoid premature multi-service complexity. In Phase 5, a **single Python workspace** is still preferred over many separate packages.
 - Do not build a frontend UI yet.
-- Do not build Kubernetes manifests yet unless needed for a tiny placeholder doc.
-- Do not introduce Ray into the request path in Phase 0.
+- A small `kind` deployment path is in scope, but avoid a production-grade Kubernetes
+  platform build-out.
+- Do not introduce Ray into the request path in Phase 5.
 
 ### Quality constraints
 - Prefer **small vertical slices** over giant speculative scaffolding.
@@ -74,6 +109,8 @@ Phase 0 is complete when all of the following are true:
 
 4. **Observability is not optional.**
    Every request should have a request ID and trace context. Logs must be structured.
+   Overload, degradation, and rollout decisions must be explainable from logs and
+   artifacts.
 
 5. **Benchmarks are product features.**
    Benchmark artifact schemas and reproducibility matter from the beginning.
@@ -86,7 +123,7 @@ Phase 0 is complete when all of the following are true:
 
 ---
 
-## Recommended stack for Phase 0
+## Recommended stack for Phase 5
 - Python 3.12
 - `uv` for environment and dependency management
 - FastAPI
@@ -105,7 +142,7 @@ Keep the stack minimal and coherent.
 
 ---
 
-## Suggested Phase 0 repo layout
+## Suggested repo layout
 Use a **single Python project** with clear internal modules.
 
 ```text
@@ -194,6 +231,13 @@ Create typed schemas for:
 - `RequestContext`
 - `WorkloadShape`
 
+Phase 5 routing decisions should keep enough information to support:
+- route-level observability,
+- health-aware fallback,
+- bounded admission and backend protection,
+- session affinity and progressive delivery,
+- comparative policy benchmarking.
+
 ### Benchmark schemas
 Create typed schemas for:
 - `BenchmarkScenario`
@@ -202,6 +246,8 @@ Create typed schemas for:
 - `BenchmarkRunArtifact`
 
 Artifacts should be reproducible and serializable.
+Phase 5 may add replay-, overload-, deployment-, and comparison-oriented schemas as long
+as the JSON remains easy to diff and archive.
 
 ---
 
@@ -234,6 +280,8 @@ The mock backend should be:
 - configurable,
 - capable of simulating latency,
 - capable of simulating health states,
+- capable of simulating explicit worker-instance metadata when tests need deployment
+  inventory,
 - suitable for routing tests.
 
 The mock backend should return responses that include enough metadata to verify which backend handled the request.
@@ -243,12 +291,16 @@ The mock backend should return responses that include enough metadata to verify 
 ## Routing design rules
 - The router must be a pure Python service/module that can be tested directly.
 - The gateway should ask the router for a `RouteDecision`, then invoke the chosen backend.
-- Phase 0 routing can be simple and static, but it must leave room for:
+- Phase 5 routing can still be simple and deterministic, but it must leave room for:
   - latency-first,
   - balanced,
   - quality-first,
   - local-only,
-  - future cost-aware or learned routing.
+  - future cost-aware or learned routing,
+  - bounded admission and backend protection,
+  - session affinity, canaries, and shadow routing,
+  - explicit instance-aware routing when worker inventory is available.
+- Health-aware fallback should happen without baking hardware-specific assumptions into the control plane.
 
 Do not bury routing rules inside FastAPI route handlers.
 
@@ -319,7 +371,6 @@ Store initial artifacts as JSON. Add Parquet later only if it clearly helps.
 ### Documentation
 - Keep `README.md` accurate.
 - Add `docs/architecture.md` once the skeleton exists.
-- Update PROGRESS.md every time with what was done
 - When making important structural decisions, add a short ADR under `docs/adr/`.
 
 ---
@@ -369,6 +420,16 @@ When choosing between multiple valid next steps, prefer this order:
 7. Telemetry scaffolding
 8. Benchmark artifact format and CLI
 9. Documentation and dev ergonomics
+
+## Phase 5 implementation priorities
+When choosing between multiple valid next steps, prefer this order:
+1. Keep the shared contracts, routing core, and test baseline clean
+2. Add explicit worker inventory and network endpoint modeling in small slices
+3. Isolate Apple-specific runtime dependencies from the portable control-plane packaging
+4. Add containerized control-plane, Docker Compose, and `kind` deployment paths with safe defaults
+5. Extend benchmarks, replay, reports, and runbooks to cover deployment-aware execution
+6. Preserve adapter portability for future `vllm_cuda`, cloud, and remote workers
+7. Update documentation and local dev ergonomics
 
 ---
 

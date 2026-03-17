@@ -5,19 +5,48 @@ description = "Mac-first, backend-agnostic inference fabric"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+  # Core control-plane runtime.
   "fastapi>=0.116.0,<1.0.0",
   "httpx>=0.28.0,<1.0.0",
-  "opentelemetry-api>=1.36.0,<2.0.0",
-  "opentelemetry-instrumentation-fastapi>=0.57b0,<1.0.0",
-  "opentelemetry-sdk>=1.36.0,<2.0.0",
   "pydantic>=2.11.0,<3.0.0",
   "pydantic-settings>=2.10.0,<3.0.0",
   "structlog>=25.4.0,<26.0.0",
   "typer>=0.16.0,<1.0.0",
   "uvicorn>=0.35.0,<1.0.0",
+  # Built-in observability surface for the control plane.
+  "opentelemetry-api>=1.36.0,<2.0.0",
+  "opentelemetry-instrumentation-fastapi>=0.57b0,<1.0.0",
+  "opentelemetry-sdk>=1.36.0,<2.0.0",
 ]
 
+[project.optional-dependencies]
+mlx = [
+  "mlx-lm>=0.26.0,<1.0.0",
+]
+vllm-metal = [
+  "vllm>=0.8.0,<1.0.0",
+]
+apple-workers = [
+  "mlx-lm>=0.26.0,<1.0.0",
+  "vllm>=0.8.0,<1.0.0",
+]
+
+[project.scripts]
+switchyard-control-plane = "switchyard.control_plane.cli:main"
+switchyard-worker = "switchyard.worker.cli:main"
+
 [dependency-groups]
+test = [
+  "pytest>=8.4.0,<9.0.0",
+  "pytest-asyncio>=1.1.0,<2.0.0",
+  "pytest-cov>=6.2.0,<7.0.0",
+]
+lint = [
+  "ruff>=0.12.0,<1.0.0",
+]
+typecheck = [
+  "mypy>=1.17.0,<2.0.0",
+]
 dev = [
   "mypy>=1.17.0,<2.0.0",
   "pytest>=8.4.0,<9.0.0",
