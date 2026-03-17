@@ -12,7 +12,13 @@ from switchyard.control.affinity import SessionAffinityService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
 from switchyard.control.locality import PrefixLocalityService
-from switchyard.router.policies import CandidateAssessment, PolicyEvaluation, PolicyRegistry
+from switchyard.router.policies import (
+    AdaptivePolicyConfig,
+    CandidateAssessment,
+    PolicyEvaluation,
+    PolicyRegistry,
+    TransparentAdaptivePolicy,
+)
 from switchyard.router.service import NoRouteAvailableError, RouterService
 from switchyard.schemas.backend import (
     BackendCapabilities,
@@ -22,6 +28,11 @@ from switchyard.schemas.backend import (
     DeviceClass,
     PerformanceHint,
     QualityHint,
+)
+from switchyard.schemas.benchmark import (
+    CandidateRouteEstimateContext,
+    CounterfactualObjective,
+    HistoricalRouteEstimate,
 )
 from switchyard.schemas.chat import ChatCompletionRequest, ChatMessage, ChatRole
 from switchyard.schemas.routing import (
@@ -113,6 +124,40 @@ class ScoreOverridePolicy:
             selected_reason_codes=[self._reason_code],
             selected_reason=[f"selected_by={self.policy_reference.policy_id}"],
         )
+
+
+class FakeHistoricalPredictor:
+    def __init__(self, estimates: dict[str, HistoricalRouteEstimate]) -> None:
+        self._estimates = estimates
+
+    def estimate(self, context: CandidateRouteEstimateContext) -> HistoricalRouteEstimate:
+        estimate = self._estimates[context.backend_name]
+        return estimate.model_copy(update={"context": context})
+
+
+def build_estimate(
+    *,
+    backend_name: str,
+    evidence_count: int,
+    sufficient_data: bool,
+    expected_latency_ms: float | None = None,
+    expected_tokens_per_second: float | None = None,
+    expected_error_rate: float | None = None,
+    insufficiency_reason: str | None = None,
+) -> HistoricalRouteEstimate:
+    return HistoricalRouteEstimate(
+        context=CandidateRouteEstimateContext(
+            model_alias="mock-chat",
+            backend_name=backend_name,
+        ),
+        evidence_count=evidence_count,
+        sufficient_data=sufficient_data,
+        expected_latency_ms=expected_latency_ms,
+        expected_tokens_per_second=expected_tokens_per_second,
+        expected_error_rate=expected_error_rate,
+        insufficiency_reason=insufficiency_reason,
+        rationale=[f"estimate_for={backend_name}"],
+    )
 
 
 def build_request(model: str = "mock-chat") -> ChatCompletionRequest:
@@ -1184,3 +1229,386 @@ async def test_router_records_shadow_policy_without_changing_primary_route() -> 
     assert shadow.selected_backend == "beta"
     assert shadow.selection_reason_codes == [RouteSelectionReasonCode.SHADOW_POLICY_SCORE]
     assert shadow.selected_reason == ["selected_by=shadow-predictive"]
+
+
+@pytest.mark.asyncio
+async def test_adaptive_policy_abstains_on_cold_start_and_falls_back() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(name="alpha", latency_ms=15.0, quality_tier=2, device_class=DeviceClass.CPU)
+    )
+    registry.register(
+        build_adapter(name="beta", latency_ms=10.0, quality_tier=3, device_class=DeviceClass.CPU)
+    )
+    adaptive_policy = TransparentAdaptivePolicy(
+        FakeHistoricalPredictor(
+            {
+                "alpha": build_estimate(
+                    backend_name="alpha",
+                    evidence_count=0,
+                    sufficient_data=False,
+                    insufficiency_reason="no matching historical evidence",
+                ),
+                "beta": build_estimate(
+                    backend_name="beta",
+                    evidence_count=0,
+                    sufficient_data=False,
+                    insufficiency_reason="no matching historical evidence",
+                ),
+            }
+        ),
+        config=AdaptivePolicyConfig(
+            policy_id="adaptive-balanced-v1",
+            fallback_policy=RoutingPolicy.BALANCED,
+            min_confidence_margin=10.0,
+        ),
+        compatibility_policy=RoutingPolicy.BALANCED,
+    )
+    router = RouterService(
+        registry,
+        policy_registry=PolicyRegistry(primary_policies=[adaptive_policy]),
+    )
+
+    decision = await router.route(build_request(), build_context(RoutingPolicy.BALANCED))
+
+    assert decision.backend_name == "beta"
+    assert decision.policy_reference == PolicyReference(
+        policy_id="adaptive-balanced-v1",
+        policy_version="phase6.v1",
+    )
+    assert decision.explanation is not None
+    assert decision.explanation.selection_reason_codes[:2] == [
+        RouteSelectionReasonCode.ADAPTIVE_ABSTAIN,
+        RouteSelectionReasonCode.ADAPTIVE_FALLBACK,
+    ]
+    assert "adaptive policy abstained" in decision.explanation.selected_reason[0]
+
+
+@pytest.mark.asyncio
+async def test_adaptive_policy_abstains_when_top_candidates_are_too_close() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(name="alpha", latency_ms=30.0, quality_tier=2, device_class=DeviceClass.CPU)
+    )
+    registry.register(
+        build_adapter(name="beta", latency_ms=10.0, quality_tier=3, device_class=DeviceClass.CPU)
+    )
+    adaptive_policy = TransparentAdaptivePolicy(
+        FakeHistoricalPredictor(
+            {
+                "alpha": build_estimate(
+                    backend_name="alpha",
+                    evidence_count=12,
+                    sufficient_data=True,
+                    expected_latency_ms=50.0,
+                    expected_tokens_per_second=70.0,
+                    expected_error_rate=0.01,
+                ),
+                "beta": build_estimate(
+                    backend_name="beta",
+                    evidence_count=12,
+                    sufficient_data=True,
+                    expected_latency_ms=55.0,
+                    expected_tokens_per_second=70.0,
+                    expected_error_rate=0.01,
+                ),
+            }
+        ),
+        config=AdaptivePolicyConfig(
+            policy_id="adaptive-close-margin-v1",
+            fallback_policy=RoutingPolicy.BALANCED,
+            min_confidence_margin=20.0,
+        ),
+        compatibility_policy=RoutingPolicy.BALANCED,
+    )
+    router = RouterService(
+        registry,
+        policy_registry=PolicyRegistry(primary_policies=[adaptive_policy]),
+    )
+
+    decision = await router.route(build_request(), build_context(RoutingPolicy.BALANCED))
+
+    assert decision.backend_name == "beta"
+    assert decision.explanation is not None
+    assert (
+        decision.explanation.selection_reason_codes[0]
+        is RouteSelectionReasonCode.ADAPTIVE_ABSTAIN
+    )
+
+
+@pytest.mark.asyncio
+async def test_adaptive_policy_rejects_unstable_backend() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(name="alpha", latency_ms=30.0, quality_tier=2, device_class=DeviceClass.CPU)
+    )
+    registry.register(
+        build_adapter(name="beta", latency_ms=50.0, quality_tier=3, device_class=DeviceClass.CPU)
+    )
+    adaptive_policy = TransparentAdaptivePolicy(
+        FakeHistoricalPredictor(
+            {
+                "alpha": build_estimate(
+                    backend_name="alpha",
+                    evidence_count=20,
+                    sufficient_data=True,
+                    expected_latency_ms=5.0,
+                    expected_tokens_per_second=150.0,
+                    expected_error_rate=0.40,
+                ),
+                "beta": build_estimate(
+                    backend_name="beta",
+                    evidence_count=20,
+                    sufficient_data=True,
+                    expected_latency_ms=40.0,
+                    expected_tokens_per_second=70.0,
+                    expected_error_rate=0.01,
+                ),
+            }
+        ),
+        config=AdaptivePolicyConfig(
+            policy_id="adaptive-stability-v1",
+            fallback_policy=RoutingPolicy.BALANCED,
+            max_expected_error_rate=0.10,
+        ),
+        compatibility_policy=RoutingPolicy.BALANCED,
+    )
+    router = RouterService(
+        registry,
+        policy_registry=PolicyRegistry(primary_policies=[adaptive_policy]),
+    )
+
+    decision = await router.route(build_request(), build_context(RoutingPolicy.BALANCED))
+
+    assert decision.backend_name == "beta"
+    assert decision.explanation is not None
+    alpha = next(
+        candidate
+        for candidate in decision.explanation.candidates
+        if candidate.backend_name == "alpha"
+    )
+    assert alpha.rejection_reason == "predicted error rate exceeds adaptive-policy limit"
+    assert alpha.reason_codes == [RouteSelectionReasonCode.ADAPTIVE_ABSTAIN]
+
+
+@pytest.mark.asyncio
+async def test_adaptive_policy_selects_best_supported_candidate_with_exploration_off() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(name="alpha", latency_ms=25.0, quality_tier=2, device_class=DeviceClass.CPU)
+    )
+    registry.register(
+        build_adapter(name="beta", latency_ms=30.0, quality_tier=2, device_class=DeviceClass.CPU)
+    )
+    adaptive_policy = TransparentAdaptivePolicy(
+        FakeHistoricalPredictor(
+            {
+                "alpha": build_estimate(
+                    backend_name="alpha",
+                    evidence_count=15,
+                    sufficient_data=True,
+                    expected_latency_ms=20.0,
+                    expected_tokens_per_second=90.0,
+                    expected_error_rate=0.01,
+                ),
+                "beta": build_estimate(
+                    backend_name="beta",
+                    evidence_count=15,
+                    sufficient_data=True,
+                    expected_latency_ms=90.0,
+                    expected_tokens_per_second=40.0,
+                    expected_error_rate=0.05,
+                ),
+            }
+        ),
+        config=AdaptivePolicyConfig(
+            policy_id="adaptive-latency-v1",
+            objective=CounterfactualObjective.LATENCY,
+            fallback_policy=RoutingPolicy.BALANCED,
+            exploration_enabled=False,
+            exploration_rate=1.0,
+        ),
+        compatibility_policy=RoutingPolicy.BALANCED,
+    )
+    router = RouterService(
+        registry,
+        policy_registry=PolicyRegistry(primary_policies=[adaptive_policy]),
+    )
+
+    decision = await router.route(build_request(), build_context(RoutingPolicy.BALANCED))
+
+    assert decision.backend_name == "alpha"
+    assert decision.explanation is not None
+    assert decision.explanation.selection_reason_codes == [
+        RouteSelectionReasonCode.ADAPTIVE_ESTIMATE
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adaptive_policy_ignores_exploration_in_deterministic_evaluation_mode() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(name="alpha", latency_ms=25.0, quality_tier=2, device_class=DeviceClass.CPU)
+    )
+    registry.register(
+        build_adapter(name="beta", latency_ms=30.0, quality_tier=2, device_class=DeviceClass.CPU)
+    )
+    adaptive_policy = TransparentAdaptivePolicy(
+        FakeHistoricalPredictor(
+            {
+                "alpha": build_estimate(
+                    backend_name="alpha",
+                    evidence_count=15,
+                    sufficient_data=True,
+                    expected_latency_ms=20.0,
+                    expected_tokens_per_second=90.0,
+                    expected_error_rate=0.01,
+                ),
+                "beta": build_estimate(
+                    backend_name="beta",
+                    evidence_count=15,
+                    sufficient_data=True,
+                    expected_latency_ms=90.0,
+                    expected_tokens_per_second=40.0,
+                    expected_error_rate=0.05,
+                ),
+            }
+        ),
+        config=AdaptivePolicyConfig(
+            policy_id="adaptive-deterministic-v1",
+            objective=CounterfactualObjective.LATENCY,
+            fallback_policy=RoutingPolicy.BALANCED,
+            exploration_enabled=True,
+            exploration_rate=1.0,
+            deterministic_evaluation=True,
+        ),
+        compatibility_policy=RoutingPolicy.BALANCED,
+    )
+    router = RouterService(
+        registry,
+        policy_registry=PolicyRegistry(primary_policies=[adaptive_policy]),
+    )
+
+    decision = await router.route(build_request(), build_context(RoutingPolicy.BALANCED))
+
+    assert decision.backend_name == "alpha"
+    assert decision.explanation is not None
+    assert decision.explanation.selection_reason_codes == [
+        RouteSelectionReasonCode.ADAPTIVE_ESTIMATE
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adaptive_policy_supports_bounded_deterministic_exploration() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(name="alpha", latency_ms=25.0, quality_tier=2, device_class=DeviceClass.CPU)
+    )
+    registry.register(
+        build_adapter(name="beta", latency_ms=30.0, quality_tier=2, device_class=DeviceClass.CPU)
+    )
+    adaptive_policy = TransparentAdaptivePolicy(
+        FakeHistoricalPredictor(
+            {
+                "alpha": build_estimate(
+                    backend_name="alpha",
+                    evidence_count=15,
+                    sufficient_data=True,
+                    expected_latency_ms=20.0,
+                    expected_tokens_per_second=90.0,
+                    expected_error_rate=0.01,
+                ),
+                "beta": build_estimate(
+                    backend_name="beta",
+                    evidence_count=15,
+                    sufficient_data=True,
+                    expected_latency_ms=90.0,
+                    expected_tokens_per_second=40.0,
+                    expected_error_rate=0.05,
+                ),
+            }
+        ),
+        config=AdaptivePolicyConfig(
+            policy_id="adaptive-explore-v1",
+            objective=CounterfactualObjective.LATENCY,
+            fallback_policy=RoutingPolicy.BALANCED,
+            exploration_enabled=True,
+            exploration_rate=1.0,
+        ),
+        compatibility_policy=RoutingPolicy.BALANCED,
+    )
+    router = RouterService(
+        registry,
+        policy_registry=PolicyRegistry(primary_policies=[adaptive_policy]),
+    )
+    context = build_context(RoutingPolicy.BALANCED)
+    context.request_id = "req-force-explore"
+
+    decision = await router.route(build_request(), context)
+
+    assert decision.backend_name == "beta"
+    assert decision.explanation is not None
+    assert decision.explanation.selection_reason_codes == [
+        RouteSelectionReasonCode.ADAPTIVE_EXPLORATION
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adaptive_policy_scopes_estimates_by_tenant_when_enabled() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(name="alpha", latency_ms=25.0, quality_tier=2, device_class=DeviceClass.CPU)
+    )
+    registry.register(
+        build_adapter(name="beta", latency_ms=30.0, quality_tier=2, device_class=DeviceClass.CPU)
+    )
+    captured_contexts: list[CandidateRouteEstimateContext] = []
+
+    class CapturingPredictor(FakeHistoricalPredictor):
+        def estimate(self, context: CandidateRouteEstimateContext) -> HistoricalRouteEstimate:
+            captured_contexts.append(context)
+            return super().estimate(context)
+
+    adaptive_policy = TransparentAdaptivePolicy(
+        CapturingPredictor(
+            {
+                "alpha": build_estimate(
+                    backend_name="alpha",
+                    evidence_count=15,
+                    sufficient_data=True,
+                    expected_latency_ms=20.0,
+                    expected_tokens_per_second=90.0,
+                    expected_error_rate=0.01,
+                ),
+                "beta": build_estimate(
+                    backend_name="beta",
+                    evidence_count=15,
+                    sufficient_data=True,
+                    expected_latency_ms=90.0,
+                    expected_tokens_per_second=40.0,
+                    expected_error_rate=0.05,
+                ),
+            }
+        ),
+        config=AdaptivePolicyConfig(
+            policy_id="adaptive-tenant-scope-v1",
+            fallback_policy=RoutingPolicy.BALANCED,
+            scope_by_tenant=True,
+        ),
+        compatibility_policy=RoutingPolicy.BALANCED,
+    )
+    router = RouterService(
+        registry,
+        policy_registry=PolicyRegistry(primary_policies=[adaptive_policy]),
+    )
+    context = RequestContext(
+        request_id="req-tenant-scope",
+        policy=RoutingPolicy.BALANCED,
+        workload_shape=WorkloadShape.INTERACTIVE,
+        tenant_id="tenant-gold",
+    )
+
+    decision = await router.route(build_request(), context)
+
+    assert decision.backend_name == "alpha"
+    assert {estimate_context.tenant_id for estimate_context in captured_contexts} == {"tenant-gold"}

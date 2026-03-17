@@ -157,6 +157,10 @@ class RouteSelectionReasonCode(StrEnum):
 
     POLICY_SCORE = "policy_score"
     SHADOW_POLICY_SCORE = "shadow_policy_score"
+    ADAPTIVE_ESTIMATE = "adaptive_estimate"
+    ADAPTIVE_ABSTAIN = "adaptive_abstain"
+    ADAPTIVE_EXPLORATION = "adaptive_exploration"
+    ADAPTIVE_FALLBACK = "adaptive_fallback"
     SESSION_AFFINITY = "session_affinity"
     CANARY_BASELINE = "canary_baseline"
     CANARY_SELECTED = "canary_selected"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -13,6 +14,11 @@ from switchyard.schemas.backend import (
     DeviceClass,
     PerformanceHint,
     QualityHint,
+)
+from switchyard.schemas.benchmark import (
+    CandidateRouteEstimateContext,
+    CounterfactualObjective,
+    HistoricalRouteEstimate,
 )
 from switchyard.schemas.chat import ChatCompletionRequest
 from switchyard.schemas.routing import (
@@ -124,6 +130,12 @@ class RoutingPolicyScorer(Protocol):
     ) -> PolicyEvaluation: ...
 
 
+class HistoricalRoutePredictor(Protocol):
+    """Minimal predictor contract used by transparent adaptive policies."""
+
+    def estimate(self, context: CandidateRouteEstimateContext) -> HistoricalRouteEstimate: ...
+
+
 class PolicyRegistry:
     """Registry for primary and shadow routing scorers."""
 
@@ -214,6 +226,385 @@ class CompatibilityRoutingPolicy:
             selected_reason_codes=[RouteSelectionReasonCode.POLICY_SCORE],
             selected_reason=selected.rationale,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class AdaptivePolicyConfig:
+    """Configuration for the transparent historical adaptive policy."""
+
+    policy_id: str
+    policy_version: str = _DEFAULT_POLICY_VERSION
+    fallback_policy: RoutingPolicy = RoutingPolicy.BALANCED
+    objective: CounterfactualObjective = CounterfactualObjective.BALANCED
+    min_samples: int = 5
+    min_confidence_margin: float = 25.0
+    max_expected_error_rate: float = 0.25
+    exploration_rate: float = 0.0
+    exploration_enabled: bool = False
+    deterministic_evaluation: bool = False
+    scope_by_tenant: bool = False
+    avoid_degraded_backends: bool = True
+    evidence_policy_id: str | None = None
+
+
+class TransparentAdaptivePolicy:
+    """Explainable historical adaptive scorer with bounded abstention and exploration."""
+
+    compatibility_policy: RoutingPolicy | None
+
+    def __init__(
+        self,
+        predictor: HistoricalRoutePredictor,
+        *,
+        config: AdaptivePolicyConfig,
+        compatibility_policy: RoutingPolicy | None = None,
+    ) -> None:
+        self._predictor = predictor
+        self._config = config
+        self.compatibility_policy = compatibility_policy
+        self.policy_reference = PolicyReference(
+            policy_id=config.policy_id,
+            policy_version=config.policy_version,
+        )
+        self._fallback = CompatibilityRoutingPolicy(
+            config.fallback_policy,
+            policy_id=config.fallback_policy.value,
+            policy_version=config.policy_version,
+        )
+
+    def evaluate(
+        self,
+        *,
+        request: ChatCompletionRequest,
+        context: RequestContext,
+        candidates: Sequence[BackendStatusSnapshot],
+    ) -> PolicyEvaluation:
+        """Evaluate candidates with a transparent adaptive heuristic over historical evidence."""
+
+        adaptive_assessments = [
+            self._adaptive_assessment(
+                request=request,
+                context=context,
+                snapshot=snapshot,
+            )
+            for snapshot in candidates
+        ]
+        eligible = [assessment for assessment in adaptive_assessments if assessment.eligible]
+        if not eligible:
+            return self._abstain_with_fallback(
+                request=request,
+                context=context,
+                candidates=candidates,
+                reason="adaptive policy abstained because no candidate met the evidence threshold",
+                adaptive_assessments=adaptive_assessments,
+            )
+        ranked = _rank_assessments(eligible)
+        best = ranked[0]
+        runner_up = ranked[1] if len(ranked) > 1 else None
+        if not _confident_enough(
+            best=best,
+            runner_up=runner_up,
+            min_confidence_margin=self._config.min_confidence_margin,
+        ):
+            return self._abstain_with_fallback(
+                request=request,
+                context=context,
+                candidates=candidates,
+                reason=(
+                    "adaptive policy abstained because the evidence margin between the top "
+                    "candidates was too small"
+                ),
+                adaptive_assessments=adaptive_assessments,
+            )
+        selected = best
+        selected_reason_codes = [RouteSelectionReasonCode.ADAPTIVE_ESTIMATE]
+        selected_reason = [
+            f"adaptive policy selected backend={best.snapshot.name}",
+            *best.rationale,
+        ]
+        if self._should_explore(context=context, ranked=ranked):
+            selected = ranked[1]
+            selected_reason_codes = [RouteSelectionReasonCode.ADAPTIVE_EXPLORATION]
+            selected_reason = [
+                (
+                    "adaptive policy selected a bounded exploration candidate because the "
+                    "deterministic exploration gate fired"
+                ),
+                *selected.rationale,
+            ]
+        return PolicyEvaluation(
+            policy_reference=self.policy_reference,
+            assessments=_rank_assessments(adaptive_assessments),
+            selected_backend=selected.snapshot.name,
+            selected_reason_codes=selected_reason_codes,
+            selected_reason=selected_reason,
+        )
+
+    def _adaptive_assessment(
+        self,
+        *,
+        request: ChatCompletionRequest,
+        context: RequestContext,
+        snapshot: BackendStatusSnapshot,
+    ) -> CandidateAssessment:
+        estimate = self._predictor.estimate(
+            _estimate_context(
+                request=request,
+                context=context,
+                snapshot=snapshot,
+                evidence_policy_id=(
+                    self._config.evidence_policy_id or self._config.fallback_policy.value
+                ),
+                scope_by_tenant=self._config.scope_by_tenant,
+            )
+        )
+        rationale = [
+            f"policy={self.policy_reference.policy_id}",
+            f"fallback_policy={self._config.fallback_policy.value}",
+            f"evidence_count={estimate.evidence_count}",
+        ]
+        if estimate.sufficient_data:
+            rationale.append("historical evidence met the configured minimum sample threshold")
+        elif estimate.insufficiency_reason is not None:
+            rationale.append(estimate.insufficiency_reason)
+        if self._config.avoid_degraded_backends and (
+            snapshot.health.state is BackendHealthState.DEGRADED
+        ):
+            return CandidateAssessment(
+                snapshot=snapshot,
+                score=None,
+                eligible=False,
+                rationale=[*rationale, "backend health is degraded so adaptive routing abstains"],
+                reason_codes=[RouteSelectionReasonCode.ADAPTIVE_ABSTAIN],
+                rejection_reason="adaptive policy avoids degraded backends",
+            )
+        if not estimate.sufficient_data:
+            return CandidateAssessment(
+                snapshot=snapshot,
+                score=None,
+                eligible=False,
+                rationale=rationale,
+                reason_codes=[RouteSelectionReasonCode.ADAPTIVE_ABSTAIN],
+                rejection_reason="insufficient historical evidence for adaptive routing",
+            )
+        if (
+            estimate.expected_error_rate is not None
+            and estimate.expected_error_rate > self._config.max_expected_error_rate
+        ):
+            return CandidateAssessment(
+                snapshot=snapshot,
+                score=None,
+                eligible=False,
+                rationale=[
+                    *rationale,
+                    (
+                        "adaptive policy rejected the candidate because the predicted error "
+                        f"rate {estimate.expected_error_rate:.3f} exceeds the configured limit"
+                    ),
+                ],
+                reason_codes=[RouteSelectionReasonCode.ADAPTIVE_ABSTAIN],
+                rejection_reason="predicted error rate exceeds adaptive-policy limit",
+            )
+        score = _score_estimate(estimate=estimate, objective=self._config.objective)
+        return CandidateAssessment(
+            snapshot=snapshot,
+            score=score,
+            eligible=True,
+            rationale=[
+                *rationale,
+                f"objective={self._config.objective.value}",
+                f"expected_latency_ms={_fmt_optional(estimate.expected_latency_ms)}",
+                f"expected_error_rate={_fmt_optional(estimate.expected_error_rate)}",
+                f"expected_tokens_per_second={_fmt_optional(estimate.expected_tokens_per_second)}",
+                f"score={score:.6f}",
+            ],
+            reason_codes=[RouteSelectionReasonCode.ADAPTIVE_ESTIMATE],
+        )
+
+    def _abstain_with_fallback(
+        self,
+        *,
+        request: ChatCompletionRequest,
+        context: RequestContext,
+        candidates: Sequence[BackendStatusSnapshot],
+        reason: str,
+        adaptive_assessments: Sequence[CandidateAssessment],
+    ) -> PolicyEvaluation:
+        fallback = self._fallback.evaluate(
+            request=request,
+            context=context,
+            candidates=candidates,
+        )
+        by_backend = {assessment.snapshot.name: assessment for assessment in adaptive_assessments}
+        merged = []
+        for fallback_assessment in fallback.assessments:
+            adaptive_assessment = by_backend.get(fallback_assessment.snapshot.name)
+            if adaptive_assessment is None:
+                merged.append(fallback_assessment)
+                continue
+            rationale = [
+                reason,
+                *adaptive_assessment.rationale,
+                *fallback_assessment.rationale,
+            ]
+            merged.append(
+                CandidateAssessment(
+                    snapshot=fallback_assessment.snapshot,
+                    score=fallback_assessment.score,
+                    eligible=True,
+                    rationale=rationale,
+                    reason_codes=[
+                        RouteSelectionReasonCode.ADAPTIVE_FALLBACK,
+                        *fallback_assessment.reason_codes,
+                    ],
+                    rejection_reason=adaptive_assessment.rejection_reason,
+                )
+            )
+        selected = next(
+            assessment
+            for assessment in merged
+            if assessment.snapshot.name == fallback.selected_backend
+        )
+        return PolicyEvaluation(
+            policy_reference=self.policy_reference,
+            assessments=merged,
+            selected_backend=fallback.selected_backend,
+            selected_reason_codes=[
+                RouteSelectionReasonCode.ADAPTIVE_ABSTAIN,
+                RouteSelectionReasonCode.ADAPTIVE_FALLBACK,
+                *fallback.selected_reason_codes,
+            ],
+            selected_reason=[reason, *selected.rationale],
+        )
+
+    def _should_explore(
+        self,
+        *,
+        context: RequestContext,
+        ranked: Sequence[CandidateAssessment],
+    ) -> bool:
+        if len(ranked) < 2:
+            return False
+        if self._config.deterministic_evaluation:
+            return False
+        if not self._config.exploration_enabled:
+            return False
+        if self._config.exploration_rate <= 0.0:
+            return False
+        gate = _deterministic_float(
+            self.policy_reference.policy_id,
+            context.request_id,
+            context.tenant_id,
+        )
+        return gate < self._config.exploration_rate
+
+
+def _estimate_context(
+    *,
+    request: ChatCompletionRequest,
+    context: RequestContext,
+    snapshot: BackendStatusSnapshot,
+    evidence_policy_id: str,
+    scope_by_tenant: bool,
+) -> CandidateRouteEstimateContext:
+    request_features = context.request_features
+    prefix_signal = context.prefix_locality_signal
+    backend_instance_id = (
+        snapshot.instance_inventory[0].instance_id if snapshot.instance_inventory else None
+    )
+    return CandidateRouteEstimateContext(
+        model_alias=request.model,
+        backend_name=snapshot.name,
+        backend_type=snapshot.capabilities.backend_type.value,
+        backend_instance_id=backend_instance_id,
+        policy_id=evidence_policy_id,
+        request_class=context.request_class,
+        tenant_id=context.tenant_id if scope_by_tenant else None,
+        input_length_bucket=(
+            None if request_features is None else request_features.input_length_bucket
+        ),
+        history_depth_bucket=(
+            None if request_features is None else request_features.history_depth_bucket
+        ),
+        workload_tags=[] if request_features is None else list(request_features.workload_tags),
+        prefix_hotness=None if prefix_signal is None else prefix_signal.hotness,
+        cache_opportunity=None if prefix_signal is None else prefix_signal.cache_opportunity,
+        locality_benefit=(
+            None if prefix_signal is None else prefix_signal.likely_benefits_from_locality
+        ),
+    )
+
+
+def _score_estimate(
+    *,
+    estimate: HistoricalRouteEstimate,
+    objective: CounterfactualObjective,
+) -> float:
+    resolved_latency = estimate.expected_latency_ms or 1000.0
+    resolved_ttft = estimate.expected_ttft_ms or 0.0
+    resolved_error_rate = estimate.expected_error_rate or 0.0
+    resolved_throughput = estimate.expected_tokens_per_second or 0.0
+    resolved_queue_delay = estimate.expected_queue_delay_ms or 0.0
+    if objective is CounterfactualObjective.LATENCY:
+        return -(
+            resolved_latency
+            + resolved_queue_delay
+            + (resolved_ttft / 2.0)
+            + (resolved_error_rate * 500.0)
+        )
+    if objective is CounterfactualObjective.THROUGHPUT:
+        return (
+            resolved_throughput
+            - (resolved_error_rate * 200.0)
+            - (resolved_latency / 20.0)
+        )
+    if objective is CounterfactualObjective.RELIABILITY:
+        return -(resolved_error_rate * 1000.0) - (resolved_latency / 50.0)
+    return (
+        resolved_throughput
+        - resolved_latency
+        - resolved_queue_delay
+        - (resolved_ttft / 2.0)
+        - (resolved_error_rate * 400.0)
+    )
+
+
+def _rank_assessments(assessments: Sequence[CandidateAssessment]) -> list[CandidateAssessment]:
+    return sorted(
+        assessments,
+        key=lambda assessment: (
+            not assessment.eligible,
+            -(assessment.score or float("-inf")),
+            assessment.snapshot.health.latency_ms or float("inf"),
+            assessment.snapshot.name,
+        ),
+    )
+
+
+def _confident_enough(
+    *,
+    best: CandidateAssessment,
+    runner_up: CandidateAssessment | None,
+    min_confidence_margin: float,
+) -> bool:
+    if best.score is None:
+        return False
+    if runner_up is None or runner_up.score is None:
+        return True
+    return (best.score - runner_up.score) >= min_confidence_margin
+
+
+def _deterministic_float(*parts: str | None) -> float:
+    seed = "::".join(part or "" for part in parts)
+    digest = hashlib.sha256(seed.encode("utf-8")).digest()
+    numerator = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    return numerator / float(2**64)
+
+
+def _fmt_optional(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.3f}"
 
 
 def compatibility_policies() -> list[RoutingPolicyScorer]:
