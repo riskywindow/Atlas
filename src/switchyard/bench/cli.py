@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
@@ -37,6 +38,7 @@ from switchyard.bench.artifacts import (
     write_json_model,
     write_markdown_report,
 )
+from switchyard.bench.recommendations import build_policy_recommendation_report
 from switchyard.bench.simulation import (
     compare_candidate_policies_offline,
     compatibility_policy_spec,
@@ -54,6 +56,8 @@ from switchyard.schemas.benchmark import (
     BenchmarkWarmupConfig,
     CapturedTraceRecord,
     CounterfactualObjective,
+    CounterfactualSimulationArtifact,
+    CounterfactualSimulationComparisonArtifact,
     ExecutionTarget,
     ExecutionTargetType,
     ExplainablePolicySpec,
@@ -805,6 +809,37 @@ def generate_report(
     typer.echo(rendered_path)
 
 
+@app.command("recommend-policies")
+def recommend_policies(
+    artifact_path: list[Path] = typer.Argument(
+        ...,
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="Benchmark and simulation artifacts used as authoritative recommendation evidence.",
+    ),
+    output_dir: Path | None = typer.Option(
+        None,
+        help=(
+            "Directory for the recommendation artifact. "
+            "Defaults to SWITCHYARD_BENCHMARK_OUTPUT_DIR."
+        ),
+    ),
+    markdown_report: bool = typer.Option(
+        False,
+        help="Also write a compact Markdown report next to the JSON artifact.",
+    ),
+) -> None:
+    """Generate human-readable routing guidance from authoritative artifacts."""
+
+    output_path = _recommend_policies_command(
+        artifact_paths=artifact_path,
+        output_dir=output_dir,
+        markdown_report=markdown_report,
+    )
+    typer.echo(output_path)
+
+
 async def _run_synthetic_command(
     *,
     request_count: int,
@@ -1354,6 +1389,50 @@ def _generate_report_command(
     markdown = render_artifact_bundle_markdown(artifacts)
     resolved_output_path = output_path or default_generated_report_path(artifact_paths)
     return write_markdown_report(markdown, resolved_output_path)
+
+
+def _recommend_policies_command(
+    *,
+    artifact_paths: list[Path],
+    output_dir: Path | None,
+    markdown_report: bool,
+) -> Path:
+    """Build a typed recommendation report from authoritative artifact inputs."""
+
+    settings = Settings()
+    loaded_artifacts = []
+    for path in artifact_paths:
+        artifact = load_benchmark_artifact_model(path)
+        if not isinstance(
+            artifact,
+            (
+                BenchmarkRunArtifact,
+                CounterfactualSimulationArtifact,
+                CounterfactualSimulationComparisonArtifact,
+            ),
+        ):
+            msg = f"{path} is not a benchmark run or simulation artifact"
+            raise typer.BadParameter(msg)
+        loaded_artifacts.append(artifact)
+    report = build_policy_recommendation_report(
+        loaded_artifacts,
+        report_id=f"policy-recommendations-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}",
+        timestamp=datetime.now(UTC),
+    )
+    resolved_output_dir = output_dir or settings.benchmark_output_dir
+    output_path = write_json_model(
+        report,
+        resolved_output_dir / f"{report.recommendation_report_id}.json",
+    )
+    if markdown_report:
+        write_markdown_report(
+            render_loaded_artifact_markdown(report),
+            default_markdown_report_path(
+                resolved_output_dir,
+                report.recommendation_report_id,
+            ),
+        )
+    return output_path
 
 
 def _load_trace_files(trace_paths: list[Path]) -> list[CapturedTraceRecord]:

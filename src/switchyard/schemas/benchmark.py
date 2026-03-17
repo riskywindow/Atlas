@@ -981,6 +981,35 @@ class SimulationBucketDimension(StrEnum):
     BACKEND_INSTANCE_ID = "backend_instance_id"
 
 
+class RecommendationScopeKind(StrEnum):
+    """Scope of a human-facing routing recommendation."""
+
+    MODEL_ALIAS = "model_alias"
+    REQUEST_CLASS = "request_class"
+    REPEATED_PREFIX_BACKEND = "repeated_prefix_backend"
+    REPEATED_PREFIX_INSTANCE = "repeated_prefix_instance"
+
+
+class RecommendationDisposition(StrEnum):
+    """Operator-facing recommendation posture."""
+
+    PREFER_POLICY = "prefer_policy"
+    KEEP_SHADOW_ONLY = "keep_shadow_only"
+    NO_CHANGE = "no_change"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    PREFER_BACKEND = "prefer_backend"
+    AVOID_BACKEND = "avoid_backend"
+
+
+class RecommendationConfidence(StrEnum):
+    """Honest confidence categories for guidance output."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    INSUFFICIENT = "insufficient"
+
+
 class AdaptivePolicyGuardrails(BaseModel):
     """Portable guardrails for safe adaptive recommendations."""
 
@@ -1174,6 +1203,54 @@ class CounterfactualSimulationComparisonArtifact(BaseModel):
             msg = "policies must align one-to-one with evaluations in the same order"
             raise ValueError(msg)
         return self
+
+
+class RecommendationEvidenceWindow(BaseModel):
+    """Source and time bounds for one recommendation report."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_run_ids: list[str] = Field(default_factory=list)
+    source_trace_ids: list[str] = Field(default_factory=list)
+    historical_source_run_ids: list[str] = Field(default_factory=list)
+    historical_source_trace_ids: list[str] = Field(default_factory=list)
+    window_started_at: datetime | None = None
+    window_ended_at: datetime | None = None
+
+
+class RoutingPolicyGuidance(BaseModel):
+    """One scoped, evidence-based routing recommendation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scope_kind: RecommendationScopeKind
+    scope_key: str = Field(min_length=1, max_length=256)
+    recommendation: RecommendationDisposition
+    confidence: RecommendationConfidence = RecommendationConfidence.INSUFFICIENT
+    sample_size: int = Field(default=0, ge=0)
+    workload_buckets: list[str] = Field(default_factory=list)
+    recommended_policy_id: str | None = Field(default=None, min_length=1, max_length=128)
+    recommended_target: str | None = Field(default=None, min_length=1, max_length=128)
+    recommended_target_type: str | None = Field(default=None, min_length=1, max_length=64)
+    evidence_summary: list[str] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
+    confidence_notes: list[str] = Field(default_factory=list)
+    notable_regressions: list[str] = Field(default_factory=list)
+    counterexamples: list[str] = Field(default_factory=list)
+
+
+class PolicyRecommendationReportArtifact(BaseModel):
+    """Human-facing routing-policy recommendation report derived from artifacts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: BenchmarkArtifactSchemaVersion = BenchmarkArtifactSchemaVersion.V3
+    recommendation_report_id: str = Field(min_length=1, max_length=128)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    evidence_window: RecommendationEvidenceWindow
+    recommendations: list[RoutingPolicyGuidance] = Field(default_factory=list)
+    notable_limitations: list[str] = Field(default_factory=list)
+    metadata: dict[str, str] = Field(default_factory=dict)
 
 
 class BenchmarkEnvironmentMetadata(EnvironmentSnapshot):

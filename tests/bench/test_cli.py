@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from switchyard.adapters.registry import AdapterRegistry
 from switchyard.bench import cli
 from switchyard.bench.cli import app
+from switchyard.bench.simulation import compare_candidate_policies_offline
 from switchyard.bench.workloads import build_workload_manifest
 from switchyard.config import GenerationDefaults, LocalModelConfig, Settings, WarmupSettings
 from switchyard.schemas.backend import BackendImageMetadata, BackendType, DeploymentProfile
@@ -29,8 +30,10 @@ from switchyard.schemas.benchmark import (
     BenchmarkWarmupConfig,
     CapturedTraceRecord,
     ComparisonSourceKind,
+    CounterfactualObjective,
     ExecutionTarget,
     ExecutionTargetType,
+    ExplainablePolicySpec,
     ReplayMode,
     TraceCaptureMode,
     WorkloadGenerationConfig,
@@ -341,6 +344,60 @@ def test_compare_offline_policies_cli_writes_comparison_artifact(tmp_path: Path)
     report_path = comparison_path.with_suffix(".md")
     assert report_path.exists()
     assert "# Switchyard Simulation Comparison Report:" in report_path.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_recommend_policies_cli_writes_report_and_markdown(tmp_path: Path) -> None:
+    runner = CliRunner()
+    comparison = compare_candidate_policies_offline(
+        policies=[
+            ExplainablePolicySpec(
+                policy_id="balanced-offline",
+                objective=CounterfactualObjective.BALANCED,
+            )
+        ],
+        evaluation_artifacts=[],
+        evaluation_trace_records=[
+            CapturedTraceRecord(
+                record_id="trace-guidance",
+                request_id="trace-guidance-req",
+                execution_target=ExecutionTarget(
+                    target_type=ExecutionTargetType.LOGICAL_ALIAS,
+                    model_alias="chat-shared",
+                ),
+                logical_alias="chat-shared",
+                chosen_backend="mock-a",
+                latency_ms=12.0,
+                status_code=200,
+            )
+        ],
+        history_artifacts=[],
+        history_trace_records=[],
+        timestamp=datetime(2026, 3, 17, tzinfo=UTC),
+    )
+    artifact_path = tmp_path / "comparison.json"
+    artifact_path.write_text(comparison.model_dump_json(indent=2), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "recommend-policies",
+            str(artifact_path),
+            "--markdown-report",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    report_path = Path(result.stdout.strip())
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    assert payload["recommendation_report_id"]
+    assert "recommendations" in payload
+    markdown_path = report_path.with_suffix(".md")
+    assert markdown_path.exists()
+    assert "# Switchyard Policy Recommendation Report:" in markdown_path.read_text(
         encoding="utf-8"
     )
 

@@ -26,6 +26,7 @@ from switchyard.bench.artifacts import (
     parse_prometheus_text,
     render_artifact_bundle_markdown,
     render_comparison_report_markdown,
+    render_loaded_artifact_markdown,
     render_run_report_markdown,
     render_simulation_comparison_report_markdown,
     render_target_comparison_report_markdown,
@@ -37,6 +38,7 @@ from switchyard.bench.artifacts import (
     validate_replayable_traces,
     write_artifact,
 )
+from switchyard.bench.recommendations import build_policy_recommendation_report
 from switchyard.bench.simulation import compare_candidate_policies_offline
 from switchyard.bench.workloads import build_workload_manifest
 from switchyard.config import AppEnvironment, Settings
@@ -59,6 +61,7 @@ from switchyard.schemas.benchmark import (
     ExecutionTarget,
     ExecutionTargetType,
     ExplainablePolicySpec,
+    PolicyRecommendationReportArtifact,
     ReplayMode,
     TraceCaptureMode,
     WorkloadGenerationConfig,
@@ -1511,3 +1514,48 @@ def test_render_simulation_comparison_report_markdown_mentions_limitations() -> 
 
     assert "# Switchyard Simulation Comparison Report:" in markdown
     assert "## Limitations" in markdown
+
+
+def test_load_benchmark_artifact_model_accepts_policy_recommendation_payload(
+    tmp_path: Path,
+) -> None:
+    comparison = compare_candidate_policies_offline(
+        policies=[
+            ExplainablePolicySpec(
+                policy_id="balanced-offline",
+                objective=CounterfactualObjective.BALANCED,
+            )
+        ],
+        evaluation_artifacts=[],
+        evaluation_trace_records=[
+            CapturedTraceRecord(
+                record_id="trace-guidance",
+                request_id="trace-guidance",
+                execution_target=ExecutionTarget(
+                    target_type=ExecutionTargetType.LOGICAL_ALIAS,
+                    model_alias="chat-shared",
+                ),
+                logical_alias="chat-shared",
+                chosen_backend="mock-a",
+                latency_ms=12.0,
+                status_code=200,
+            )
+        ],
+        history_artifacts=[],
+        history_trace_records=[],
+        timestamp=datetime(2026, 3, 17, tzinfo=UTC),
+    )
+    report = build_policy_recommendation_report(
+        [comparison],
+        report_id="policy-guidance",
+        timestamp=datetime(2026, 3, 17, tzinfo=UTC),
+    )
+    artifact_path = tmp_path / "policy-guidance.json"
+    artifact_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+
+    loaded = load_benchmark_artifact_model(artifact_path)
+
+    assert isinstance(loaded, PolicyRecommendationReportArtifact)
+    assert loaded.recommendation_report_id == "policy-guidance"
+    markdown = render_loaded_artifact_markdown(loaded)
+    assert "# Switchyard Policy Recommendation Report:" in markdown

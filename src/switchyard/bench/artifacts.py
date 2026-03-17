@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 from switchyard.adapters.mock import MockBackendAdapter, MockResponseTemplate
 from switchyard.adapters.registry import AdapterRegistry
+from switchyard.bench.recommendations import render_policy_recommendation_report_markdown
 from switchyard.router.service import RouterService
 from switchyard.schemas.admin import RuntimeInspectionResponse
 from switchyard.schemas.backend import (
@@ -63,6 +64,7 @@ from switchyard.schemas.benchmark import (
     ExecutionTarget,
     ExecutionTargetType,
     FamilyBenchmarkSummary,
+    PolicyRecommendationReportArtifact,
     ReplayMode,
     ReplayPlan,
     ReplayRequest,
@@ -1110,10 +1112,13 @@ def load_benchmark_artifact_model(
     | BenchmarkTargetComparisonArtifact
     | CounterfactualSimulationArtifact
     | CounterfactualSimulationComparisonArtifact
+    | PolicyRecommendationReportArtifact
 ):
     """Load a benchmark or comparison artifact from disk."""
 
     payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    if "recommendation_report_id" in payload:
+        return PolicyRecommendationReportArtifact.model_validate(payload)
     if "simulation_comparison_id" in payload:
         return CounterfactualSimulationComparisonArtifact.model_validate(payload)
     if "simulation_id" in payload:
@@ -1599,6 +1604,7 @@ def render_loaded_artifact_markdown(
         | BenchmarkTargetComparisonArtifact
         | CounterfactualSimulationArtifact
         | CounterfactualSimulationComparisonArtifact
+        | PolicyRecommendationReportArtifact
     ),
 ) -> str:
     """Render markdown for any supported benchmark artifact type."""
@@ -1611,6 +1617,8 @@ def render_loaded_artifact_markdown(
         return render_simulation_comparison_report_markdown(artifact)
     if isinstance(artifact, CounterfactualSimulationArtifact):
         return render_simulation_report_markdown(artifact)
+    if isinstance(artifact, PolicyRecommendationReportArtifact):
+        return render_policy_recommendation_report_markdown(artifact)
     return render_comparison_report_markdown(artifact)
 
 
@@ -1621,6 +1629,7 @@ def render_artifact_bundle_markdown(
         | BenchmarkTargetComparisonArtifact
         | CounterfactualSimulationArtifact
         | CounterfactualSimulationComparisonArtifact
+        | PolicyRecommendationReportArtifact
     ],
 ) -> str:
     """Render a compact markdown bundle for one or more artifacts."""
