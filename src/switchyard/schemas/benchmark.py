@@ -19,7 +19,10 @@ from switchyard.schemas.routing import (
     AdmissionDecision,
     CanaryPolicy,
     CircuitBreakerState,
+    HistoryDepthBucket,
+    InputLengthBucket,
     PolicyReference,
+    PrefixHotness,
     RequestClass,
     RequestFeatureVector,
     RouteDecision,
@@ -32,6 +35,7 @@ from switchyard.schemas.routing import (
     StickyRouteRecord,
     TopologySnapshotReference,
     WorkloadShape,
+    WorkloadTag,
 )
 
 
@@ -773,6 +777,166 @@ class BenchmarkSummary(BaseModel):
             msg = "success_count + failure_count must equal request_count"
             raise ValueError(msg)
         return self
+
+
+class HistoricalDimension(StrEnum):
+    """Typed dimensions that historical summaries can group by."""
+
+    MODEL_ALIAS = "model_alias"
+    BACKEND_TYPE = "backend_type"
+    BACKEND_NAME = "backend_name"
+    BACKEND_INSTANCE_ID = "backend_instance_id"
+    POLICY_ID = "policy_id"
+    REQUEST_CLASS = "request_class"
+    TENANT_ID = "tenant_id"
+    INPUT_LENGTH_BUCKET = "input_length_bucket"
+    HISTORY_DEPTH_BUCKET = "history_depth_bucket"
+    WORKLOAD_TAG = "workload_tag"
+    PREFIX_HOTNESS = "prefix_hotness"
+    CACHE_OPPORTUNITY = "cache_opportunity"
+    LOCALITY_BENEFIT = "locality_benefit"
+
+
+class HistoricalSummaryKey(BaseModel):
+    """Canonical group key for historical performance summaries."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dimensions: list[HistoricalDimension] = Field(default_factory=list)
+    model_alias: str | None = Field(default=None, min_length=1, max_length=128)
+    backend_type: str | None = Field(default=None, min_length=1, max_length=64)
+    backend_name: str | None = Field(default=None, min_length=1, max_length=128)
+    backend_instance_id: str | None = Field(default=None, min_length=1, max_length=128)
+    policy_id: str | None = Field(default=None, min_length=1, max_length=128)
+    request_class: RequestClass | None = None
+    tenant_id: str | None = Field(default=None, min_length=1, max_length=128)
+    input_length_bucket: InputLengthBucket | None = None
+    history_depth_bucket: HistoryDepthBucket | None = None
+    workload_tag: WorkloadTag | None = None
+    prefix_hotness: PrefixHotness | None = None
+    cache_opportunity: bool | None = None
+    locality_benefit: bool | None = None
+
+
+class HistoricalSummaryQuery(BaseModel):
+    """Query for aggregating historical benchmark records."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    group_by: list[HistoricalDimension] = Field(default_factory=list)
+    model_alias: str | None = Field(default=None, min_length=1, max_length=128)
+    backend_type: str | None = Field(default=None, min_length=1, max_length=64)
+    backend_name: str | None = Field(default=None, min_length=1, max_length=128)
+    backend_instance_id: str | None = Field(default=None, min_length=1, max_length=128)
+    policy_id: str | None = Field(default=None, min_length=1, max_length=128)
+    request_class: RequestClass | None = None
+    tenant_id: str | None = Field(default=None, min_length=1, max_length=128)
+    input_length_bucket: InputLengthBucket | None = None
+    history_depth_bucket: HistoryDepthBucket | None = None
+    workload_tag: WorkloadTag | None = None
+    prefix_hotness: PrefixHotness | None = None
+    cache_opportunity: bool | None = None
+    locality_benefit: bool | None = None
+
+
+class PerformanceBucketSummary(BaseModel):
+    """Count of observations inside one transparent metric bucket."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    bucket_label: str = Field(min_length=1, max_length=64)
+    lower_bound: float = Field(ge=0.0)
+    upper_bound: float | None = Field(default=None, ge=0.0)
+    count: int = Field(default=0, ge=0)
+
+
+class HistoricalMetricSummary(BaseModel):
+    """Transparent numeric summary used by historical aggregations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    observation_count: int = Field(default=0, ge=0)
+    avg: float | None = Field(default=None, ge=0.0)
+    ewma: float | None = Field(default=None, ge=0.0)
+    p50: float | None = Field(default=None, ge=0.0)
+    p95: float | None = Field(default=None, ge=0.0)
+    buckets: list[PerformanceBucketSummary] = Field(default_factory=list)
+
+
+class HistoricalPerformanceSummary(BaseModel):
+    """Aggregated historical outcome summary for one query/group slice."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: HistoricalSummaryKey
+    request_count: int = Field(ge=0)
+    success_count: int = Field(ge=0)
+    failure_count: int = Field(ge=0)
+    error_rate: float = Field(ge=0.0, le=1.0)
+    fallback_rate: float = Field(ge=0.0, le=1.0)
+    cache_opportunity_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    locality_benefit_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    error_category_counts: dict[str, int] = Field(default_factory=dict)
+    latency_ms: HistoricalMetricSummary
+    ttft_ms: HistoricalMetricSummary
+    tokens_per_second: HistoricalMetricSummary
+    queue_delay_ms: HistoricalMetricSummary
+
+    @model_validator(mode="after")
+    def validate_counts(self) -> HistoricalPerformanceSummary:
+        if self.success_count + self.failure_count != self.request_count:
+            msg = "success_count + failure_count must equal request_count"
+            raise ValueError(msg)
+        return self
+
+
+class HistoricalPerformanceIndex(BaseModel):
+    """Typed result of a historical aggregation query."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: HistoricalSummaryQuery
+    source_record_count: int = Field(ge=0)
+    matched_record_count: int = Field(ge=0)
+    summaries: list[HistoricalPerformanceSummary] = Field(default_factory=list)
+
+
+class CandidateRouteEstimateContext(BaseModel):
+    """Candidate route features used for transparent historical estimation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_alias: str = Field(min_length=1, max_length=128)
+    backend_name: str = Field(min_length=1, max_length=128)
+    backend_type: str | None = Field(default=None, min_length=1, max_length=64)
+    backend_instance_id: str | None = Field(default=None, min_length=1, max_length=128)
+    policy_id: str | None = Field(default=None, min_length=1, max_length=128)
+    request_class: RequestClass = RequestClass.STANDARD
+    tenant_id: str | None = Field(default=None, min_length=1, max_length=128)
+    input_length_bucket: InputLengthBucket | None = None
+    history_depth_bucket: HistoryDepthBucket | None = None
+    workload_tags: list[WorkloadTag] = Field(default_factory=list)
+    prefix_hotness: PrefixHotness | None = None
+    cache_opportunity: bool | None = None
+    locality_benefit: bool | None = None
+
+
+class HistoricalRouteEstimate(BaseModel):
+    """Transparent expected-outcome estimate for one candidate route."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    context: CandidateRouteEstimateContext
+    evidence_key: HistoricalSummaryKey | None = None
+    evidence_count: int = Field(default=0, ge=0)
+    sufficient_data: bool = False
+    insufficiency_reason: str | None = Field(default=None, min_length=1, max_length=256)
+    expected_error_rate: float | None = Field(default=None, ge=0.0, le=1.0)
+    expected_latency_ms: float | None = Field(default=None, ge=0.0)
+    expected_ttft_ms: float | None = Field(default=None, ge=0.0)
+    expected_tokens_per_second: float | None = Field(default=None, ge=0.0)
+    expected_queue_delay_ms: float | None = Field(default=None, ge=0.0)
+    rationale: list[str] = Field(default_factory=list)
 
 
 class BenchmarkEnvironmentMetadata(EnvironmentSnapshot):

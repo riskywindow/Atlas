@@ -28,6 +28,7 @@ from switchyard.schemas.benchmark import (
     BenchmarkTargetComparisonArtifact,
     BenchmarkWarmupConfig,
     CacheObservation,
+    CandidateRouteEstimateContext,
     CapturedTraceRecord,
     ComparisonRunSummary,
     ComparisonSourceKind,
@@ -36,6 +37,14 @@ from switchyard.schemas.benchmark import (
     ExecutionTarget,
     ExecutionTargetType,
     FamilyBenchmarkSummary,
+    HistoricalDimension,
+    HistoricalMetricSummary,
+    HistoricalPerformanceIndex,
+    HistoricalPerformanceSummary,
+    HistoricalRouteEstimate,
+    HistoricalSummaryKey,
+    HistoricalSummaryQuery,
+    PerformanceBucketSummary,
     Phase4SchemaCompatibility,
     ReplayMode,
     ReplayPlan,
@@ -899,3 +908,65 @@ def test_comparison_summary_rejects_length_mismatch() -> None:
         assert "compared_targets" in str(exc)
     else:
         raise AssertionError("ComparisonRunSummary should enforce length consistency")
+
+
+def test_historical_performance_models_serialize() -> None:
+    index = HistoricalPerformanceIndex(
+        query=HistoricalSummaryQuery(group_by=[HistoricalDimension.BACKEND_NAME]),
+        source_record_count=3,
+        matched_record_count=2,
+        summaries=[
+            HistoricalPerformanceSummary(
+                key=HistoricalSummaryKey(
+                    dimensions=[HistoricalDimension.BACKEND_NAME],
+                    backend_name="mock-a",
+                ),
+                request_count=2,
+                success_count=2,
+                failure_count=0,
+                error_rate=0.0,
+                fallback_rate=0.0,
+                cache_opportunity_rate=1.0,
+                locality_benefit_rate=0.5,
+                latency_ms=HistoricalMetricSummary(
+                    observation_count=2,
+                    avg=15.0,
+                    ewma=13.0,
+                    p50=10.0,
+                    p95=20.0,
+                    buckets=[
+                        PerformanceBucketSummary(
+                            bucket_label="10-25",
+                            lower_bound=10.0,
+                            upper_bound=25.0,
+                            count=2,
+                        )
+                    ],
+                ),
+                ttft_ms=HistoricalMetricSummary(),
+                tokens_per_second=HistoricalMetricSummary(),
+                queue_delay_ms=HistoricalMetricSummary(),
+            )
+        ],
+    )
+    estimate = HistoricalRouteEstimate(
+        context=CandidateRouteEstimateContext(
+            model_alias="chat-shared",
+            backend_name="mock-a",
+            policy_id="balanced",
+        ),
+        evidence_key=HistoricalSummaryKey(backend_name="mock-a"),
+        evidence_count=2,
+        sufficient_data=True,
+        expected_error_rate=0.0,
+        expected_latency_ms=13.0,
+        rationale=["used backend-level evidence"],
+    )
+
+    payload = {
+        "index": index.model_dump(mode="json"),
+        "estimate": estimate.model_dump(mode="json"),
+    }
+
+    assert payload["index"]["summaries"][0]["key"]["backend_name"] == "mock-a"
+    assert payload["estimate"]["context"]["backend_name"] == "mock-a"
