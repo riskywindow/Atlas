@@ -300,6 +300,51 @@ def test_simulate_policy_cli_writes_artifact_and_markdown(tmp_path: Path) -> Non
     assert "# Switchyard Simulation Report:" in report_path.read_text(encoding="utf-8")
 
 
+def test_compare_offline_policies_cli_writes_comparison_artifact(tmp_path: Path) -> None:
+    runner = CliRunner()
+    trace = CapturedTraceRecord(
+        record_id="trace-compare",
+        request_id="trace-compare-req",
+        execution_target=ExecutionTarget(
+            target_type=ExecutionTargetType.LOGICAL_ALIAS,
+            model_alias="chat-shared",
+        ),
+        logical_alias="chat-shared",
+        chosen_backend="mock-a",
+        latency_ms=12.0,
+        status_code=200,
+    )
+    trace_path = tmp_path / "trace.jsonl"
+    trace_path.write_text(trace.model_dump_json() + "\n", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "compare-offline-policies",
+            "--trace-path",
+            str(trace_path),
+            "--routing-policy",
+            "balanced",
+            "--candidate-policy",
+            "adaptive-fast:latency",
+            "--markdown-report",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    comparison_path = Path(result.stdout.strip())
+    payload = json.loads(comparison_path.read_text(encoding="utf-8"))
+    assert payload["simulation_comparison_id"]
+    assert len(payload["evaluations"]) == 2
+    report_path = comparison_path.with_suffix(".md")
+    assert report_path.exists()
+    assert "# Switchyard Simulation Comparison Report:" in report_path.read_text(
+        encoding="utf-8"
+    )
+
+
 def test_run_workload_cli_writes_artifact(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     runner = CliRunner()
     manifest = build_workload_manifest(

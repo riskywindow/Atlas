@@ -199,6 +199,22 @@ uv run python -m switchyard.bench.cli simulate-policy \
 This produces a typed simulation artifact plus a markdown report with counterfactual
 route recommendations, guardrail blocks, and a compact rollout recommendation.
 
+To compare several offline candidate policies against the same benchmark artifacts or
+captured traces:
+
+```bash
+uv run python -m switchyard.bench.cli compare-offline-policies \
+  --trace-path traces/captured.jsonl \
+  --routing-policy balanced \
+  --routing-policy latency_first \
+  --candidate-policy adaptive-safe:balanced \
+  --markdown-report
+```
+
+The comparison artifact keeps per-policy evidence quality explicit and distinguishes
+direct observations, predictor estimates, low-confidence estimates, and unsupported
+cases.
+
 Use the longer guides together:
 
 - [deployment.md](/Users/rishivinodkumar/Atlas/docs/deployment.md)

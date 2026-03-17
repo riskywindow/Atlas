@@ -58,6 +58,7 @@ from switchyard.schemas.benchmark import (
     ComparisonSourceKind,
     ControlPlaneReportMetadata,
     CounterfactualSimulationArtifact,
+    CounterfactualSimulationComparisonArtifact,
     DeployedTopologyEndpoint,
     ExecutionTarget,
     ExecutionTargetType,
@@ -1108,10 +1109,13 @@ def load_benchmark_artifact_model(
     | BenchmarkComparisonArtifact
     | BenchmarkTargetComparisonArtifact
     | CounterfactualSimulationArtifact
+    | CounterfactualSimulationComparisonArtifact
 ):
     """Load a benchmark or comparison artifact from disk."""
 
     payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    if "simulation_comparison_id" in payload:
+        return CounterfactualSimulationComparisonArtifact.model_validate(payload)
     if "simulation_id" in payload:
         return CounterfactualSimulationArtifact.model_validate(payload)
     if "comparison_id" in payload:
@@ -1491,6 +1495,10 @@ def render_simulation_report_markdown(artifact: CounterfactualSimulationArtifact
         "## Summary",
         f"- Requests evaluated: `{artifact.summary.request_count}`",
         f"- Route changes recommended: `{artifact.summary.changed_count}`",
+        f"- Direct observations used: `{artifact.summary.direct_observation_count}`",
+        f"- Predictor estimates used: `{artifact.summary.predictor_estimate_count}`",
+        f"- Low-confidence estimates: `{artifact.summary.low_confidence_count}`",
+        f"- Unsupported requests: `{artifact.summary.unsupported_count}`",
         f"- Guardrail blocks: `{artifact.summary.guardrail_block_count}`",
         f"- Insufficient-data requests: `{artifact.summary.insufficient_data_count}`",
         f"- Projected average latency: `{artifact.summary.projected_avg_latency_ms}`",
@@ -1513,6 +1521,74 @@ def render_simulation_report_markdown(artifact: CounterfactualSimulationArtifact
     if artifact.policy.rationale:
         lines.extend(["", "## Policy Rationale"])
         lines.extend(f"- {item}" for item in artifact.policy.rationale)
+    if artifact.summary.limitation_notes:
+        lines.extend(["", "## Limitations"])
+        lines.extend(f"- {item}" for item in artifact.summary.limitation_notes)
+    if artifact.summary.bucket_summaries:
+        lines.extend(
+            [
+                "",
+                "## Bucket Summary",
+                (
+                    "| Dimension | Bucket | Requests | Changed | Direct | Predictor | "
+                    "Low Confidence | Unsupported |"
+                ),
+                "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for bucket in artifact.summary.bucket_summaries[:12]:
+            lines.append(
+                f"| `{bucket.dimension.value}` | `{bucket.bucket_key}` | "
+                f"`{bucket.request_count}` | "
+                f"`{bucket.changed_count}` | `{bucket.direct_observation_count}` | "
+                f"`{bucket.predictor_estimate_count}` | `{bucket.low_confidence_count}` | "
+                f"`{bucket.unsupported_count}` |"
+            )
+    return "\n".join(lines)
+
+
+def render_simulation_comparison_report_markdown(
+    artifact: CounterfactualSimulationComparisonArtifact,
+) -> str:
+    """Render a compact Markdown report for a multi-policy simulation comparison."""
+
+    best_policy = max(
+        artifact.evaluations,
+        key=lambda evaluation: (
+            evaluation.summary.request_count - evaluation.summary.unsupported_count,
+            -(evaluation.summary.projected_avg_latency_ms or float("inf")),
+            -(evaluation.summary.projected_error_rate or 1.0),
+        ),
+    ).policy.policy_id
+    lines = [
+        f"# Switchyard Simulation Comparison Report: {artifact.simulation_comparison_id}",
+        "",
+        "## Sources",
+        f"- Benchmark runs: `{', '.join(artifact.source_run_ids) or 'none'}`",
+        f"- Captured traces: `{', '.join(artifact.source_trace_ids) or 'none'}`",
+        f"- Historical runs: `{', '.join(artifact.historical_source_run_ids) or 'none'}`",
+        f"- Historical traces: `{', '.join(artifact.historical_source_trace_ids) or 'none'}`",
+        "",
+        "## Policy Table",
+        (
+            "| Policy | Objective | Requests | Changed | Direct | Predictor | "
+            "Low Confidence | Unsupported | Avg Latency |"
+        ),
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for evaluation in artifact.evaluations:
+        summary = evaluation.summary
+        lines.append(
+            f"| `{evaluation.policy.policy_id}` | `{evaluation.policy.objective.value}` | "
+            f"`{summary.request_count}` | `{summary.changed_count}` | "
+            f"`{summary.direct_observation_count}` | `{summary.predictor_estimate_count}` | "
+            f"`{summary.low_confidence_count}` | `{summary.unsupported_count}` | "
+            f"`{summary.projected_avg_latency_ms}` |"
+        )
+    lines.extend(["", "## Recommendation", f"- Best supported policy: `{best_policy}`"])
+    if artifact.limitation_notes:
+        lines.extend(["", "## Limitations"])
+        lines.extend(f"- {item}" for item in artifact.limitation_notes)
     return "\n".join(lines)
 
 
@@ -1522,6 +1598,7 @@ def render_loaded_artifact_markdown(
         | BenchmarkComparisonArtifact
         | BenchmarkTargetComparisonArtifact
         | CounterfactualSimulationArtifact
+        | CounterfactualSimulationComparisonArtifact
     ),
 ) -> str:
     """Render markdown for any supported benchmark artifact type."""
@@ -1530,6 +1607,8 @@ def render_loaded_artifact_markdown(
         return render_run_report_markdown(artifact)
     if isinstance(artifact, BenchmarkTargetComparisonArtifact):
         return render_target_comparison_report_markdown(artifact)
+    if isinstance(artifact, CounterfactualSimulationComparisonArtifact):
+        return render_simulation_comparison_report_markdown(artifact)
     if isinstance(artifact, CounterfactualSimulationArtifact):
         return render_simulation_report_markdown(artifact)
     return render_comparison_report_markdown(artifact)
@@ -1541,6 +1620,7 @@ def render_artifact_bundle_markdown(
         | BenchmarkComparisonArtifact
         | BenchmarkTargetComparisonArtifact
         | CounterfactualSimulationArtifact
+        | CounterfactualSimulationComparisonArtifact
     ],
 ) -> str:
     """Render a compact markdown bundle for one or more artifacts."""

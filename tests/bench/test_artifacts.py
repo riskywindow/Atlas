@@ -27,6 +27,7 @@ from switchyard.bench.artifacts import (
     render_artifact_bundle_markdown,
     render_comparison_report_markdown,
     render_run_report_markdown,
+    render_simulation_comparison_report_markdown,
     render_target_comparison_report_markdown,
     run_gateway_benchmark,
     run_synthetic_benchmark,
@@ -36,6 +37,7 @@ from switchyard.bench.artifacts import (
     validate_replayable_traces,
     write_artifact,
 )
+from switchyard.bench.simulation import compare_candidate_policies_offline
 from switchyard.bench.workloads import build_workload_manifest
 from switchyard.config import AppEnvironment, Settings
 from switchyard.gateway import create_app
@@ -52,8 +54,11 @@ from switchyard.schemas.benchmark import (
     CacheObservation,
     CapturedTraceRecord,
     ComparisonSourceKind,
+    CounterfactualObjective,
+    CounterfactualSimulationComparisonArtifact,
     ExecutionTarget,
     ExecutionTargetType,
+    ExplainablePolicySpec,
     ReplayMode,
     TraceCaptureMode,
     WorkloadGenerationConfig,
@@ -1417,3 +1422,73 @@ def test_write_artifact_outputs_stable_json(tmp_path: Path) -> None:
     assert payload["summary"]["avg_latency_ms"] == 1.0
     assert payload["environment"]["benchmark_mode"] == "synthetic"
     assert output_path.read_text(encoding="utf-8").endswith("\n")
+
+
+def test_load_benchmark_artifact_model_accepts_simulation_comparison_payload(
+    tmp_path: Path,
+) -> None:
+    artifact = compare_candidate_policies_offline(
+        policies=[
+            ExplainablePolicySpec(
+                policy_id="balanced-offline",
+                objective=CounterfactualObjective.BALANCED,
+            )
+        ],
+        evaluation_artifacts=[],
+        evaluation_trace_records=[
+            CapturedTraceRecord(
+                record_id="trace-1",
+                request_id="trace-req-1",
+                execution_target=ExecutionTarget(
+                    target_type=ExecutionTargetType.LOGICAL_ALIAS,
+                    model_alias="chat-shared",
+                ),
+                logical_alias="chat-shared",
+                chosen_backend="mock-a",
+                latency_ms=12.0,
+                status_code=200,
+            )
+        ],
+        history_artifacts=[],
+        history_trace_records=[],
+        timestamp=datetime(2026, 3, 17, tzinfo=UTC),
+    )
+    artifact_path = tmp_path / "simulation-comparison.json"
+    artifact_path.write_text(artifact.model_dump_json(indent=2), encoding="utf-8")
+
+    loaded = load_benchmark_artifact_model(artifact_path)
+
+    assert isinstance(loaded, CounterfactualSimulationComparisonArtifact)
+    assert loaded.simulation_comparison_id == artifact.simulation_comparison_id
+
+
+def test_render_simulation_comparison_report_markdown_mentions_limitations() -> None:
+    artifact = compare_candidate_policies_offline(
+        policies=[
+            ExplainablePolicySpec(
+                policy_id="unsupported",
+                objective=CounterfactualObjective.BALANCED,
+            )
+        ],
+        evaluation_artifacts=[],
+        evaluation_trace_records=[
+            CapturedTraceRecord(
+                record_id="trace-unsupported",
+                request_id="trace-unsupported",
+                execution_target=ExecutionTarget(
+                    target_type=ExecutionTargetType.LOGICAL_ALIAS,
+                    model_alias="chat-shared",
+                ),
+                logical_alias="chat-shared",
+                chosen_backend="mock-a",
+            )
+        ],
+        history_artifacts=[],
+        history_trace_records=[],
+        timestamp=datetime(2026, 3, 17, tzinfo=UTC),
+    )
+
+    markdown = render_simulation_comparison_report_markdown(artifact)
+
+    assert "# Switchyard Simulation Comparison Report:" in markdown
+    assert "## Limitations" in markdown

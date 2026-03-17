@@ -38,6 +38,8 @@ from switchyard.bench.artifacts import (
     write_markdown_report,
 )
 from switchyard.bench.simulation import (
+    compare_candidate_policies_offline,
+    compatibility_policy_spec,
     recommend_policy_from_simulation,
     simulate_policy_counterfactual,
 )
@@ -50,6 +52,7 @@ from switchyard.schemas.benchmark import (
     BenchmarkDeploymentTarget,
     BenchmarkRunArtifact,
     BenchmarkWarmupConfig,
+    CapturedTraceRecord,
     CounterfactualObjective,
     ExecutionTarget,
     ExecutionTargetType,
@@ -710,6 +713,74 @@ def simulate_policy(
     typer.echo(output_path)
 
 
+@app.command("compare-offline-policies")
+def compare_offline_policies(
+    artifact_path: list[Path] = typer.Argument(
+        [],
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="Benchmark/replay run artifacts used as evaluation inputs.",
+    ),
+    trace_path: list[Path] | None = typer.Option(
+        None,
+        "--trace-path",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="Captured trace jsonl files used as evaluation inputs.",
+    ),
+    history_artifact_path: list[Path] | None = typer.Option(
+        None,
+        "--history-artifact-path",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="Optional benchmark/replay artifacts used as historical evidence only.",
+    ),
+    history_trace_path: list[Path] | None = typer.Option(
+        None,
+        "--history-trace-path",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="Optional captured trace files used as historical evidence only.",
+    ),
+    routing_policy: list[RoutingPolicy] | None = typer.Option(
+        None,
+        "--routing-policy",
+        case_sensitive=False,
+        help="Fixed compatibility policy to compare offline. Repeat for several policies.",
+    ),
+    candidate_policy: list[str] | None = typer.Option(
+        None,
+        "--candidate-policy",
+        help="Custom policy in the form policy_id:objective. Repeat to compare several.",
+    ),
+    output_dir: Path | None = typer.Option(
+        None,
+        help="Directory for the output artifact. Defaults to SWITCHYARD_BENCHMARK_OUTPUT_DIR.",
+    ),
+    markdown_report: bool = typer.Option(
+        False,
+        help="Also write a compact Markdown report next to the JSON artifact.",
+    ),
+) -> None:
+    """Compare several candidate policies offline against authoritative artifacts."""
+
+    output_path = _compare_offline_policies_command(
+        artifact_paths=artifact_path,
+        trace_paths=trace_path or [],
+        history_artifact_paths=history_artifact_path or [],
+        history_trace_paths=history_trace_path or [],
+        routing_policies=routing_policy or [],
+        candidate_policies=candidate_policy or [],
+        output_dir=output_dir,
+        markdown_report=markdown_report,
+    )
+    typer.echo(output_path)
+
+
 @app.command("generate-report")
 def generate_report(
     artifact_path: list[Path] = typer.Argument(
@@ -1121,6 +1192,66 @@ def _simulate_policy_command(
     return output_path
 
 
+def _compare_offline_policies_command(
+    *,
+    artifact_paths: list[Path],
+    trace_paths: list[Path],
+    history_artifact_paths: list[Path],
+    history_trace_paths: list[Path],
+    routing_policies: list[RoutingPolicy],
+    candidate_policies: list[str],
+    output_dir: Path | None,
+    markdown_report: bool,
+) -> Path:
+    settings = Settings()
+    if not artifact_paths and not trace_paths:
+        msg = "Provide at least one evaluation artifact or trace path."
+        raise typer.BadParameter(msg)
+    policies = [compatibility_policy_spec(policy) for policy in routing_policies]
+    policies.extend(_parse_candidate_policy_specs(candidate_policies))
+    if not policies:
+        msg = "Provide at least one --routing-policy or --candidate-policy."
+        raise typer.BadParameter(msg)
+    evaluation_artifacts = _load_run_artifacts(artifact_paths)
+    evaluation_traces = _load_trace_files(trace_paths)
+    historical_artifacts = (
+        evaluation_artifacts
+        if not history_artifact_paths
+        else _load_run_artifacts(history_artifact_paths)
+    )
+    historical_traces = (
+        evaluation_traces if not history_trace_paths else _load_trace_files(history_trace_paths)
+    )
+    artifact = compare_candidate_policies_offline(
+        policies=policies,
+        evaluation_artifacts=evaluation_artifacts,
+        evaluation_trace_records=evaluation_traces,
+        history_artifacts=historical_artifacts,
+        history_trace_records=historical_traces,
+    )
+    artifact.metadata["best_supported_policy"] = max(
+        artifact.evaluations,
+        key=lambda evaluation: (
+            evaluation.summary.request_count - evaluation.summary.unsupported_count,
+            -(evaluation.summary.projected_avg_latency_ms or float("inf")),
+        ),
+    ).policy.policy_id
+    resolved_output_dir = output_dir or settings.benchmark_output_dir
+    output_path = write_json_model(
+        artifact,
+        resolved_output_dir / f"{artifact.simulation_comparison_id}.json",
+    )
+    if markdown_report:
+        write_markdown_report(
+            render_loaded_artifact_markdown(artifact),
+            default_markdown_report_path(
+                resolved_output_dir,
+                artifact.simulation_comparison_id,
+            ),
+        )
+    return output_path
+
+
 async def _compare_traces_command(
     *,
     trace_path: Path,
@@ -1225,6 +1356,13 @@ def _generate_report_command(
     return write_markdown_report(markdown, resolved_output_path)
 
 
+def _load_trace_files(trace_paths: list[Path]) -> list[CapturedTraceRecord]:
+    traces: list[CapturedTraceRecord] = []
+    for path in trace_paths:
+        traces.extend(load_captured_traces(path))
+    return traces
+
+
 def _load_run_artifacts(artifact_paths: list[Path]) -> list[BenchmarkRunArtifact]:
     artifacts: list[BenchmarkRunArtifact] = []
     for path in artifact_paths:
@@ -1234,6 +1372,26 @@ def _load_run_artifacts(artifact_paths: list[Path]) -> list[BenchmarkRunArtifact
             raise typer.BadParameter(msg)
         artifacts.append(artifact)
     return artifacts
+
+
+def _parse_candidate_policy_specs(policy_specs: list[str]) -> list[ExplainablePolicySpec]:
+    parsed: list[ExplainablePolicySpec] = []
+    for spec in policy_specs:
+        policy_id, separator, objective = spec.partition(":")
+        if not separator:
+            msg = f"Invalid candidate policy '{spec}'. Use policy_id:objective."
+            raise typer.BadParameter(msg)
+        parsed.append(
+            ExplainablePolicySpec(
+                policy_id=policy_id,
+                objective=CounterfactualObjective(objective),
+                rationale=[
+                    "custom offline candidate policy parsed from CLI input",
+                    "results remain counterfactual and depend on historical evidence quality",
+                ],
+            )
+        )
+    return parsed
 
 
 def _control_plane_image_metadata(

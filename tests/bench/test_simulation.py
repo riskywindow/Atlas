@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from switchyard.bench.simulation import (
+    compare_candidate_policies_offline,
     recommend_policy_from_simulation,
     simulate_policy_counterfactual,
 )
@@ -14,12 +15,16 @@ from switchyard.schemas.benchmark import (
     BenchmarkRunArtifact,
     BenchmarkScenario,
     BenchmarkSummary,
+    CapturedTraceRecord,
     CounterfactualObjective,
+    ExecutionTarget,
+    ExecutionTargetType,
     ExplainablePolicySpec,
 )
 from switchyard.schemas.chat import UsageStats
 from switchyard.schemas.routing import (
     InputLengthBucket,
+    PolicyReference,
     PrefixHotness,
     PrefixLocalitySignal,
     RequestFeatureVector,
@@ -138,6 +143,55 @@ def _build_artifact(*, run_id: str, records: list[BenchmarkRequestRecord]) -> Be
         ),
         environment=BenchmarkEnvironmentMetadata(benchmark_mode="synthetic"),
         records=records,
+    )
+
+
+def _build_trace(
+    *,
+    record_id: str,
+    request_id: str,
+    chosen_backend: str,
+    latency_ms: float | None,
+    status_code: int | None,
+    considered_backends: list[str] | None = None,
+) -> CapturedTraceRecord:
+    features = RequestFeatureVector(
+        message_count=1,
+        user_message_count=1,
+        prompt_character_count=96,
+        prompt_token_estimate=18,
+        max_output_tokens=64,
+        expected_total_tokens=82,
+        input_length_bucket=InputLengthBucket.SHORT,
+        repeated_prefix_candidate=True,
+        prefix_character_count=32,
+        prefix_fingerprint="deadbeefcafefeed",
+        locality_key="11223344556677889900",
+    )
+    return CapturedTraceRecord(
+        record_id=record_id,
+        request_id=request_id,
+        execution_target=ExecutionTarget(
+            target_type=ExecutionTargetType.LOGICAL_ALIAS,
+            model_alias="chat-shared",
+        ),
+        logical_alias="chat-shared",
+        request_features=features,
+        policy_reference=PolicyReference(policy_id="balanced", policy_version="phase6.v1"),
+        route_decision=RouteDecision(
+            backend_name=chosen_backend,
+            serving_target="chat-shared",
+            policy=RoutingPolicy.BALANCED,
+            request_id=request_id,
+            workload_shape=WorkloadShape.INTERACTIVE,
+            rationale=["trace route"],
+            considered_backends=considered_backends or [chosen_backend],
+            request_features=features,
+        ),
+        chosen_backend=chosen_backend,
+        latency_ms=latency_ms,
+        status_code=status_code,
+        error=None if status_code is None or status_code < 400 else "trace failure",
     )
 
 
@@ -302,3 +356,94 @@ def test_simulate_policy_counterfactual_respects_error_guardrail() -> None:
     assert recommendation.recommended_backend == "mock-safe"
     assert recommendation.guardrail_blocked is True
     assert artifact.summary.guardrail_block_count == 1
+
+
+def test_compare_candidate_policies_offline_marks_low_confidence_and_unsupported() -> None:
+    history_artifact = _build_artifact(
+        run_id="history-low-confidence",
+        records=[
+            _build_record(
+                request_id="hist-a-1",
+                backend_name="mock-a",
+                latency_ms=20.0,
+                considered_backends=["mock-a", "mock-b", "mock-c"],
+            ),
+            _build_record(
+                request_id="hist-b-1",
+                backend_name="mock-b",
+                latency_ms=10.0,
+                considered_backends=["mock-a", "mock-b", "mock-c"],
+                tokens_per_second=300.0,
+            ),
+        ],
+    )
+    evaluation_trace = _build_trace(
+        record_id="trace-1",
+        request_id="trace-req-1",
+        chosen_backend="mock-a",
+        latency_ms=25.0,
+        status_code=200,
+        considered_backends=["mock-a", "mock-b", "mock-c"],
+    )
+    policies = [
+        ExplainablePolicySpec(
+            policy_id="guarded-balanced",
+            objective=CounterfactualObjective.BALANCED,
+            min_evidence_count=3,
+            guardrails=AdaptivePolicyGuardrails(require_sufficient_data=True),
+        ),
+        ExplainablePolicySpec(
+            policy_id="explore-throughput",
+            objective=CounterfactualObjective.THROUGHPUT,
+            min_evidence_count=3,
+            guardrails=AdaptivePolicyGuardrails(require_sufficient_data=False),
+        ),
+    ]
+
+    comparison = compare_candidate_policies_offline(
+        policies=policies,
+        evaluation_trace_records=[evaluation_trace],
+        history_artifacts=[history_artifact],
+        timestamp=datetime(2026, 3, 17, tzinfo=UTC),
+    )
+
+    assert comparison.source_trace_ids == ["trace-1"]
+    assert len(comparison.evaluations) == 2
+    guarded = comparison.evaluations[0]
+    exploring = comparison.evaluations[1]
+    assert guarded.summary.unsupported_count == 0
+    assert guarded.summary.low_confidence_count == 0
+    assert exploring.records[0].candidate_scores[1].evidence_kind.value == "low_confidence_estimate"
+    assert "low-confidence predictor estimates" in comparison.limitation_notes[0]
+    assert exploring.records[0].candidate_scores[-1].evidence_kind.value == "unsupported"
+
+
+def test_compare_candidate_policies_offline_keeps_trace_limitations_visible() -> None:
+    trace = _build_trace(
+        record_id="trace-unsupported",
+        request_id="trace-unsupported-req",
+        chosen_backend="mock-a",
+        latency_ms=None,
+        status_code=None,
+        considered_backends=["mock-a", "mock-b"],
+    )
+    policy = ExplainablePolicySpec(
+        policy_id="unsupported-check",
+        objective=CounterfactualObjective.BALANCED,
+        min_evidence_count=3,
+        guardrails=AdaptivePolicyGuardrails(require_sufficient_data=True),
+    )
+
+    comparison = compare_candidate_policies_offline(
+        policies=[policy],
+        evaluation_trace_records=[trace],
+        history_artifacts=[],
+        history_trace_records=[],
+        timestamp=datetime(2026, 3, 17, tzinfo=UTC),
+    )
+
+    evaluation = comparison.evaluations[0]
+    assert evaluation.summary.unsupported_count == 1
+    assert evaluation.summary.limitation_notes == [
+        "1 requests remained unsupported by the available evidence"
+    ]

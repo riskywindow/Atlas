@@ -956,6 +956,31 @@ class AdaptivePolicyMode(StrEnum):
     GUARDED = "guarded"
 
 
+class SimulationSourceKind(StrEnum):
+    """Authoritative source family for offline simulation cases."""
+
+    BENCHMARK_RUN = "benchmark_run"
+    CAPTURED_TRACE = "captured_trace"
+
+
+class SimulationEvidenceKind(StrEnum):
+    """Evidence quality for one simulated candidate or recommendation."""
+
+    DIRECT_OBSERVATION = "direct_observation"
+    PREDICTOR_ESTIMATE = "predictor_estimate"
+    LOW_CONFIDENCE_ESTIMATE = "low_confidence_estimate"
+    UNSUPPORTED = "unsupported"
+
+
+class SimulationBucketDimension(StrEnum):
+    """Bucket dimensions used for offline simulation summaries."""
+
+    MODEL_ALIAS = "model_alias"
+    TENANT_ID = "tenant_id"
+    INPUT_LENGTH_BUCKET = "input_length_bucket"
+    BACKEND_INSTANCE_ID = "backend_instance_id"
+
+
 class AdaptivePolicyGuardrails(BaseModel):
     """Portable guardrails for safe adaptive recommendations."""
 
@@ -989,8 +1014,15 @@ class CounterfactualCandidateScore(BaseModel):
     backend_name: str = Field(min_length=1, max_length=128)
     score: float | None = None
     eligible: bool = False
+    evidence_kind: SimulationEvidenceKind = SimulationEvidenceKind.UNSUPPORTED
+    evidence_count: int = Field(default=0, ge=0)
     rejection_reason: str | None = Field(default=None, min_length=1, max_length=256)
     estimate: HistoricalRouteEstimate | None = None
+    directly_observed: bool = False
+    observed_latency_ms: float | None = Field(default=None, ge=0.0)
+    observed_success: bool | None = None
+    backend_instance_id: str | None = Field(default=None, min_length=1, max_length=128)
+    confidence_note: str | None = Field(default=None, min_length=1, max_length=256)
     rationale: list[str] = Field(default_factory=list)
 
 
@@ -1004,7 +1036,24 @@ class PolicyRecommendation(BaseModel):
     recommendation_changed: bool = False
     guardrail_blocked: bool = False
     insufficient_data: bool = False
+    evidence_kind: SimulationEvidenceKind = SimulationEvidenceKind.UNSUPPORTED
     rationale: list[str] = Field(default_factory=list)
+
+
+class SimulationBucketSummary(BaseModel):
+    """Aggregate summary for one bucket inside a simulated policy result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dimension: SimulationBucketDimension
+    bucket_key: str = Field(min_length=1, max_length=256)
+    request_count: int = Field(ge=0)
+    changed_count: int = Field(default=0, ge=0)
+    direct_observation_count: int = Field(default=0, ge=0)
+    predictor_estimate_count: int = Field(default=0, ge=0)
+    low_confidence_count: int = Field(default=0, ge=0)
+    unsupported_count: int = Field(default=0, ge=0)
+    avg_projected_latency_ms: float | None = Field(default=None, ge=0.0)
 
 
 class CounterfactualSimulationRecord(BaseModel):
@@ -1014,14 +1063,19 @@ class CounterfactualSimulationRecord(BaseModel):
 
     request_id: str = Field(min_length=1, max_length=128)
     source_run_id: str | None = Field(default=None, min_length=1, max_length=128)
+    source_kind: SimulationSourceKind = SimulationSourceKind.BENCHMARK_RUN
+    source_record_id: str | None = Field(default=None, min_length=1, max_length=128)
     workload_item_id: str | None = Field(default=None, min_length=1, max_length=128)
     source_trace_record_id: str | None = Field(default=None, min_length=1, max_length=128)
     model_alias: str | None = Field(default=None, min_length=1, max_length=128)
+    tenant_id: str = Field(default="default", min_length=1, max_length=128)
     request_class: RequestClass = RequestClass.STANDARD
     request_features: RequestFeatureVector | None = None
     observed_backend: str = Field(min_length=1, max_length=128)
-    observed_latency_ms: float = Field(ge=0.0)
-    observed_success: bool
+    observed_backend_instance_id: str | None = Field(default=None, min_length=1, max_length=128)
+    observed_latency_ms: float | None = Field(default=None, ge=0.0)
+    observed_success: bool | None = None
+    topology_reference: TopologySnapshotReference | None = None
     candidate_scores: list[CounterfactualCandidateScore] = Field(min_length=1)
     recommendation: PolicyRecommendation
 
@@ -1034,6 +1088,10 @@ class CounterfactualSimulationSummary(BaseModel):
     request_count: int = Field(ge=0)
     changed_count: int = Field(ge=0)
     unchanged_count: int = Field(ge=0)
+    direct_observation_count: int = Field(default=0, ge=0)
+    predictor_estimate_count: int = Field(default=0, ge=0)
+    low_confidence_count: int = Field(default=0, ge=0)
+    unsupported_count: int = Field(default=0, ge=0)
     insufficient_data_count: int = Field(ge=0)
     guardrail_block_count: int = Field(ge=0)
     observed_backend_counts: dict[str, int] = Field(default_factory=dict)
@@ -1041,6 +1099,8 @@ class CounterfactualSimulationSummary(BaseModel):
     projected_avg_latency_ms: float | None = Field(default=None, ge=0.0)
     projected_error_rate: float | None = Field(default=None, ge=0.0, le=1.0)
     projected_avg_tokens_per_second: float | None = Field(default=None, ge=0.0)
+    bucket_summaries: list[SimulationBucketSummary] = Field(default_factory=list)
+    limitation_notes: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_counts(self) -> CounterfactualSimulationSummary:
@@ -1059,10 +1119,15 @@ class CounterfactualSimulationArtifact(BaseModel):
     simulation_id: str = Field(min_length=1, max_length=128)
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     source_run_ids: list[str] = Field(default_factory=list)
+    source_trace_ids: list[str] = Field(default_factory=list)
     historical_source_run_ids: list[str] = Field(default_factory=list)
+    historical_source_trace_ids: list[str] = Field(default_factory=list)
     policy: ExplainablePolicySpec
     summary: CounterfactualSimulationSummary
     records: list[CounterfactualSimulationRecord] = Field(default_factory=list)
+    topology_references: list[TopologySnapshotReference] = Field(default_factory=list)
+    deployed_topology: list[DeployedTopologyEndpoint] = Field(default_factory=list)
+    worker_instance_inventory: list[BackendInstance] = Field(default_factory=list)
     metadata: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -1071,7 +1136,43 @@ class CounterfactualSimulationArtifact(BaseModel):
             msg = "summary.request_count must match the number of simulation records"
             raise ValueError(msg)
         self.source_run_ids = sorted(set(self.source_run_ids))
+        self.source_trace_ids = sorted(set(self.source_trace_ids))
         self.historical_source_run_ids = sorted(set(self.historical_source_run_ids))
+        self.historical_source_trace_ids = sorted(set(self.historical_source_trace_ids))
+        return self
+
+
+class CounterfactualSimulationComparisonArtifact(BaseModel):
+    """Comparable offline simulation results across several candidate policies."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: BenchmarkArtifactSchemaVersion = BenchmarkArtifactSchemaVersion.V3
+    simulation_comparison_id: str = Field(min_length=1, max_length=128)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    source_run_ids: list[str] = Field(default_factory=list)
+    source_trace_ids: list[str] = Field(default_factory=list)
+    historical_source_run_ids: list[str] = Field(default_factory=list)
+    historical_source_trace_ids: list[str] = Field(default_factory=list)
+    policies: list[ExplainablePolicySpec] = Field(min_length=1)
+    evaluations: list[CounterfactualSimulationArtifact] = Field(min_length=1)
+    topology_references: list[TopologySnapshotReference] = Field(default_factory=list)
+    deployed_topology: list[DeployedTopologyEndpoint] = Field(default_factory=list)
+    worker_instance_inventory: list[BackendInstance] = Field(default_factory=list)
+    limitation_notes: list[str] = Field(default_factory=list)
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_evaluations(self) -> CounterfactualSimulationComparisonArtifact:
+        self.source_run_ids = sorted(set(self.source_run_ids))
+        self.source_trace_ids = sorted(set(self.source_trace_ids))
+        self.historical_source_run_ids = sorted(set(self.historical_source_run_ids))
+        self.historical_source_trace_ids = sorted(set(self.historical_source_trace_ids))
+        policy_ids = [policy.policy_id for policy in self.policies]
+        evaluation_ids = [evaluation.policy.policy_id for evaluation in self.evaluations]
+        if policy_ids != evaluation_ids:
+            msg = "policies must align one-to-one with evaluations in the same order"
+            raise ValueError(msg)
         return self
 
 
