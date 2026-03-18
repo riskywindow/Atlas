@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from time import perf_counter
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request, Response, status
 from fastapi.responses import StreamingResponse
 
 from switchyard.adapters.base import BackendAdapter
@@ -49,6 +49,14 @@ from switchyard.schemas.routing import (
     SessionAffinityKey,
     TenantTier,
     WorkloadShape,
+)
+from switchyard.schemas.worker import (
+    RegisteredRemoteWorkerSnapshot,
+    RemoteWorkerCleanupResponse,
+    RemoteWorkerDeregisterRequest,
+    RemoteWorkerHeartbeatRequest,
+    RemoteWorkerRegistrationRequest,
+    RemoteWorkerRegistrationResponse,
 )
 from switchyard.telemetry import BackendLabels, estimate_token_count
 
@@ -125,7 +133,9 @@ async def admin_runtime(
         remote_workers=summarize_remote_worker_lifecycle(
             settings=services.settings,
             runtime_backends=runtime_backends,
+            remote_worker_registry=services.remote_workers.snapshot(),
         ),
+        remote_worker_registry=services.remote_workers.snapshot(),
         routing_features=routing_feature_runtime_summary(),
         prefix_locality=services.prefix_locality.inspect_state(),
     )
@@ -187,7 +197,80 @@ async def admin_deployment(
     return await collect_deployment_diagnostics(
         services.settings,
         registry=services.registry,
+        remote_worker_registry=services.remote_workers.snapshot(),
     )
+
+
+@router.get("/admin/remote-workers", response_model=RegisteredRemoteWorkerSnapshot)
+async def admin_remote_workers(
+    services: GatewayServices = Depends(get_services),
+) -> RegisteredRemoteWorkerSnapshot:
+    """Return the dynamic remote worker registration snapshot."""
+
+    return services.remote_workers.snapshot()
+
+
+@router.post(
+    "/internal/control-plane/remote-workers/register",
+    response_model=RemoteWorkerRegistrationResponse,
+)
+async def register_remote_worker(
+    registration: RemoteWorkerRegistrationRequest,
+    services: GatewayServices = Depends(get_services),
+    x_switchyard_registration_token: str | None = Header(default=None),
+) -> RemoteWorkerRegistrationResponse:
+    """Register a remote worker instance with the control plane."""
+
+    return services.remote_workers.register(
+        registration,
+        token=x_switchyard_registration_token,
+    )
+
+
+@router.post(
+    "/internal/control-plane/remote-workers/heartbeat",
+    response_model=RemoteWorkerRegistrationResponse,
+)
+async def heartbeat_remote_worker(
+    heartbeat: RemoteWorkerHeartbeatRequest,
+    services: GatewayServices = Depends(get_services),
+    x_switchyard_lease_token: str | None = Header(default=None),
+) -> RemoteWorkerRegistrationResponse:
+    """Record a heartbeat for a previously registered remote worker."""
+
+    return services.remote_workers.heartbeat(
+        heartbeat,
+        lease_token=x_switchyard_lease_token,
+    )
+
+
+@router.post(
+    "/internal/control-plane/remote-workers/deregister",
+    response_model=RemoteWorkerRegistrationResponse,
+)
+async def deregister_remote_worker(
+    deregistration: RemoteWorkerDeregisterRequest,
+    services: GatewayServices = Depends(get_services),
+    x_switchyard_lease_token: str | None = Header(default=None),
+) -> RemoteWorkerRegistrationResponse:
+    """Gracefully de-register a remote worker."""
+
+    return services.remote_workers.deregister(
+        deregistration,
+        lease_token=x_switchyard_lease_token,
+    )
+
+
+@router.post(
+    "/admin/remote-workers/cleanup",
+    response_model=RemoteWorkerCleanupResponse,
+)
+async def cleanup_remote_workers(
+    services: GatewayServices = Depends(get_services),
+) -> RemoteWorkerCleanupResponse:
+    """Evict remote workers that have exceeded the stale retention window."""
+
+    return services.remote_workers.cleanup_stale_workers()
 
 
 @router.post("/v1/chat/completions", response_model=ChatCompletionResponse)

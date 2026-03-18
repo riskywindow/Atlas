@@ -17,6 +17,7 @@ from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
 from switchyard.control.locality import PrefixLocalityService
 from switchyard.control.policy_rollout import PolicyRolloutService
+from switchyard.control.remote_workers import RemoteWorkerRegistryService
 from switchyard.control.shadow import ShadowTrafficService
 from switchyard.gateway.trace_capture import TraceCaptureService
 from switchyard.logging import get_logger
@@ -40,6 +41,7 @@ class GatewayServices:
     canary: CanaryRoutingService
     shadow: ShadowTrafficService
     policy_rollout: PolicyRolloutService
+    remote_workers: RemoteWorkerRegistryService
     telemetry: Telemetry
     trace_capture: TraceCaptureService
 

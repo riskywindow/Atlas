@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
@@ -179,9 +180,11 @@ async def test_run_gateway_benchmark_captures_deployed_topology_metadata() -> No
 
     @app.get("/admin/runtime")
     async def admin_runtime() -> dict[str, object]:
-        return {
-            "captured_at": "2026-03-16T12:00:00Z",
-            "backends": [
+        return cast(
+            dict[str, object],
+            {
+                "captured_at": "2026-03-16T12:00:00Z",
+                "backends": [
                 {
                     "backend_name": "mlx-lm:chat-mlx",
                     "backend_type": "mlx_lm",
@@ -273,15 +276,219 @@ async def test_run_gateway_benchmark_captures_deployed_topology_metadata() -> No
             },
             "remote_workers": {
                 "secure_registration_required": False,
+                "auth_mode": "none",
                 "dynamic_registration_enabled": False,
                 "heartbeat_timeout_seconds": 30.0,
+                "stale_eviction_seconds": 300.0,
                 "registration_token_name": None,
                 "allow_static_instances": True,
                 "static_instance_count": 1,
                 "registered_instance_count": 0,
                 "discovered_instance_count": 0,
                 "stale_instance_count": 0,
+                "ready_instance_count": 0,
+                "draining_instance_count": 0,
+                "unhealthy_instance_count": 0,
+                "lost_instance_count": 0,
+                "retired_instance_count": 0,
                 "notes": [],
+            },
+            "remote_worker_registry": {
+                "secure_registration_required": False,
+                "auth_mode": "none",
+                "dynamic_registration_enabled": False,
+                "heartbeat_timeout_seconds": 30.0,
+                "stale_eviction_seconds": 300.0,
+                "registration_token_name": None,
+                "worker_count": 1,
+                "stale_worker_count": 0,
+                "ready_worker_count": 1,
+                "live_worker_count": 1,
+                "draining_worker_count": 0,
+                "unhealthy_worker_count": 0,
+                "lost_worker_count": 0,
+                "retired_worker_count": 0,
+                "workers": [
+                    {
+                        "worker_id": "remote-mlx-01",
+                        "worker_name": "mlx-worker",
+                        "environment": "local",
+                        "serving_targets": ["chat-shared"],
+                        "backend_name": "remote-worker:mlx-worker",
+                        "backend_type": "mlx_lm",
+                        "lifecycle_state": "ready",
+                        "registration_state": "registered",
+                        "registered_at": "2026-03-16T12:00:00Z",
+                        "last_heartbeat_at": "2026-03-16T12:00:00Z",
+                        "expires_at": "2026-03-16T12:00:30Z",
+                        "deregistered_at": None,
+                        "stale": False,
+                        "live": True,
+                        "ready": True,
+                        "active_requests": 0,
+                        "queue_depth": 0,
+                        "heartbeat_count": 3,
+                        "capabilities": {
+                            "backend_type": "mlx_lm",
+                            "engine_type": "mlx",
+                            "device_class": "apple_gpu",
+                            "execution_mode": "host_native",
+                            "model_ids": ["chat-mlx"],
+                            "serving_targets": ["chat-shared"],
+                            "max_context_tokens": 8192,
+                            "supports_streaming": True,
+                            "concurrency_limit": 2,
+                            "configured_priority": 100,
+                            "configured_weight": 1.0,
+                            "quality_tier": 1,
+                            "quality_hint": "balanced",
+                            "performance_hint": "balanced",
+                            "model_aliases": {},
+                            "default_model": None,
+                            "supports_tools": False,
+                            "warmup_required": False,
+                            "cache_capabilities": {
+                                "supports_prefix_cache": False,
+                                "supports_prompt_cache_read": False,
+                                "supports_prompt_cache_write": False,
+                                "supports_kv_cache_reuse": False,
+                            },
+                            "placement": {
+                                "provider": None,
+                                "region": None,
+                                "zone": None,
+                                "provider_tags": {},
+                            },
+                            "cost_profile": {
+                                "profile": "unknown",
+                                "budget_bucket": None,
+                                "relative_cost_index": None,
+                                "currency": None,
+                                "metadata": {},
+                            },
+                            "readiness_hints": {
+                                "cold_start_likely": False,
+                                "warm_pool_enabled": False,
+                                "estimated_cold_start_ms": None,
+                                "estimated_warm_ttl_seconds": None,
+                            },
+                            "trust": {
+                                "auth_state": "unknown",
+                                "trust_state": "unknown",
+                                "identity_provider": None,
+                                "principal": None,
+                                "detail": None,
+                            },
+                            "network_characteristics": {
+                                "profile": "unknown",
+                                "expected_rtt_ms": None,
+                                "expected_jitter_ms": None,
+                                "expected_bandwidth_mbps": None,
+                                "notes": [],
+                            },
+                        },
+                        "token_verified": False,
+                        "instance": {
+                            "instance_id": "remote-mlx-01",
+                            "endpoint": {
+                                "base_url": "http://host.docker.internal:8101",
+                                "transport": "http",
+                                "health_path": "/healthz",
+                                "readiness_path": "/internal/worker/ready",
+                                "capabilities_path": "/internal/worker/capabilities",
+                                "warmup_path": "/internal/worker/warmup",
+                                "chat_completions_path": "/internal/worker/generate",
+                                "stream_chat_completions_path": "/internal/worker/generate/stream",
+                                "reachability": {
+                                    "reachable_from_control_plane": True,
+                                    "requires_tunnel": False,
+                                    "auth_state": "unknown",
+                                    "trust_state": "unknown",
+                                    "last_verified_at": None,
+                                    "detail": None,
+                                },
+                            },
+                            "source_of_truth": "registered",
+                            "backend_type": "mlx_lm",
+                            "device_class": "apple_gpu",
+                            "model_identifier": "chat-mlx",
+                            "locality": "local",
+                            "locality_class": "local_network",
+                            "execution_mode": "host_native",
+                            "placement": {
+                                "provider": None,
+                                "region": None,
+                                "zone": None,
+                                "provider_tags": {},
+                            },
+                            "cost_profile": {
+                                "profile": "unknown",
+                                "budget_bucket": None,
+                                "relative_cost_index": None,
+                                "currency": None,
+                                "metadata": {},
+                            },
+                            "readiness_hints": {
+                                "cold_start_likely": False,
+                                "warm_pool_enabled": False,
+                                "estimated_cold_start_ms": None,
+                                "estimated_warm_ttl_seconds": None,
+                            },
+                            "trust": {
+                                "auth_state": "unknown",
+                                "trust_state": "unknown",
+                                "identity_provider": None,
+                                "principal": None,
+                                "detail": None,
+                            },
+                            "network_characteristics": {
+                                "profile": "lan",
+                                "expected_rtt_ms": None,
+                                "expected_jitter_ms": None,
+                                "expected_bandwidth_mbps": None,
+                                "notes": [],
+                            },
+                            "tags": ["registered", "remote"],
+                            "registration": {
+                                "state": "registered",
+                                "lifecycle_state": "ready",
+                                "registered_at": "2026-03-16T12:00:00Z",
+                                "last_heartbeat_at": "2026-03-16T12:00:00Z",
+                                "expires_at": "2026-03-16T12:00:30Z",
+                                "deregistered_at": None,
+                                "heartbeat_count": 3,
+                                "source": "dynamic_registration",
+                                "detail": None,
+                            },
+                            "health": {
+                                "state": "healthy",
+                                "checked_at": "2026-03-16T12:00:00Z",
+                                "latency_ms": 3.5,
+                                "error_rate": None,
+                                "detail": None,
+                                "load_state": "ready",
+                                "warmed_models": [],
+                                "last_error": None,
+                                "circuit_open": False,
+                                "circuit_reason": None,
+                            },
+                            "last_seen_at": "2026-03-16T12:00:00Z",
+                            "image_metadata": None,
+                            "metadata": {"worker_name": "mlx-worker", "ready": "true"},
+                        },
+                        "metadata": {},
+                    }
+                ],
+                "recent_events": [
+                    {
+                        "event_type": "registered",
+                        "recorded_at": "2026-03-16T12:00:00Z",
+                        "worker_id": "remote-mlx-01",
+                        "lifecycle_state": "ready",
+                        "detail": "worker registered",
+                        "metadata": {},
+                    }
+                ],
             },
             "routing_features": {
                 "feature_version": "phase6.v2",
@@ -301,30 +508,31 @@ async def test_run_gateway_benchmark_captures_deployed_topology_metadata() -> No
                 "prefix_fingerprint_algorithm": "sha256_truncated_16_hex",
                 "prefix_plaintext_retained": False,
             },
-            "prefix_locality": {
-                "enabled": True,
-                "ttl_seconds": 300.0,
-                "max_prefixes": 256,
-                "active_prefixes": 1,
-                "hot_prefixes": 1,
-                "tracked_serving_targets": {"mock-chat": 1},
-                "hottest_prefixes": [
-                    {
-                        "serving_target": "mock-chat",
-                        "locality_key": "00112233445566778899",
-                        "prefix_fingerprint": "feedfacecafebeef",
-                        "recent_request_count": 3,
-                        "hotness": "hot",
-                        "preferred_backend": "mock-a",
-                        "preferred_instance_id": None,
-                        "last_seen_at": "2026-03-16T00:00:00Z",
-                    }
-                ],
-                "prefix_fingerprint_algorithm": "sha256_truncated_16_hex",
-                "prefix_plaintext_retained": False,
-                "collision_scope": "serving_target+locality_key+prefix_fingerprint",
+                "prefix_locality": {
+                    "enabled": True,
+                    "ttl_seconds": 300.0,
+                    "max_prefixes": 256,
+                    "active_prefixes": 1,
+                    "hot_prefixes": 1,
+                    "tracked_serving_targets": {"mock-chat": 1},
+                    "hottest_prefixes": [
+                        {
+                            "serving_target": "mock-chat",
+                            "locality_key": "00112233445566778899",
+                            "prefix_fingerprint": "feedfacecafebeef",
+                            "recent_request_count": 3,
+                            "hotness": "hot",
+                            "preferred_backend": "mock-a",
+                            "preferred_instance_id": None,
+                            "last_seen_at": "2026-03-16T00:00:00Z",
+                        }
+                    ],
+                    "prefix_fingerprint_algorithm": "sha256_truncated_16_hex",
+                    "prefix_plaintext_retained": False,
+                    "collision_scope": "serving_target+locality_key+prefix_fingerprint",
+                },
             },
-        }
+        )
 
     @app.post("/v1/chat/completions")
     async def chat_completions() -> dict[str, object]:
@@ -367,6 +575,8 @@ async def test_run_gateway_benchmark_captures_deployed_topology_metadata() -> No
     assert artifact.environment.deployed_topology[0].address == "http://testserver"
     assert artifact.environment.deployed_topology[1].metadata["backend_type"] == "mlx_lm"
     assert artifact.environment.metadata["topology_captured_at"] == "2026-03-16T12:00:00+00:00"
+    assert artifact.environment.remote_worker_snapshot is not None
+    assert artifact.environment.remote_worker_snapshot.workers[0].lifecycle_state.value == "ready"
 
 
 @pytest.mark.asyncio

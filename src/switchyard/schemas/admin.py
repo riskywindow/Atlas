@@ -19,6 +19,7 @@ from switchyard.schemas.routing import (
     ShadowPolicy,
     WorkloadTag,
 )
+from switchyard.schemas.worker import RegisteredRemoteWorkerSnapshot, RemoteWorkerAuthMode
 
 
 class BackendRuntimeSummary(BaseModel):
@@ -98,14 +99,21 @@ class RemoteWorkerLifecycleRuntimeSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     secure_registration_required: bool = False
+    auth_mode: RemoteWorkerAuthMode = RemoteWorkerAuthMode.NONE
     dynamic_registration_enabled: bool = False
     heartbeat_timeout_seconds: float = Field(gt=0.0, le=3600.0)
+    stale_eviction_seconds: float = Field(gt=0.0, le=86_400.0)
     registration_token_name: str | None = Field(default=None, min_length=1, max_length=128)
     allow_static_instances: bool = True
     static_instance_count: int = Field(default=0, ge=0)
     registered_instance_count: int = Field(default=0, ge=0)
     discovered_instance_count: int = Field(default=0, ge=0)
     stale_instance_count: int = Field(default=0, ge=0)
+    ready_instance_count: int = Field(default=0, ge=0)
+    draining_instance_count: int = Field(default=0, ge=0)
+    unhealthy_instance_count: int = Field(default=0, ge=0)
+    lost_instance_count: int = Field(default=0, ge=0)
+    retired_instance_count: int = Field(default=0, ge=0)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -308,6 +316,7 @@ class RuntimeInspectionResponse(BaseModel):
     session_affinity: SessionAffinityRuntimeSummary
     hybrid_execution: HybridExecutionRuntimeSummary
     remote_workers: RemoteWorkerLifecycleRuntimeSummary
+    remote_worker_registry: RegisteredRemoteWorkerSnapshot | None = None
     routing_features: RoutingFeatureRuntimeSummary
     prefix_locality: PrefixLocalityRuntimeSummary
 

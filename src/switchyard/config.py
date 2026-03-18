@@ -34,6 +34,7 @@ from switchyard.schemas.routing import (
     RoutingPolicy,
     ShadowPolicy,
 )
+from switchyard.schemas.worker import RemoteWorkerAuthMode
 
 
 class AppEnvironment(StrEnum):
@@ -380,9 +381,27 @@ class RemoteWorkerLifecycleSettings(BaseModel):
 
     secure_registration_required: bool = False
     dynamic_registration_enabled: bool = False
+    auth_mode: RemoteWorkerAuthMode = RemoteWorkerAuthMode.STATIC_TOKEN
     heartbeat_timeout_seconds: float = Field(default=30.0, gt=0.0, le=3600.0)
+    stale_eviction_seconds: float = Field(default=300.0, gt=0.0, le=86_400.0)
     registration_token_name: str | None = Field(default=None, min_length=1, max_length=128)
+    enrollment_secret_name: str | None = Field(default=None, min_length=1, max_length=128)
     allow_static_instances: bool = True
+    max_lifecycle_events: int = Field(default=100, ge=1, le=1000)
+
+    @model_validator(mode="after")
+    def validate_auth_settings(self) -> RemoteWorkerLifecycleSettings:
+        if not self.secure_registration_required:
+            return self
+        if self.auth_mode is RemoteWorkerAuthMode.STATIC_TOKEN:
+            if self.registration_token_name is None:
+                msg = "registration_token_name is required when auth_mode is static_token"
+                raise ValueError(msg)
+        elif self.auth_mode is RemoteWorkerAuthMode.SIGNED_ENROLLMENT:
+            if self.enrollment_secret_name is None:
+                msg = "enrollment_secret_name is required when auth_mode is signed_enrollment"
+                raise ValueError(msg)
+        return self
 
 
 class Phase7ControlPlaneSettings(BaseModel):

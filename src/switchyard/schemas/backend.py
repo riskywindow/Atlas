@@ -255,6 +255,18 @@ class WorkerRegistrationState(StrEnum):
     STALE = "stale"
 
 
+class WorkerLifecycleState(StrEnum):
+    """Explicit control-plane lifecycle state for a remote worker instance."""
+
+    REGISTERING = "registering"
+    WARMING = "warming"
+    READY = "ready"
+    DRAINING = "draining"
+    UNHEALTHY = "unhealthy"
+    LOST = "lost"
+    RETIRED = "retired"
+
+
 class BackendInstanceSource(StrEnum):
     """Source of truth for a backend instance record."""
 
@@ -267,9 +279,12 @@ class BackendRegistrationMetadata(BaseModel):
     """Worker registration and heartbeat metadata."""
 
     state: WorkerRegistrationState = WorkerRegistrationState.STATIC
+    lifecycle_state: WorkerLifecycleState | None = None
     registered_at: datetime | None = None
     last_heartbeat_at: datetime | None = None
     expires_at: datetime | None = None
+    deregistered_at: datetime | None = None
+    heartbeat_count: int = Field(default=0, ge=0)
     source: str | None = Field(default=None, min_length=1, max_length=128)
     detail: str | None = Field(default=None, max_length=256)
 

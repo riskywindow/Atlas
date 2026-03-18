@@ -21,6 +21,10 @@ from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
 from switchyard.control.locality import PrefixLocalityService
 from switchyard.control.policy_rollout import PolicyRolloutService
+from switchyard.control.remote_workers import (
+    RemoteWorkerRegistrationError,
+    RemoteWorkerRegistryService,
+)
 from switchyard.control.shadow import ShadowTrafficService
 from switchyard.gateway.dependencies import GatewayServices, gateway_lifespan
 from switchyard.gateway.routes import BackendExecutionExhaustedError, InvalidRequestContextError
@@ -65,6 +69,9 @@ def create_app(
     resolved_prefix_locality = prefix_locality or PrefixLocalityService()
     resolved_canary = CanaryRoutingService(resolved_settings.phase4.canary_routing)
     resolved_shadow = ShadowTrafficService(resolved_settings.phase4.shadow_routing)
+    resolved_remote_workers = RemoteWorkerRegistryService(
+        resolved_settings.phase7.remote_workers
+    )
     resolved_policy_rollout = policy_rollout or PolicyRolloutService(
         resolved_settings.phase4.policy_rollout
     )
@@ -94,6 +101,7 @@ def create_app(
         canary=resolved_canary,
         shadow=resolved_shadow,
         policy_rollout=resolved_policy_rollout,
+        remote_workers=resolved_remote_workers,
         telemetry=resolved_telemetry,
         trace_capture=build_trace_capture_service(
             mode=resolved_settings.trace_capture_mode,
@@ -230,6 +238,23 @@ def create_app(
         )
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=payload.model_dump(mode="json"),
+            headers=_request_id_headers(request_id),
+        )
+
+    @app.exception_handler(RemoteWorkerRegistrationError)
+    async def handle_remote_worker_registration_error(
+        request: Request,
+        exc: RemoteWorkerRegistrationError,
+    ) -> JSONResponse:
+        request_id = request.state.request_id
+        payload = ErrorResponse(
+            code="remote_worker_registration_error",
+            message=str(exc),
+            request_id=request_id,
+        )
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
             content=payload.model_dump(mode="json"),
             headers=_request_id_headers(request_id),
         )

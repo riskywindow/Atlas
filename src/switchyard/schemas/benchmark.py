@@ -42,6 +42,7 @@ from switchyard.schemas.routing import (
     WorkloadShape,
     WorkloadTag,
 )
+from switchyard.schemas.worker import RegisteredRemoteWorkerSnapshot
 
 
 class BenchmarkArtifactSchemaVersion(StrEnum):
@@ -1282,6 +1283,7 @@ class BenchmarkEnvironmentMetadata(EnvironmentSnapshot):
     shadow_sampling_rate: float = Field(default=0.0, ge=0.0, le=1.0)
     deployed_topology: list[DeployedTopologyEndpoint] = Field(default_factory=list)
     worker_instance_inventory: list[BackendInstance] = Field(default_factory=list)
+    remote_worker_snapshot: RegisteredRemoteWorkerSnapshot | None = None
     control_plane_image: BackendImageMetadata | None = None
     topology_capture_source: str | None = Field(default=None, min_length=1, max_length=128)
     topology_reference: TopologySnapshotReference | None = None

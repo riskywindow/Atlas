@@ -158,7 +158,8 @@ def test_settings_load_phase7_hybrid_and_remote_worker_config(
             '"max_remote_share_percent":20.0,"remote_request_budget_per_minute":180,'
             '"allowed_remote_environments":["staging","prod-remote"]},'
             '"remote_workers":{"secure_registration_required":true,'
-            '"dynamic_registration_enabled":true,"heartbeat_timeout_seconds":45.0,'
+            '"dynamic_registration_enabled":true,"auth_mode":"static_token",'
+            '"heartbeat_timeout_seconds":45.0,"stale_eviction_seconds":120.0,'
             '"registration_token_name":"SWITCHYARD_WORKER_TOKEN","allow_static_instances":false}}'
         ),
     )
@@ -174,7 +175,9 @@ def test_settings_load_phase7_hybrid_and_remote_worker_config(
     )
     assert settings.phase7.remote_workers.secure_registration_required is True
     assert settings.phase7.remote_workers.dynamic_registration_enabled is True
+    assert settings.phase7.remote_workers.auth_mode.value == "static_token"
     assert settings.phase7.remote_workers.heartbeat_timeout_seconds == 45.0
+    assert settings.phase7.remote_workers.stale_eviction_seconds == 120.0
     assert settings.phase7.remote_workers.registration_token_name == "SWITCHYARD_WORKER_TOKEN"
     assert settings.phase7.remote_workers.allow_static_instances is False
 

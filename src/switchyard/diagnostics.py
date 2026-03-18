@@ -33,6 +33,7 @@ from switchyard.schemas.backend import (
     DeviceClass,
     WorkerTransportType,
 )
+from switchyard.schemas.worker import RegisteredRemoteWorkerSnapshot, RemoteWorkerAuthMode
 
 _DEFAULT_HTTP_TIMEOUT: Final[float] = 5.0
 
@@ -50,6 +51,7 @@ async def collect_deployment_diagnostics(
     settings: Settings,
     *,
     registry: AdapterRegistry | None = None,
+    remote_worker_registry: RegisteredRemoteWorkerSnapshot | None = None,
 ) -> DeploymentDiagnosticsResponse:
     """Collect a deployment-aware diagnostics report from config and optional runtime."""
 
@@ -95,6 +97,7 @@ async def collect_deployment_diagnostics(
         remote_workers=summarize_remote_worker_lifecycle(
             settings=settings,
             runtime_backends=runtime_backends,
+            remote_worker_registry=remote_worker_registry,
         ),
         supporting_services=supporting_services,
         notes=notes,
@@ -254,6 +257,7 @@ def summarize_remote_worker_lifecycle(
     *,
     settings: Settings,
     runtime_backends: list[BackendRuntimeSummary],
+    remote_worker_registry: RegisteredRemoteWorkerSnapshot | None = None,
 ) -> RemoteWorkerLifecycleRuntimeSummary:
     """Summarize Phase 7 registration posture from config and runtime inventory."""
 
@@ -266,6 +270,11 @@ def summarize_remote_worker_lifecycle(
     registered_instance_count = 0
     discovered_instance_count = 0
     stale_instance_count = 0
+    ready_instance_count = 0
+    draining_instance_count = 0
+    unhealthy_instance_count = 0
+    lost_instance_count = 0
+    retired_instance_count = 0
     for backend in runtime_backends:
         for instance in backend.instances:
             if instance.registration_state == "registered":
@@ -274,6 +283,14 @@ def summarize_remote_worker_lifecycle(
                 discovered_instance_count += 1
             elif instance.registration_state == "stale":
                 stale_instance_count += 1
+    if remote_worker_registry is not None:
+        registered_instance_count = remote_worker_registry.worker_count
+        stale_instance_count = remote_worker_registry.stale_worker_count
+        ready_instance_count = remote_worker_registry.ready_worker_count
+        draining_instance_count = remote_worker_registry.draining_worker_count
+        unhealthy_instance_count = remote_worker_registry.unhealthy_worker_count
+        lost_instance_count = remote_worker_registry.lost_worker_count
+        retired_instance_count = remote_worker_registry.retired_worker_count
 
     notes: list[str] = []
     if (
@@ -289,14 +306,25 @@ def summarize_remote_worker_lifecycle(
 
     return RemoteWorkerLifecycleRuntimeSummary(
         secure_registration_required=settings.phase7.remote_workers.secure_registration_required,
+        auth_mode=(
+            settings.phase7.remote_workers.auth_mode
+            if settings.phase7.remote_workers.secure_registration_required
+            else RemoteWorkerAuthMode.NONE
+        ),
         dynamic_registration_enabled=settings.phase7.remote_workers.dynamic_registration_enabled,
         heartbeat_timeout_seconds=settings.phase7.remote_workers.heartbeat_timeout_seconds,
+        stale_eviction_seconds=settings.phase7.remote_workers.stale_eviction_seconds,
         registration_token_name=settings.phase7.remote_workers.registration_token_name,
         allow_static_instances=settings.phase7.remote_workers.allow_static_instances,
         static_instance_count=static_instance_count,
         registered_instance_count=registered_instance_count,
         discovered_instance_count=discovered_instance_count,
         stale_instance_count=stale_instance_count,
+        ready_instance_count=ready_instance_count,
+        draining_instance_count=draining_instance_count,
+        unhealthy_instance_count=unhealthy_instance_count,
+        lost_instance_count=lost_instance_count,
+        retired_instance_count=retired_instance_count,
         notes=notes,
     )
 

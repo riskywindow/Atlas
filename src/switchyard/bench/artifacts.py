@@ -2497,6 +2497,7 @@ async def _build_http_benchmark_environment(
         )
     ]
     worker_inventory: list[BackendInstance] = []
+    remote_worker_snapshot = None
     topology_capture_source: str | None = None
     capture_metadata = dict(metadata)
     if runtime_inspection_path is not None:
@@ -2506,6 +2507,7 @@ async def _build_http_benchmark_environment(
             runtime_snapshot = RuntimeInspectionResponse.model_validate(runtime_response.json())
             topology.extend(_runtime_topology_endpoints(runtime_snapshot))
             worker_inventory = _runtime_worker_inventory(runtime_snapshot)
+            remote_worker_snapshot = runtime_snapshot.remote_worker_registry
             topology_capture_source = "gateway_admin_runtime"
             capture_metadata["topology_captured_at"] = runtime_snapshot.captured_at.isoformat()
         except (httpx.HTTPError, ValueError) as exc:
@@ -2521,6 +2523,7 @@ async def _build_http_benchmark_environment(
         timeout_seconds=timeout_seconds,
         deployed_topology=topology,
         worker_instance_inventory=worker_inventory,
+        remote_worker_snapshot=remote_worker_snapshot,
         control_plane_image=control_plane_image,
         topology_capture_source=topology_capture_source,
         metadata=capture_metadata,
