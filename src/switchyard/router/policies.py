@@ -12,8 +12,11 @@ from switchyard.schemas.backend import (
     BackendLoadState,
     BackendStatusSnapshot,
     DeviceClass,
+    ExecutionModeLabel,
+    NetworkProfile,
     PerformanceHint,
     QualityHint,
+    WorkerLocalityClass,
 )
 from switchyard.schemas.benchmark import (
     CandidateRouteEstimateContext,
@@ -198,12 +201,12 @@ class CompatibilityRoutingPolicy:
 
         assert self.compatibility_policy is not None
         assessments = [
-            CandidateAssessment(
+            _compatibility_assessment(
                 snapshot=snapshot,
-                score=_score_snapshot(snapshot=snapshot, policy=self.compatibility_policy),
-                eligible=True,
-                rationale=_score_rationale(snapshot=snapshot, policy=self.compatibility_policy),
-                reason_codes=[RouteSelectionReasonCode.POLICY_SCORE],
+                candidates=candidates,
+                policy=self.compatibility_policy,
+                request=request,
+                context=context,
             )
             for snapshot in candidates
         ]
@@ -223,7 +226,7 @@ class CompatibilityRoutingPolicy:
             policy_reference=self.policy_reference,
             assessments=ranked,
             selected_backend=selected.snapshot.name,
-            selected_reason_codes=[RouteSelectionReasonCode.POLICY_SCORE],
+            selected_reason_codes=list(selected.reason_codes),
             selected_reason=selected.rationale,
         )
 
@@ -656,12 +659,15 @@ def rejection_reason(
             reason="request exceeds backend max context",
             category="capability",
         )
-    if (
-        policy is RoutingPolicy.LOCAL_ONLY
-        and snapshot.capabilities.device_class is DeviceClass.REMOTE
+    if policy in {RoutingPolicy.LOCAL_ONLY, RoutingPolicy.REMOTE_DISABLED} and _is_remote_snapshot(
+        snapshot
     ):
         return CandidateRejection(
-            reason="policy requires a local backend",
+            reason=(
+                "policy requires a local backend"
+                if policy is RoutingPolicy.LOCAL_ONLY
+                else "policy disables remote backends"
+            ),
             category="policy",
         )
     return None
@@ -677,16 +683,28 @@ def _score_snapshot(
     *,
     snapshot: BackendStatusSnapshot,
     policy: RoutingPolicy,
+    request: ChatCompletionRequest | None = None,
+    context: RequestContext | None = None,
+    candidates: Sequence[BackendStatusSnapshot] | None = None,
 ) -> float:
+    del request
     latency_ms = snapshot.health.latency_ms or 1000.0
+    predicted_latency_ms = _predicted_latency_ms(snapshot)
+    queue_delay_ms = _predicted_queue_delay_ms(snapshot)
     quality = float(snapshot.capabilities.quality_tier)
-    local_bonus = 12.0 if snapshot.capabilities.device_class is not DeviceClass.REMOTE else 0.0
+    is_remote = _is_remote_snapshot(snapshot)
+    local_bonus = 12.0 if not is_remote else 0.0
     health_bonus = 100.0 if snapshot.health.state is BackendHealthState.HEALTHY else 65.0
     warm_bonus = 8.0 if snapshot.health.load_state is BackendLoadState.READY else 0.0
     priority_bonus = max(0.0, 30.0 - float(snapshot.capabilities.configured_priority) / 4.0)
     weight_bonus = min(snapshot.capabilities.configured_weight * 3.0, 15.0)
     quality_hint_bonus = _quality_hint_bonus(snapshot)
     performance_bonus = _performance_hint_bonus(snapshot, policy=policy)
+    network_penalty = _network_penalty(snapshot)
+    cost_penalty = _cost_penalty(snapshot)
+    locality_bonus = _prefix_locality_bonus(snapshot=snapshot, context=context)
+    evidence_bonus = _evidence_bonus(snapshot)
+    tenant_bonus = _tenant_bonus(snapshot=snapshot, context=context)
 
     if policy is RoutingPolicy.LATENCY_FIRST:
         return (
@@ -696,6 +714,58 @@ def _score_snapshot(
             + weight_bonus
             + performance_bonus
             - latency_ms
+        )
+    if policy is RoutingPolicy.LOCAL_PREFERRED:
+        return (
+            health_bonus
+            + warm_bonus
+            + priority_bonus
+            + weight_bonus
+            + (local_bonus * 2.5)
+            + locality_bonus
+            + evidence_bonus
+            + tenant_bonus
+            - (predicted_latency_ms / 3.0)
+            - (queue_delay_ms / 2.0)
+            - network_penalty
+            - cost_penalty
+        )
+    if policy is RoutingPolicy.BURST_TO_REMOTE:
+        burst_remote_bonus = (
+            40.0 if is_remote and _local_capacity_pressure(candidates or []) else 0.0
+        )
+        return (
+            health_bonus
+            + warm_bonus
+            + priority_bonus
+            + weight_bonus
+            + locality_bonus
+            + evidence_bonus
+            + tenant_bonus
+            + burst_remote_bonus
+            + (0.0 if is_remote else 10.0)
+            - (predicted_latency_ms / 2.0)
+            - queue_delay_ms
+            - (network_penalty / 2.0)
+            - cost_penalty
+        )
+    if policy is RoutingPolicy.LATENCY_SLO:
+        target = 0 if context is None or context.max_latency_ms is None else context.max_latency_ms
+        projected_latency = predicted_latency_ms + queue_delay_ms
+        meets_slo_bonus = 35.0 if target > 0 and projected_latency <= target else 0.0
+        misses_slo_penalty = 25.0 if target > 0 and projected_latency > target else 0.0
+        return (
+            health_bonus
+            + warm_bonus
+            + priority_bonus
+            + performance_bonus
+            + evidence_bonus
+            + tenant_bonus
+            + meets_slo_bonus
+            - projected_latency
+            - network_penalty
+            - misses_slo_penalty
+            - (cost_penalty / 2.0)
         )
     if policy is RoutingPolicy.QUALITY_FIRST:
         return (
@@ -707,6 +777,27 @@ def _score_snapshot(
             + (weight_bonus / 2.0)
             - (latency_ms / 10.0)
         )
+    if policy is RoutingPolicy.QUALITY_ON_DEMAND:
+        demand_bonus = 0.0
+        if context is not None and (
+            context.tenant_tier.value == "priority"
+            or context.workload_shape.value == "evaluation"
+        ):
+            demand_bonus = 25.0
+        return (
+            health_bonus
+            + warm_bonus
+            + priority_bonus
+            + (quality * 25.0)
+            + quality_hint_bonus
+            + demand_bonus
+            + locality_bonus
+            + evidence_bonus
+            - (predicted_latency_ms / 8.0)
+            - (queue_delay_ms / 4.0)
+            - (network_penalty / 3.0)
+            - (cost_penalty / 2.0)
+        )
     if policy is RoutingPolicy.LOCAL_ONLY:
         return (
             health_bonus
@@ -716,6 +807,26 @@ def _score_snapshot(
             + (quality * 10.0)
             + quality_hint_bonus
             - (latency_ms / 8.0)
+        )
+    if policy is RoutingPolicy.REMOTE_PREFERRED_IF_LOCAL_UNHEALTHY:
+        remote_bonus = (
+            45.0
+            if is_remote and not _has_healthy_local_candidate(candidates or [])
+            else 0.0
+        )
+        return (
+            health_bonus
+            + warm_bonus
+            + priority_bonus
+            + weight_bonus
+            + evidence_bonus
+            + locality_bonus
+            + remote_bonus
+            + (0.0 if is_remote else 8.0)
+            - (predicted_latency_ms / 2.5)
+            - (queue_delay_ms / 2.0)
+            - (network_penalty / 2.0)
+            - cost_penalty
         )
     return (
         health_bonus
@@ -734,19 +845,31 @@ def _score_rationale(
     *,
     snapshot: BackendStatusSnapshot,
     policy: RoutingPolicy,
+    context: RequestContext | None = None,
 ) -> list[str]:
     latency_ms = snapshot.health.latency_ms or 1000.0
+    predicted_latency_ms = _predicted_latency_ms(snapshot)
+    predicted_queue_delay_ms = _predicted_queue_delay_ms(snapshot)
     return [
         f"policy={policy.value}",
         f"health={snapshot.health.state.value}",
         f"readiness={snapshot.health.load_state.value}",
         f"latency_ms={latency_ms:.1f}",
+        f"predicted_latency_ms={predicted_latency_ms:.1f}",
+        f"predicted_queue_delay_ms={predicted_queue_delay_ms:.1f}",
         f"quality_tier={snapshot.capabilities.quality_tier}",
         f"quality_hint={snapshot.capabilities.quality_hint.value}",
         f"performance_hint={snapshot.capabilities.performance_hint.value}",
         f"device_class={snapshot.capabilities.device_class.value}",
         f"configured_priority={snapshot.capabilities.configured_priority}",
         f"configured_weight={snapshot.capabilities.configured_weight:.2f}",
+        (
+            "prefix_locality=preferred"
+            if context is not None
+            and context.prefix_locality_signal is not None
+            and context.prefix_locality_signal.preferred_backend == snapshot.name
+            else "prefix_locality=none"
+        ),
     ]
 
 
@@ -780,3 +903,215 @@ def _performance_hint_bonus(
     ):
         return 6.0
     return 0.0
+
+
+def _compatibility_assessment(
+    *,
+    snapshot: BackendStatusSnapshot,
+    candidates: Sequence[BackendStatusSnapshot],
+    policy: RoutingPolicy,
+    request: ChatCompletionRequest,
+    context: RequestContext,
+) -> CandidateAssessment:
+    score = _score_snapshot(
+        snapshot=snapshot,
+        policy=policy,
+        request=request,
+        context=context,
+        candidates=candidates,
+    )
+    return CandidateAssessment(
+        snapshot=snapshot,
+        score=score,
+        eligible=True,
+        rationale=_score_rationale(snapshot=snapshot, policy=policy, context=context),
+        reason_codes=_reason_codes_for(snapshot=snapshot, policy=policy, context=context),
+    )
+
+
+def _reason_codes_for(
+    *,
+    snapshot: BackendStatusSnapshot,
+    policy: RoutingPolicy,
+    context: RequestContext,
+) -> list[RouteSelectionReasonCode]:
+    if policy in {
+        RoutingPolicy.LATENCY_FIRST,
+        RoutingPolicy.BALANCED,
+        RoutingPolicy.QUALITY_FIRST,
+        RoutingPolicy.LOCAL_ONLY,
+    }:
+        return [RouteSelectionReasonCode.POLICY_SCORE]
+    codes = [RouteSelectionReasonCode.POLICY_SCORE]
+    if policy is RoutingPolicy.LOCAL_PREFERRED and not _is_remote_snapshot(snapshot):
+        codes.append(RouteSelectionReasonCode.HYBRID_LOCAL_PREFERENCE)
+    if policy is RoutingPolicy.BURST_TO_REMOTE and _is_remote_snapshot(snapshot):
+        codes.append(RouteSelectionReasonCode.HYBRID_BURST_REMOTE)
+    if policy is RoutingPolicy.LATENCY_SLO:
+        codes.append(RouteSelectionReasonCode.HYBRID_LATENCY_SLO)
+    if policy is RoutingPolicy.QUALITY_ON_DEMAND:
+        codes.append(RouteSelectionReasonCode.HYBRID_QUALITY_ON_DEMAND)
+    if policy is RoutingPolicy.REMOTE_DISABLED:
+        codes.append(RouteSelectionReasonCode.HYBRID_REMOTE_DISABLED)
+    if (
+        policy is RoutingPolicy.REMOTE_PREFERRED_IF_LOCAL_UNHEALTHY
+        and _is_remote_snapshot(snapshot)
+    ):
+        codes.append(RouteSelectionReasonCode.HYBRID_REMOTE_IF_LOCAL_UNHEALTHY)
+    if _is_remote_snapshot(snapshot):
+        codes.append(RouteSelectionReasonCode.NETWORK_PENALTY)
+    if _predicted_queue_delay_ms(snapshot) > 0:
+        codes.append(RouteSelectionReasonCode.QUEUE_PREDICTION)
+    if _cost_penalty(snapshot) > 0:
+        codes.append(RouteSelectionReasonCode.COST_PRESSURE)
+    if (
+        context.prefix_locality_signal is not None
+        and context.prefix_locality_signal.preferred_backend == snapshot.name
+    ):
+        codes.append(RouteSelectionReasonCode.PREFIX_LOCALITY)
+    codes.append(
+        RouteSelectionReasonCode.EVIDENCE_SUFFICIENT
+        if _has_sufficient_evidence(snapshot)
+        else RouteSelectionReasonCode.EVIDENCE_INSUFFICIENT
+    )
+    if context.tenant_tier.value == "priority" or context.request_class.value != "standard":
+        codes.append(RouteSelectionReasonCode.TENANT_POLICY)
+    return codes
+
+
+def _is_remote_snapshot(snapshot: BackendStatusSnapshot) -> bool:
+    if snapshot.capabilities.execution_mode in {
+        ExecutionModeLabel.REMOTE_WORKER,
+        ExecutionModeLabel.EXTERNAL_SERVICE,
+    }:
+        return True
+    if snapshot.deployment is not None and snapshot.deployment.execution_mode in {
+        ExecutionModeLabel.REMOTE_WORKER,
+        ExecutionModeLabel.EXTERNAL_SERVICE,
+    }:
+        return True
+    if snapshot.capabilities.device_class is DeviceClass.REMOTE:
+        return True
+    return any(
+        instance.locality_class
+        in {
+            WorkerLocalityClass.REMOTE_PRIVATE,
+            WorkerLocalityClass.REMOTE_CLOUD,
+            WorkerLocalityClass.EXTERNAL_SERVICE,
+        }
+        for instance in snapshot.instance_inventory
+    )
+
+
+def _predicted_latency_ms(snapshot: BackendStatusSnapshot) -> float:
+    predicted = snapshot.metadata.get("predicted_latency_ms")
+    if predicted is not None:
+        try:
+            return float(predicted)
+        except ValueError:
+            pass
+    return snapshot.health.latency_ms or 1000.0
+
+
+def _predicted_queue_delay_ms(snapshot: BackendStatusSnapshot) -> float:
+    predicted = snapshot.metadata.get("predicted_queue_delay_ms")
+    if predicted is not None:
+        try:
+            return float(predicted)
+        except ValueError:
+            pass
+    if snapshot.capabilities.concurrency_limit <= 0:
+        return 0.0
+    base_latency = snapshot.health.latency_ms or 0.0
+    return (snapshot.queue_depth / snapshot.capabilities.concurrency_limit) * base_latency
+
+
+def _network_penalty(snapshot: BackendStatusSnapshot) -> float:
+    if not _is_remote_snapshot(snapshot):
+        return 0.0
+    profile = snapshot.capabilities.network_characteristics.profile
+    if profile is NetworkProfile.INTERNET:
+        return 30.0
+    if profile is NetworkProfile.WAN:
+        return 18.0
+    if profile is NetworkProfile.LAN:
+        return 6.0
+    return 12.0
+
+
+def _cost_penalty(snapshot: BackendStatusSnapshot) -> float:
+    relative_cost = snapshot.capabilities.cost_profile.relative_cost_index
+    penalty = 0.0 if relative_cost is None else relative_cost * 10.0
+    if snapshot.capabilities.cost_profile.profile.value == "premium":
+        penalty += 15.0
+    elif snapshot.capabilities.cost_profile.profile.value == "standard":
+        penalty += 6.0
+    return penalty
+
+
+def _prefix_locality_bonus(
+    *,
+    snapshot: BackendStatusSnapshot,
+    context: RequestContext | None,
+) -> float:
+    if context is None or context.prefix_locality_signal is None:
+        return 0.0
+    signal = context.prefix_locality_signal
+    if signal.preferred_backend == snapshot.name:
+        return 20.0
+    if signal.candidate_local_backend == snapshot.name:
+        return 8.0
+    return 0.0
+
+
+def _tenant_bonus(
+    *,
+    snapshot: BackendStatusSnapshot,
+    context: RequestContext | None,
+) -> float:
+    if context is None:
+        return 0.0
+    if context.tenant_tier.value == "priority":
+        if snapshot.capabilities.quality_hint is QualityHint.PREMIUM:
+            return 12.0
+        if snapshot.capabilities.performance_hint is PerformanceHint.LATENCY_OPTIMIZED:
+            return 10.0
+    if context.request_class.value == "bulk" and _is_remote_snapshot(snapshot):
+        return 6.0
+    return 0.0
+
+
+def _has_sufficient_evidence(snapshot: BackendStatusSnapshot) -> bool:
+    return snapshot.metadata.get("evidence_sufficient", "").lower() == "true"
+
+
+def _evidence_bonus(snapshot: BackendStatusSnapshot) -> float:
+    if _has_sufficient_evidence(snapshot):
+        confidence = snapshot.metadata.get("confidence_score")
+        try:
+            return 10.0 + (0.0 if confidence is None else float(confidence) * 10.0)
+        except ValueError:
+            return 10.0
+    return -5.0
+
+
+def _has_healthy_local_candidate(candidates: Sequence[BackendStatusSnapshot]) -> bool:
+    return any(
+        not _is_remote_snapshot(candidate)
+        and candidate.health.state is BackendHealthState.HEALTHY
+        for candidate in candidates
+    )
+
+
+def _local_capacity_pressure(candidates: Sequence[BackendStatusSnapshot]) -> bool:
+    local_candidates = [
+        candidate for candidate in candidates if not _is_remote_snapshot(candidate)
+    ]
+    if not local_candidates:
+        return False
+    return any(
+        candidate.active_requests >= candidate.capabilities.concurrency_limit
+        or candidate.queue_depth > 0
+        or candidate.health.load_state in {BackendLoadState.COLD, BackendLoadState.WARMING}
+        for candidate in local_candidates
+    )

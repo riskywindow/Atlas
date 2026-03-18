@@ -63,6 +63,7 @@ class MockBackendAdapter:
         simulated_queue_depth: int = 0,
         circuit_open: bool = False,
         circuit_reason: str | None = None,
+        status_metadata: dict[str, str] | None = None,
     ) -> None:
         self.name = name
         self.backend_type = BackendType.MOCK
@@ -92,6 +93,7 @@ class MockBackendAdapter:
         self._simulated_queue_depth = simulated_queue_depth
         self._circuit_open = circuit_open
         self._circuit_reason = circuit_reason
+        self._status_metadata = dict(status_metadata or {})
         self._warmed_models: set[str] = set()
         self._last_warmup_at: datetime | None = None
 
@@ -133,7 +135,7 @@ class MockBackendAdapter:
             active_requests=self._simulated_active_requests,
             queue_depth=self._simulated_queue_depth,
             last_warmup_at=self._last_warmup_at,
-            metadata={"adapter_kind": "mock"},
+            metadata={"adapter_kind": "mock", **self._status_metadata},
         )
 
     async def warmup(self, model_id: str | None = None) -> None:

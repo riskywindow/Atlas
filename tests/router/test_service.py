@@ -31,7 +31,11 @@ from switchyard.schemas.backend import (
     BackendHealthState,
     BackendStatusSnapshot,
     BackendType,
+    CostBudgetProfile,
+    CostProfileClass,
     DeviceClass,
+    NetworkCharacteristics,
+    NetworkProfile,
     PerformanceHint,
     QualityHint,
 )
@@ -47,6 +51,8 @@ from switchyard.schemas.routing import (
     CircuitBreakerPhase,
     PolicyReference,
     PolicyRolloutMode,
+    PrefixHotness,
+    PrefixLocalitySignal,
     RequestClass,
     RequestContext,
     RequestFeatureVector,
@@ -202,6 +208,10 @@ def build_adapter(
     queue_depth: int = 0,
     circuit_open: bool = False,
     circuit_reason: str | None = None,
+    network_profile: NetworkProfile = NetworkProfile.UNKNOWN,
+    relative_cost_index: float | None = None,
+    cost_profile_name: CostProfileClass = CostProfileClass.UNKNOWN,
+    status_metadata: dict[str, str] | None = None,
 ) -> MockBackendAdapter:
     capabilities = BackendCapabilities(
         backend_type=BackendType.MOCK,
@@ -216,6 +226,11 @@ def build_adapter(
         quality_tier=quality_tier,
         quality_hint=quality_hint,
         performance_hint=performance_hint,
+        network_characteristics=NetworkCharacteristics(profile=network_profile),
+        cost_profile=CostBudgetProfile(
+            profile=cost_profile_name,
+            relative_cost_index=relative_cost_index,
+        ),
     )
     return MockBackendAdapter(
         name=name,
@@ -226,6 +241,7 @@ def build_adapter(
         simulated_queue_depth=queue_depth,
         circuit_open=circuit_open,
         circuit_reason=circuit_reason,
+        status_metadata=status_metadata,
     )
 
 
@@ -355,6 +371,213 @@ async def test_router_policies_choose_different_backends_when_tradeoffs_exist() 
     assert quality_decision.request_features is not None
     assert quality_decision.explanation is not None
     assert quality_decision.explanation.policy_reference == quality_decision.policy_reference
+
+
+@pytest.mark.asyncio
+async def test_router_hybrid_modes_score_local_and_remote_candidates_explainably() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="local-warm",
+            latency_ms=20.0,
+            quality_tier=3,
+            device_class=DeviceClass.CPU,
+            queue_depth=0,
+            status_metadata={
+                "predicted_latency_ms": "18.0",
+                "predicted_queue_delay_ms": "2.0",
+                "evidence_sufficient": "true",
+                "confidence_score": "0.8",
+            },
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="remote-burst",
+            latency_ms=8.0,
+            quality_tier=4,
+            device_class=DeviceClass.REMOTE,
+            queue_depth=0,
+            network_profile=NetworkProfile.WAN,
+            relative_cost_index=1.2,
+            cost_profile_name=CostProfileClass.STANDARD,
+            status_metadata={
+                "predicted_latency_ms": "12.0",
+                "predicted_queue_delay_ms": "1.0",
+                "evidence_sufficient": "true",
+                "confidence_score": "0.9",
+            },
+        )
+    )
+    router = RouterService(registry)
+
+    local_preferred = await router.route(
+        build_request(),
+        build_context(RoutingPolicy.LOCAL_PREFERRED),
+    )
+    latency_slo = await router.route(
+        build_request(),
+        RequestContext(
+            request_id="req-latency-slo",
+            policy=RoutingPolicy.LATENCY_SLO,
+            workload_shape=WorkloadShape.INTERACTIVE,
+            max_latency_ms=15,
+        ),
+    )
+
+    assert local_preferred.backend_name == "local-warm"
+    assert local_preferred.explanation is not None
+    assert latency_slo.explanation is not None
+    assert RouteSelectionReasonCode.HYBRID_LOCAL_PREFERENCE in (
+        local_preferred.explanation.selection_reason_codes
+    )
+    assert latency_slo.backend_name == "remote-burst"
+    assert RouteSelectionReasonCode.HYBRID_LATENCY_SLO in (
+        latency_slo.explanation.selection_reason_codes
+    )
+    remote_candidate = next(
+        candidate
+        for candidate in latency_slo.explanation.candidates
+        if candidate.backend_name == "remote-burst"
+    )
+    assert RouteSelectionReasonCode.NETWORK_PENALTY in remote_candidate.reason_codes
+    assert RouteSelectionReasonCode.EVIDENCE_SUFFICIENT in remote_candidate.reason_codes
+
+
+@pytest.mark.asyncio
+async def test_router_burst_to_remote_prefers_remote_when_local_capacity_is_pressed() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="local-busy",
+            latency_ms=18.0,
+            quality_tier=3,
+            device_class=DeviceClass.CPU,
+            queue_depth=3,
+            active_requests=1,
+            concurrency_limit=2,
+            status_metadata={
+                "predicted_latency_ms": "20.0",
+                "predicted_queue_delay_ms": "30.0",
+                "evidence_sufficient": "true",
+            },
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="remote-spill",
+            latency_ms=12.0,
+            quality_tier=3,
+            device_class=DeviceClass.REMOTE,
+            network_profile=NetworkProfile.WAN,
+            status_metadata={
+                "predicted_latency_ms": "16.0",
+                "predicted_queue_delay_ms": "3.0",
+                "evidence_sufficient": "true",
+            },
+        )
+    )
+    router = RouterService(registry)
+
+    decision = await router.route(build_request(), build_context(RoutingPolicy.BURST_TO_REMOTE))
+
+    assert decision.backend_name == "remote-spill"
+    assert decision.explanation is not None
+    assert (
+        RouteSelectionReasonCode.HYBRID_BURST_REMOTE
+        in decision.explanation.selection_reason_codes
+    )
+    local_candidate = next(
+        candidate
+        for candidate in decision.explanation.candidates
+        if candidate.backend_name == "local-busy"
+    )
+    assert RouteSelectionReasonCode.QUEUE_PREDICTION in local_candidate.reason_codes
+
+
+@pytest.mark.asyncio
+async def test_router_remote_disabled_rejects_remote_candidates_and_preserves_local_compatibility(
+) -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="remote-fast",
+            latency_ms=6.0,
+            quality_tier=4,
+            device_class=DeviceClass.REMOTE,
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="local-safe",
+            latency_ms=20.0,
+            quality_tier=3,
+            device_class=DeviceClass.CPU,
+        )
+    )
+    router = RouterService(registry)
+
+    decision = await router.route(build_request(), build_context(RoutingPolicy.REMOTE_DISABLED))
+
+    assert decision.backend_name == "local-safe"
+    assert decision.rejected_backends["remote-fast"] == "policy disables remote backends"
+
+
+@pytest.mark.asyncio
+async def test_router_remote_preferred_if_local_unhealthy_and_sparse_evidence_is_explained(
+) -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="local-degraded",
+            latency_ms=10.0,
+            quality_tier=3,
+            device_class=DeviceClass.CPU,
+            health_state=BackendHealthState.DEGRADED,
+            status_metadata={"evidence_sufficient": "false"},
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="remote-recovery",
+            latency_ms=14.0,
+            quality_tier=4,
+            device_class=DeviceClass.REMOTE,
+            network_profile=NetworkProfile.WAN,
+            status_metadata={"evidence_sufficient": "false"},
+        )
+    )
+    router = RouterService(registry)
+
+    decision = await router.route(
+        build_request(),
+        RequestContext(
+            request_id="req-remote-unhealthy",
+            policy=RoutingPolicy.REMOTE_PREFERRED_IF_LOCAL_UNHEALTHY,
+            workload_shape=WorkloadShape.INTERACTIVE,
+            prefix_locality_signal=PrefixLocalitySignal(
+                serving_target="mock-chat",
+                locality_key="0011223344556677",
+                prefix_fingerprint="feedfacecafebeef",
+                repeated_prefix_detected=True,
+                hotness=PrefixHotness.HOT,
+                preferred_backend="remote-recovery",
+            ),
+        ),
+    )
+
+    assert decision.backend_name == "remote-recovery"
+    assert decision.explanation is not None
+    assert RouteSelectionReasonCode.HYBRID_REMOTE_IF_LOCAL_UNHEALTHY in (
+        decision.explanation.selection_reason_codes
+    )
+    remote_candidate = next(
+        candidate
+        for candidate in decision.explanation.candidates
+        if candidate.backend_name == "remote-recovery"
+    )
+    assert RouteSelectionReasonCode.PREFIX_LOCALITY in remote_candidate.reason_codes
+    assert RouteSelectionReasonCode.EVIDENCE_INSUFFICIENT in remote_candidate.reason_codes
 
 
 @pytest.mark.asyncio

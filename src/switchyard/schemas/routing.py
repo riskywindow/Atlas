@@ -17,6 +17,12 @@ class RoutingPolicy(StrEnum):
     BALANCED = "balanced"
     QUALITY_FIRST = "quality_first"
     LOCAL_ONLY = "local_only"
+    LOCAL_PREFERRED = "local_preferred"
+    BURST_TO_REMOTE = "burst_to_remote"
+    LATENCY_SLO = "latency_slo"
+    QUALITY_ON_DEMAND = "quality_on_demand"
+    REMOTE_DISABLED = "remote_disabled"
+    REMOTE_PREFERRED_IF_LOCAL_UNHEALTHY = "remote_preferred_if_local_unhealthy"
 
 
 class TenantTier(StrEnum):
@@ -177,6 +183,19 @@ class RouteSelectionReasonCode(StrEnum):
     SHADOW_SKIPPED = "shadow_skipped"
     SHADOW_LAUNCHED = "shadow_launched"
     FALLBACK_EXECUTION = "fallback_execution"
+    HYBRID_LOCAL_PREFERENCE = "hybrid_local_preference"
+    HYBRID_BURST_REMOTE = "hybrid_burst_remote"
+    HYBRID_LATENCY_SLO = "hybrid_latency_slo"
+    HYBRID_QUALITY_ON_DEMAND = "hybrid_quality_on_demand"
+    HYBRID_REMOTE_DISABLED = "hybrid_remote_disabled"
+    HYBRID_REMOTE_IF_LOCAL_UNHEALTHY = "hybrid_remote_if_local_unhealthy"
+    NETWORK_PENALTY = "network_penalty"
+    QUEUE_PREDICTION = "queue_prediction"
+    COST_PRESSURE = "cost_pressure"
+    PREFIX_LOCALITY = "prefix_locality"
+    EVIDENCE_SUFFICIENT = "evidence_sufficient"
+    EVIDENCE_INSUFFICIENT = "evidence_insufficient"
+    TENANT_POLICY = "tenant_policy"
 
 
 class TenantIdentity(BaseModel):
