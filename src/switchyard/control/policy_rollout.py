@@ -225,6 +225,8 @@ class PolicyRolloutService:
 
         return PolicyRolloutStateSnapshot(
             mode=self._mode,
+            candidate_policy_id=self._candidate_policy_id,
+            shadow_policy_id=self._shadow_policy_id,
             canary_percentage=self._canary_percentage,
             kill_switch_enabled=self._kill_switch_enabled,
             learning_frozen=self._learning_frozen,
@@ -239,6 +241,8 @@ class PolicyRolloutService:
         """Import a previously exported rollout state snapshot."""
 
         self._mode = snapshot.mode
+        self._candidate_policy_id = snapshot.candidate_policy_id
+        self._shadow_policy_id = snapshot.shadow_policy_id
         self._canary_percentage = snapshot.canary_percentage
         self._kill_switch_enabled = snapshot.kill_switch_enabled
         self._learning_frozen = snapshot.learning_frozen

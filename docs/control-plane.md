@@ -243,6 +243,45 @@ Artifacts and route headers should show:
 - canary-vs-baseline reasons,
 - fallback to baseline when the canary candidate is unhealthy or breaker-protected.
 
+## Phase 6 Policy Rollout Controls
+
+Phase 6 keeps intelligent-policy rollout local-first and explicit. The same
+`SWITCHYARD_PHASE4` block now carries a `policy_rollout` section for candidate-policy
+controls.
+
+Important:
+
+- the rollout controller and admin endpoints are live in the stock gateway,
+- but the default `create_app()` path does not yet instantiate adaptive candidate
+  scorers from settings alone,
+- `candidate_policy_id` and `shadow_policy_id` therefore only take effect when the
+  gateway is constructed with registered candidate scorers.
+
+Use the config block below as the rollout-state shape, not as a full policy-registration
+mechanism yet.
+
+```bash
+SWITCHYARD_PHASE4='{"admission_control":{"enabled":true,"global_concurrency_cap":4,"global_queue_size":4,"default_concurrency_cap":2,"default_queue_size":2,"request_timeout_seconds":20.0,"queue_timeout_seconds":2.0,"per_tenant_limits":[]},"circuit_breakers":{"enabled":true,"failure_threshold":2,"recovery_success_threshold":1,"open_cooldown_seconds":15.0,"request_timeout_seconds":20.0},"session_affinity":{"enabled":true,"ttl_seconds":120.0,"max_sessions":2000},"canary_routing":{"enabled":false,"default_percentage":0.0,"policies":[]},"shadow_routing":{"enabled":false,"default_sampling_rate":0.0,"policies":[]},"policy_rollout":{"mode":"shadow_only","candidate_policy_id":"adaptive-balanced-v1","shadow_policy_id":"adaptive-balanced-v1","canary_percentage":0.0,"kill_switch_enabled":false,"learning_frozen":false,"max_recent_decisions":25}}' \
+uv run python -m uvicorn switchyard.gateway:create_app --factory --host 127.0.0.1 --port 8000
+```
+
+At runtime, inspect and mutate rollout state through the admin endpoints:
+
+```bash
+curl -s http://127.0.0.1:8000/admin/policy-rollout | python -m json.tool
+
+curl -sS http://127.0.0.1:8000/admin/policy-rollout \
+  -H 'content-type: application/json' \
+  -d '{"mode":"canary","canary_percentage":10.0}' \
+  | python -m json.tool
+
+curl -sS -X POST http://127.0.0.1:8000/admin/policy-rollout/reset | python -m json.tool
+curl -s http://127.0.0.1:8000/admin/policy-rollout/export | python -m json.tool
+```
+
+Use these controls to keep candidate policies in shadow, recommendation, canary, or
+guarded-active modes without changing the baseline compatibility policy configuration.
+
 ## Runtime Inspection
 
 The current admin surface is read-only and local-dev friendly.

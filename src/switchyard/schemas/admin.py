@@ -168,6 +168,8 @@ class PolicyRolloutStateSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: PolicyRolloutMode = PolicyRolloutMode.DISABLED
+    candidate_policy_id: str | None = Field(default=None, min_length=1, max_length=128)
+    shadow_policy_id: str | None = Field(default=None, min_length=1, max_length=128)
     canary_percentage: float = Field(default=0.0, ge=0.0, le=100.0)
     kill_switch_enabled: bool = False
     learning_frozen: bool = False

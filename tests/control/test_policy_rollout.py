@@ -190,6 +190,7 @@ def test_policy_rollout_reset_and_export_import_state() -> None:
 
     snapshot = service.export_state()
     assert snapshot.mode is PolicyRolloutMode.CANARY
+    assert snapshot.candidate_policy_id == "adaptive-rollout-v1"
     assert len(snapshot.recent_decisions) == 1
 
     reset = service.reset_state()
@@ -199,6 +200,8 @@ def test_policy_rollout_reset_and_export_import_state() -> None:
     imported = service.import_state(
         PolicyRolloutStateSnapshot(
             mode=PolicyRolloutMode.ACTIVE_GUARDED,
+            candidate_policy_id="adaptive-rollout-v2",
+            shadow_policy_id="adaptive-rollout-shadow-v1",
             canary_percentage=0.0,
             kill_switch_enabled=False,
             learning_frozen=True,
@@ -209,3 +212,6 @@ def test_policy_rollout_reset_and_export_import_state() -> None:
     assert imported.mode is PolicyRolloutMode.ACTIVE_GUARDED
     assert imported.learning_frozen is True
     assert len(imported.recent_decisions) == 1
+    exported_after_import = service.export_state()
+    assert exported_after_import.candidate_policy_id == "adaptive-rollout-v2"
+    assert exported_after_import.shadow_policy_id == "adaptive-rollout-shadow-v1"

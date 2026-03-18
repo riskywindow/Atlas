@@ -1,11 +1,13 @@
 # Architecture
 
-Switchyard is entering Phase 5 on top of the Phase 4 control-plane foundation: two real
-backend families, logical alias routing, deterministic policies, conservative
-health-aware fallback, explicit worker inventory, and reproducible benchmark and trace
-workflows. The core design goal is still portability: Apple-specific runtime details
-stop at the adapter/runtime boundary so the same contracts can later host CUDA or
-remote workers.
+Switchyard is in Phase 6 on top of the Phase 5 control-plane foundation: two real
+backend families, logical alias routing, explicit worker inventory, conservative
+health-aware fallback, reproducible benchmark and trace workflows, and now a typed
+routing-intelligence layer with deterministic request features, historical summaries,
+transparent adaptive scoring, offline simulation, safe rollout controls, and
+recommendation reporting. The core design goal is still portability: Apple-specific
+runtime details stop at the adapter/runtime boundary so the same contracts can later
+host CUDA or remote workers.
 
 ## Core Terms
 
@@ -219,6 +221,76 @@ extensions of the control plane, not a second system with its own contracts.
    actually served the request.
 10. If a shadow policy matches, a best-effort background shadow copy may be launched.
 11. The gateway records route and execution telemetry, then returns the response or stream.
+
+## Phase 6 Route-Decision Path
+
+Phase 6 makes the decision path explicit instead of mixing live routing with historical
+analysis:
+
+1. The gateway creates `RequestContext`.
+2. `switchyard.router.features` extracts deterministic request and workload features.
+3. The router resolves eligible backend deployments and concrete worker instances.
+4. Session affinity, circuit-breaker state, and backend eligibility are applied.
+5. `PrefixLocalityService` emits repeated-prefix and locality signals.
+6. The primary scorer evaluates candidates and returns per-candidate scores, rejections,
+   reason codes, and rationale.
+7. Optional shadow scorers run without affecting the selected route.
+8. Optional rollout controls may keep the candidate in shadow, report-only, canary, or
+   guarded-active mode.
+9. The router returns a typed `RouteDecision` and `RouteExplanation`.
+
+This path is intentionally explainable:
+
+- the route decision is still synchronous and local,
+- the scorer output is serializable,
+- shadow scoring is explicit and non-binding,
+- rollout controls are separate from model execution,
+- the gateway fallback path still owns execution retries.
+
+## Phase 6 Evidence Path
+
+The evidence path is separate from the request path and stays rooted in authoritative
+artifacts.
+
+Sources:
+
+- benchmark run artifacts,
+- replay artifacts,
+- captured traces,
+- runtime topology snapshots recorded into artifacts.
+
+Derived evidence:
+
+- deterministic request features,
+- locality signals,
+- historical performance summaries,
+- candidate route estimates,
+- offline simulation artifacts,
+- policy recommendation reports.
+
+Trust boundaries:
+
+- runtime logs and metrics help operators, but they are not authoritative evidence for
+  recommendation or promotion,
+- simulation must distinguish direct observations from predictor estimates,
+- low-confidence and unsupported cases stay visible instead of being folded into one
+  score.
+
+## Phase 6 Feedback Loop
+
+The feedback loop is now explicit and conservative:
+
+1. Run benchmark or replay workloads and write artifacts.
+2. Summarize historical performance from those artifacts.
+3. Simulate fixed or adaptive policies offline.
+4. Produce recommendation reports from simulation and benchmark evidence.
+5. Use rollout controls to keep candidates in shadow, report-only, canary, or guarded
+   active mode.
+6. Inspect runtime policy state and benchmark outcomes.
+7. Repeat with new evidence before widening rollout.
+
+Switchyard does not auto-promote policies in Phase 6. The loop is decision support for
+operators, not autonomous routing governance.
 
 ## Router And Control-Plane Policy Flow
 

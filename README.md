@@ -10,6 +10,16 @@ session-affinity reuse, records canary/shadow decisions in runtime inspection an
 benchmark artifacts, and now starts adding deterministic request-feature extraction for
 future cache/locality-aware scorers and offline policy simulation.
 
+Phase 6 also adds:
+- deterministic request and workload feature extraction,
+- repeated-prefix and locality-aware signals without storing raw prompt text,
+- historical performance summaries and transparent predictor inputs,
+- richer scorer and policy interfaces with per-candidate reasoning and shadow scoring,
+- offline simulation that distinguishes direct observations from estimates,
+- a conservative adaptive policy with abstention, confidence thresholds, and guardrails,
+- safe rollout controls with shadow, report-only, canary, and guarded-active modes,
+- evidence-based recommendation reports that do not auto-apply changes.
+
 Phase 6 is Mac-first, not Mac-locked:
 - real local backends are currently Apple Silicon focused,
 - the gateway, router, schemas, and artifacts stay backend-agnostic,
@@ -215,12 +225,61 @@ The comparison artifact keeps per-policy evidence quality explicit and distingui
 direct observations, predictor estimates, low-confidence estimates, and unsupported
 cases.
 
+To turn recent benchmark and simulation artifacts into operator guidance:
+
+```bash
+uv run python -m switchyard.bench.cli recommend-policies \
+  benchmarks/20260317T000000Z_balanced.json \
+  benchmarks/20260317T001500Z_policy-comparison.json \
+  --markdown-report
+```
+
+This writes a typed recommendation artifact plus markdown guidance with evidence
+windows, sample sizes, workload buckets, no-change cases, and caveats.
+
+If a gateway process has a candidate adaptive policy registered, inspect rollout state:
+
+```bash
+curl -s http://127.0.0.1:8000/admin/policy-rollout | python -m json.tool
+```
+
+Move that candidate into shadow-only mode:
+
+```bash
+curl -sS http://127.0.0.1:8000/admin/policy-rollout \
+  -H 'content-type: application/json' \
+  -d '{"mode":"shadow_only","kill_switch_enabled":false,"learning_frozen":false}' \
+  | python -m json.tool
+```
+
+Enable or disable adaptive-policy canary mode:
+
+```bash
+curl -sS http://127.0.0.1:8000/admin/policy-rollout \
+  -H 'content-type: application/json' \
+  -d '{"mode":"canary","canary_percentage":10.0}' \
+  | python -m json.tool
+
+curl -sS http://127.0.0.1:8000/admin/policy-rollout \
+  -H 'content-type: application/json' \
+  -d '{"mode":"disabled"}' \
+  | python -m json.tool
+```
+
+Reset or export rollout state:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8000/admin/policy-rollout/reset | python -m json.tool
+curl -s http://127.0.0.1:8000/admin/policy-rollout/export | python -m json.tool
+```
+
 Use the longer guides together:
 
 - [deployment.md](/Users/rishivinodkumar/Atlas/docs/deployment.md)
 - [control-plane.md](/Users/rishivinodkumar/Atlas/docs/control-plane.md)
 - [benchmarking.md](/Users/rishivinodkumar/Atlas/docs/benchmarking.md)
 - [phase6.md](/Users/rishivinodkumar/Atlas/docs/phase6.md)
+- [intelligent-routing.md](/Users/rishivinodkumar/Atlas/docs/intelligent-routing.md)
 - [architecture.md](/Users/rishivinodkumar/Atlas/docs/architecture.md)
 
 ### Host-Native Worker Mode
