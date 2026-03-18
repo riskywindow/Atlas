@@ -44,6 +44,7 @@ class CandidateRejection:
 
     reason: str
     category: str
+    reason_codes: list[RouteSelectionReasonCode] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -625,7 +626,6 @@ def rejection_reason(
 ) -> CandidateRejection | None:
     """Return a rejection reason when a backend should not be considered."""
 
-    del context
     if not snapshot.capabilities.supports_model_target(request.model):
         return CandidateRejection(
             reason=f"model '{request.model}' is not supported",
@@ -669,6 +669,12 @@ def rejection_reason(
                 else "policy disables remote backends"
             ),
             category="policy",
+        )
+    if context.force_remote_candidates_only and not _is_remote_snapshot(snapshot):
+        return CandidateRejection(
+            reason="local admission was saturated; request was forced to remote spillover",
+            category="admission",
+            reason_codes=[RouteSelectionReasonCode.LOCAL_ADMISSION_SPILLOVER],
         )
     return None
 

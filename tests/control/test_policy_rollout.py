@@ -215,3 +215,40 @@ def test_policy_rollout_reset_and_export_import_state() -> None:
     exported_after_import = service.export_state()
     assert exported_after_import.candidate_policy_id == "adaptive-rollout-v2"
     assert exported_after_import.shadow_policy_id == "adaptive-rollout-shadow-v1"
+
+
+def test_policy_rollout_records_remote_guardrail_triggers() -> None:
+    candidate = FakePolicy(
+        policy_id="adaptive-rollout-v1",
+        compatibility_policy=RoutingPolicy.BALANCED,
+    )
+    service = PolicyRolloutService(
+        PolicyRolloutSettings(
+            mode=PolicyRolloutMode.ACTIVE_GUARDED,
+            candidate_policy_id="adaptive-rollout-v1",
+        ),
+        candidate_policies=[candidate],
+    )
+    resolution = service.resolve(
+        registry=PolicyRegistry(),
+        requested_policy=RoutingPolicy.BALANCED,
+        request=build_request(),
+        context=build_context(),
+    )
+    evaluation = candidate.evaluate(
+        request=build_request(),
+        context=build_context(),
+        candidates=[build_snapshot("alpha"), build_snapshot("beta")],
+    )
+
+    service.observe_decision(
+        context=build_context(),
+        resolution=resolution,
+        primary_evaluation=evaluation,
+        shadow_evaluations=[],
+        extra_guardrail_triggers=["remote_budget_exhausted"],
+    )
+
+    summary = service.inspect_state()
+    assert summary.last_guardrail_trigger == "remote_budget_exhausted"
+    assert "remote_budget_exhausted" in summary.recent_decisions[0].guardrail_triggers

@@ -82,7 +82,12 @@ class HybridExecutionRuntimeSummary(BaseModel):
     require_healthy_local_backends: bool = True
     max_remote_share_percent: float = Field(default=0.0, ge=0.0, le=100.0)
     remote_request_budget_per_minute: int | None = Field(default=None, ge=1)
+    remote_concurrency_cap: int | None = Field(default=None, ge=1)
+    remote_kill_switch_enabled: bool = False
+    remote_cooldown_seconds: float = Field(default=0.0, ge=0.0)
+    allow_high_priority_remote_escalation: bool = True
     allowed_remote_environments: list[str] = Field(default_factory=list)
+    tenant_remote_policy_count: int = Field(default=0, ge=0)
     local_capable_backends: int = Field(default=0, ge=0)
     remote_capable_backends: int = Field(default=0, ge=0)
     healthy_local_backends: int = Field(default=0, ge=0)
@@ -90,6 +95,12 @@ class HybridExecutionRuntimeSummary(BaseModel):
     degraded_remote_backends: int = Field(default=0, ge=0)
     unavailable_remote_backends: int = Field(default=0, ge=0)
     remote_instance_count: int = Field(default=0, ge=0)
+    remote_budget_window_started_at: datetime | None = None
+    remote_budget_requests_used: int = Field(default=0, ge=0)
+    remote_budget_requests_remaining: int | None = Field(default=None, ge=0)
+    remote_in_flight_requests: int = Field(default=0, ge=0)
+    cooldown_active: bool = False
+    cooldown_until: datetime | None = None
     notes: list[str] = Field(default_factory=list)
 
 

@@ -154,6 +154,7 @@ class PolicyRolloutService:
         resolution: PolicyRolloutResolution,
         primary_evaluation: PolicyEvaluation,
         shadow_evaluations: Sequence[PolicyEvaluation],
+        extra_guardrail_triggers: Sequence[str] = (),
     ) -> None:
         """Record a bounded recent policy-decision history for inspection."""
 
@@ -161,6 +162,9 @@ class PolicyRolloutService:
             primary_evaluation=primary_evaluation,
             resolution=resolution,
         )
+        for trigger in extra_guardrail_triggers:
+            if trigger not in guardrail_triggers:
+                guardrail_triggers.append(trigger)
         if guardrail_triggers:
             self._last_guardrail_trigger = guardrail_triggers[-1]
         shadow_policy = shadow_evaluations[0].policy_reference if shadow_evaluations else None

@@ -183,6 +183,7 @@ def summarize_hybrid_execution(
     *,
     settings: Settings,
     runtime_backends: list[BackendRuntimeSummary],
+    spillover_runtime: HybridExecutionRuntimeSummary | None = None,
 ) -> HybridExecutionRuntimeSummary:
     """Summarize Phase 7 hybrid execution posture from config and runtime truth."""
 
@@ -227,6 +228,8 @@ def summarize_hybrid_execution(
             "hybrid spillover is enabled but no remote-capable backends are "
             "currently registered"
         )
+    if spillover_runtime is not None:
+        notes.extend(spillover_runtime.notes)
 
     return HybridExecutionRuntimeSummary(
         enabled=settings.phase7.hybrid_execution.enabled,
@@ -239,8 +242,17 @@ def summarize_hybrid_execution(
         remote_request_budget_per_minute=(
             settings.phase7.hybrid_execution.remote_request_budget_per_minute
         ),
+        remote_concurrency_cap=settings.phase7.hybrid_execution.remote_concurrency_cap,
+        remote_kill_switch_enabled=settings.phase7.hybrid_execution.remote_kill_switch_enabled,
+        remote_cooldown_seconds=settings.phase7.hybrid_execution.remote_cooldown_seconds,
+        allow_high_priority_remote_escalation=(
+            settings.phase7.hybrid_execution.allow_high_priority_remote_escalation
+        ),
         allowed_remote_environments=list(
             settings.phase7.hybrid_execution.allowed_remote_environments
+        ),
+        tenant_remote_policy_count=len(
+            settings.phase7.hybrid_execution.per_tenant_remote_spillover
         ),
         local_capable_backends=local_capable_backends,
         remote_capable_backends=remote_capable_backends,
@@ -249,6 +261,22 @@ def summarize_hybrid_execution(
         degraded_remote_backends=degraded_remote_backends,
         unavailable_remote_backends=unavailable_remote_backends,
         remote_instance_count=remote_instance_count,
+        remote_budget_window_started_at=(
+            None if spillover_runtime is None else spillover_runtime.remote_budget_window_started_at
+        ),
+        remote_budget_requests_used=(
+            0 if spillover_runtime is None else spillover_runtime.remote_budget_requests_used
+        ),
+        remote_budget_requests_remaining=(
+            None
+            if spillover_runtime is None
+            else spillover_runtime.remote_budget_requests_remaining
+        ),
+        remote_in_flight_requests=(
+            0 if spillover_runtime is None else spillover_runtime.remote_in_flight_requests
+        ),
+        cooldown_active=False if spillover_runtime is None else spillover_runtime.cooldown_active,
+        cooldown_until=None if spillover_runtime is None else spillover_runtime.cooldown_until,
         notes=notes,
     )
 

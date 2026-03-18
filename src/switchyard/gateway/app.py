@@ -26,6 +26,7 @@ from switchyard.control.remote_workers import (
     RemoteWorkerRegistryService,
 )
 from switchyard.control.shadow import ShadowTrafficService
+from switchyard.control.spillover import RemoteSpilloverControlService
 from switchyard.gateway.dependencies import GatewayServices, gateway_lifespan
 from switchyard.gateway.routes import BackendExecutionExhaustedError, InvalidRequestContextError
 from switchyard.gateway.routes import router as gateway_router
@@ -72,6 +73,9 @@ def create_app(
     resolved_remote_workers = RemoteWorkerRegistryService(
         resolved_settings.phase7.remote_workers
     )
+    resolved_spillover = RemoteSpilloverControlService(
+        resolved_settings.phase7.hybrid_execution
+    )
     resolved_policy_rollout = policy_rollout or PolicyRolloutService(
         resolved_settings.phase4.policy_rollout
     )
@@ -82,6 +86,7 @@ def create_app(
         prefix_locality=resolved_prefix_locality,
         canary_routing=resolved_canary,
         policy_rollout=resolved_policy_rollout,
+        spillover=resolved_spillover,
     )
     configure_logging(resolved_settings.log_level)
     resolved_telemetry = telemetry or configure_telemetry(
@@ -102,6 +107,7 @@ def create_app(
         shadow=resolved_shadow,
         policy_rollout=resolved_policy_rollout,
         remote_workers=resolved_remote_workers,
+        spillover=resolved_spillover,
         telemetry=resolved_telemetry,
         trace_capture=build_trace_capture_service(
             mode=resolved_settings.trace_capture_mode,

@@ -20,8 +20,10 @@ from switchyard.config import (
     CanaryRoutingSettings,
     CircuitBreakerSettings,
     GenerationDefaults,
+    HybridExecutionSettings,
     LocalModelConfig,
     Phase4ControlPlaneSettings,
+    Phase7ControlPlaneSettings,
     SessionAffinitySettings,
     Settings,
     ShadowRoutingSettings,
@@ -1038,6 +1040,101 @@ async def test_chat_completions_return_429_when_admission_control_rejects() -> N
     admission_header = json.loads(second_response.headers["x-switchyard-admission-decision"])
     assert admission_header["state"] == "rejected"
     assert telemetry.state.admission_records[-1].status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_can_spill_to_remote_when_local_admission_is_full() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        MockBackendAdapter(
+            name="mock-local",
+            simulated_latency_ms=25.0,
+            capability_metadata=BackendCapabilities(
+                backend_type=BackendType.MOCK,
+                device_class=DeviceClass.CPU,
+                model_ids=["mock-chat"],
+                serving_targets=["mock-chat"],
+                max_context_tokens=8192,
+                supports_streaming=False,
+                quality_tier=4,
+            ),
+            response_template=MockResponseTemplate(content="local:{backend_name}"),
+        )
+    )
+    registry.register(
+        MockBackendAdapter(
+            name="mock-remote",
+            capability_metadata=BackendCapabilities(
+                backend_type=BackendType.MOCK,
+                device_class=DeviceClass.REMOTE,
+                model_ids=["mock-chat"],
+                serving_targets=["mock-chat"],
+                max_context_tokens=8192,
+                supports_streaming=False,
+                quality_tier=4,
+            ),
+            response_template=MockResponseTemplate(content="remote:{backend_name}"),
+            status_metadata={"execution_mode": "remote_worker"},
+        )
+    )
+    telemetry = configure_telemetry("switchyard-admission-spillover-test")
+    app = create_app(
+        registry=registry,
+        telemetry=telemetry,
+        settings=Settings(
+            env=AppEnvironment.TEST,
+            default_routing_policy=RoutingPolicy.LOCAL_PREFERRED,
+            phase4=Phase4ControlPlaneSettings(
+                admission_control=AdmissionControlSettings(
+                    enabled=True,
+                    global_concurrency_cap=1,
+                    global_queue_size=0,
+                    default_concurrency_cap=1,
+                )
+            ),
+            phase7=Phase7ControlPlaneSettings(
+                hybrid_execution=HybridExecutionSettings(
+                    enabled=True,
+                    spillover_enabled=True,
+                )
+            ),
+        ),
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        first_task = asyncio.create_task(
+            client.post(
+                "/v1/chat/completions",
+                headers={
+                    "x-request-id": "req-spill-1",
+                    "x-switchyard-routing-policy": "local_preferred",
+                },
+                json={
+                    "model": "mock-chat",
+                    "messages": [{"role": "user", "content": "first"}],
+                },
+            )
+        )
+        await asyncio.sleep(0)
+        second_response = await client.post(
+            "/v1/chat/completions",
+            headers={
+                "x-request-id": "req-spill-2",
+                "x-switchyard-routing-policy": "burst_to_remote",
+            },
+            json={
+                "model": "mock-chat",
+                "messages": [{"role": "user", "content": "second"}],
+            },
+        )
+        first_response = await first_task
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert second_response.json()["choices"][0]["message"]["content"] == "remote:mock-remote"
+    admission_header = json.loads(second_response.headers["x-switchyard-admission-decision"])
+    assert admission_header["state"] == "bypassed"
+    assert admission_header["reason_code"] == "local_admission_spillover_eligible"
 
 
 def test_chat_completions_accepts_internal_backend_pin_header() -> None:

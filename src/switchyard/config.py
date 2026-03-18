@@ -364,14 +364,33 @@ class HybridExecutionSettings(BaseModel):
     require_healthy_local_backends: bool = True
     max_remote_share_percent: float = Field(default=0.0, ge=0.0, le=100.0)
     remote_request_budget_per_minute: int | None = Field(default=None, ge=1, le=1_000_000)
+    remote_concurrency_cap: int | None = Field(default=None, ge=1, le=100_000)
+    remote_kill_switch_enabled: bool = False
+    remote_cooldown_seconds: float = Field(default=0.0, ge=0.0, le=3600.0)
+    allow_high_priority_remote_escalation: bool = True
     allowed_remote_environments: tuple[str, ...] = ()
+    per_tenant_remote_spillover: tuple[RemoteTenantSpilloverRule, ...] = ()
 
     @model_validator(mode="after")
     def validate_remote_envs(self) -> HybridExecutionSettings:
         if len(self.allowed_remote_environments) != len(set(self.allowed_remote_environments)):
             msg = "allowed_remote_environments must not contain duplicate entries"
             raise ValueError(msg)
+        tenant_ids = [rule.tenant_id for rule in self.per_tenant_remote_spillover]
+        if len(tenant_ids) != len(set(tenant_ids)):
+            msg = "per_tenant_remote_spillover must not contain duplicate tenant_id values"
+            raise ValueError(msg)
         return self
+
+
+class RemoteTenantSpilloverRule(BaseModel):
+    """Per-tenant remote spillover posture for hybrid admission and routing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: str = Field(min_length=1, max_length=128)
+    remote_enabled: bool = True
+    allow_high_priority_bypass: bool = False
 
 
 class RemoteWorkerLifecycleSettings(BaseModel):

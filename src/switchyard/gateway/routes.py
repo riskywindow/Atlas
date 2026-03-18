@@ -13,6 +13,11 @@ from fastapi.responses import StreamingResponse
 
 from switchyard.adapters.base import BackendAdapter
 from switchyard.control.admission import AdmissionLease, AdmissionRejectedError
+from switchyard.control.spillover import (
+    RemotePermit,
+    SpilloverPermitRejectedError,
+    spillover_bypass_decision,
+)
 from switchyard.diagnostics import (
     collect_deployment_diagnostics,
     collect_runtime_backend_summaries,
@@ -29,7 +34,7 @@ from switchyard.schemas.admin import (
     PolicyRolloutUpdateRequest,
     RuntimeInspectionResponse,
 )
-from switchyard.schemas.backend import BackendHealthState
+from switchyard.schemas.backend import BackendHealthState, BackendStatusSnapshot
 from switchyard.schemas.benchmark import ExecutionTarget, ExecutionTargetType
 from switchyard.schemas.chat import (
     ChatCompletionChunk,
@@ -37,6 +42,8 @@ from switchyard.schemas.chat import (
     ChatCompletionResponse,
 )
 from switchyard.schemas.routing import (
+    AdmissionDecision,
+    AdmissionDecisionState,
     AffinityDisposition,
     RequestClass,
     RequestContext,
@@ -129,6 +136,7 @@ async def admin_runtime(
         hybrid_execution=summarize_hybrid_execution(
             settings=services.settings,
             runtime_backends=runtime_backends,
+            spillover_runtime=services.spillover.inspect_state(),
         ),
         remote_workers=summarize_remote_worker_lifecycle(
             settings=services.settings,
@@ -522,6 +530,7 @@ async def _stream_chat_completion(
     decision_policy = decision.policy.value
     route_backends = _route_backends_for_execution(decision)
     stream_started = perf_counter()
+    remote_permit: RemotePermit | None = None
 
     try:
         for attempt_number, backend_name in enumerate(route_backends, start=1):
@@ -597,6 +606,13 @@ async def _stream_chat_completion(
             response_id: str | None = None
             emitted_chunk = False
             try:
+                remote_permit = await _maybe_acquire_remote_permit(
+                    services=services,
+                    context=context,
+                    serving_target=chat_request.model,
+                    backend_name=backend_name,
+                    permit=remote_permit,
+                )
                 async for chunk in adapter.stream_generate(chat_request, context):
                     emitted_chunk = True
                     response_id = chunk.id
@@ -674,6 +690,8 @@ async def _stream_chat_completion(
                     backend_name,
                     reason=_classify_backend_failure(exc),
                 )
+                if remote_permit is not None:
+                    services.spillover.record_remote_instability()
                 continue
 
             _append_execution_event(
@@ -816,6 +834,7 @@ async def _stream_chat_completion(
         )
         raise BackendExecutionExhaustedError(msg)
     finally:
+        services.spillover.release_remote_permit(remote_permit)
         await services.admission.release(admission_lease)
 
 
@@ -830,52 +849,123 @@ async def _generate_with_fallback(
 ) -> tuple[ChatCompletionResponse, str]:
     decision_policy = decision.policy.value
     execution_errors: list[str] = []
+    remote_permit: RemotePermit | None = None
 
-    for attempt_number, backend_name in enumerate(_route_backends_for_execution(decision), start=1):
-        adapter = services.registry.get(backend_name)
-        (
-            breaker_allowed,
-            breaker_state,
-            breaker_reason,
-        ) = services.circuit_breaker.begin_execution(backend_name)
-        if not breaker_allowed:
-            decision.protected_backends[backend_name] = (
-                breaker_reason or "backend circuit is open"
+    try:
+        for attempt_number, backend_name in enumerate(
+            _route_backends_for_execution(decision), start=1
+        ):
+            adapter = services.registry.get(backend_name)
+            (
+                breaker_allowed,
+                breaker_state,
+                breaker_reason,
+            ) = services.circuit_breaker.begin_execution(backend_name)
+            if not breaker_allowed:
+                decision.protected_backends[backend_name] = (
+                    breaker_reason or "backend circuit is open"
+                )
+                services.telemetry.record_route_attempt(
+                    request_id=context.request_id,
+                    policy=decision_policy,
+                    backend_name=backend_name,
+                    attempt_number=attempt_number,
+                    selected_by_router=attempt_number == 1,
+                    outcome="skipped_circuit_open",
+                    error=breaker_reason,
+                )
+                logger.warning(
+                    "route_fallback_skipped_protected_backend",
+                    backend_name=backend_name,
+                    attempt_number=attempt_number,
+                    breaker_phase=breaker_state.phase.value,
+                    error=breaker_reason,
+                )
+                continue
+            decision.circuit_breaker_state = breaker_state
+            labels = await _resolve_backend_labels(
+                adapter=adapter,
+                requested_model=chat_request.model,
             )
-            services.telemetry.record_route_attempt(
-                request_id=context.request_id,
-                policy=decision_policy,
-                backend_name=backend_name,
-                attempt_number=attempt_number,
-                selected_by_router=attempt_number == 1,
-                outcome="skipped_circuit_open",
-                error=breaker_reason,
+            bind_request_context(
+                chosen_backend=labels.backend_name,
+                backend_type=labels.backend_type,
+                model=labels.model,
+                model_identifier=labels.model_identifier,
+                execution_mode=labels.execution_mode,
+                worker_transport=labels.worker_transport,
+                route_policy=decision_policy,
             )
-            logger.warning(
-                "route_fallback_skipped_protected_backend",
-                backend_name=backend_name,
-                attempt_number=attempt_number,
-                breaker_phase=breaker_state.phase.value,
-                error=breaker_reason,
-            )
-            continue
-        decision.circuit_breaker_state = breaker_state
-        labels = await _resolve_backend_labels(adapter=adapter, requested_model=chat_request.model)
-        bind_request_context(
-            chosen_backend=labels.backend_name,
-            backend_type=labels.backend_type,
-            model=labels.model,
-            model_identifier=labels.model_identifier,
-            execution_mode=labels.execution_mode,
-            worker_transport=labels.worker_transport,
-            route_policy=decision_policy,
-        )
-        if await _is_backend_unavailable(adapter):
-            error = "backend health is unavailable"
-            execution_errors.append(f"{backend_name}: {error}")
+            if await _is_backend_unavailable(adapter):
+                error = "backend health is unavailable"
+                execution_errors.append(f"{backend_name}: {error}")
+                _append_execution_event(
+                    decision,
+                    f"attempt={attempt_number} backend={backend_name} outcome=skipped_unhealthy",
+                )
+                services.telemetry.record_route_attempt(
+                    request_id=context.request_id,
+                    policy=decision_policy,
+                    backend_name=backend_name,
+                    attempt_number=attempt_number,
+                    selected_by_router=attempt_number == 1,
+                    outcome="skipped_unhealthy",
+                    error=error,
+                )
+                logger.warning(
+                    "route_fallback_skipped_unhealthy_backend",
+                    backend_name=backend_name,
+                    attempt_number=attempt_number,
+                    fallback_used=attempt_number > 1,
+                )
+                continue
+
+            logger.info("backend_execution_started", backend_name=backend_name, streaming=False)
+            execution_start = perf_counter()
+            try:
+                remote_permit = await _maybe_acquire_remote_permit(
+                    services=services,
+                    context=context,
+                    serving_target=chat_request.model,
+                    backend_name=backend_name,
+                    permit=remote_permit,
+                )
+                chat_response = await adapter.generate(chat_request, context)
+            except Exception as exc:
+                execution_errors.append(f"{backend_name}: {exc}")
+                _append_execution_event(
+                    decision,
+                    "attempt="
+                    f"{attempt_number} backend={backend_name} "
+                    f"outcome=failed error={str(exc)}",
+                )
+                services.telemetry.record_route_attempt(
+                    request_id=context.request_id,
+                    policy=decision_policy,
+                    backend_name=backend_name,
+                    attempt_number=attempt_number,
+                    selected_by_router=attempt_number == 1,
+                    outcome="failed",
+                    error=str(exc),
+                )
+                logger.warning(
+                    "route_fallback_backend_failed",
+                    backend_name=backend_name,
+                    attempt_number=attempt_number,
+                    error=str(exc),
+                    fallback_used=attempt_number > 1,
+                )
+                services.circuit_breaker.record_failure(
+                    backend_name,
+                    reason=_classify_backend_failure(exc),
+                )
+                if remote_permit is not None:
+                    services.spillover.record_remote_instability()
+                continue
+
             _append_execution_event(
                 decision,
-                f"attempt={attempt_number} backend={backend_name} outcome=skipped_unhealthy",
+                f"attempt={attempt_number} backend={backend_name} outcome=succeeded",
             )
             services.telemetry.record_route_attempt(
                 request_id=context.request_id,
@@ -883,97 +973,46 @@ async def _generate_with_fallback(
                 backend_name=backend_name,
                 attempt_number=attempt_number,
                 selected_by_router=attempt_number == 1,
-                outcome="skipped_unhealthy",
-                error=error,
+                outcome="succeeded",
             )
-            logger.warning(
-                "route_fallback_skipped_unhealthy_backend",
-                backend_name=backend_name,
-                attempt_number=attempt_number,
-                fallback_used=attempt_number > 1,
+            execution = services.telemetry.record_backend_execution(
+                route=route,
+                method=method,
+                status_code=200,
+                streaming=False,
+                labels=labels,
+                total_latency_ms=(perf_counter() - execution_start) * 1000,
+                ttft_ms=None,
+                output_tokens=chat_response.usage.completion_tokens,
             )
-            continue
-
-        logger.info("backend_execution_started", backend_name=backend_name, streaming=False)
-        execution_start = perf_counter()
-        try:
-            chat_response = await adapter.generate(chat_request, context)
-        except Exception as exc:
-            execution_errors.append(f"{backend_name}: {exc}")
-            _append_execution_event(
+            _set_execution_outcome(
                 decision,
-                f"attempt={attempt_number} backend={backend_name} outcome=failed error={str(exc)}",
+                executed_backend=backend_name,
+                fallback_used=attempt_number > 1,
+                final_outcome="succeeded",
             )
-            services.telemetry.record_route_attempt(
-                request_id=context.request_id,
-                policy=decision_policy,
-                backend_name=backend_name,
-                attempt_number=attempt_number,
-                selected_by_router=attempt_number == 1,
-                outcome="failed",
-                error=str(exc),
+            _record_execution_observation(
+                services,
+                decision,
+                executed_backend=backend_name,
+                latency_ms=execution.total_latency_ms,
+                ttft_ms=execution.ttft_ms,
+                output_tokens=execution.output_tokens,
+                status_code=200,
+                error_category=None,
+                final_outcome="succeeded",
             )
-            logger.warning(
-                "route_fallback_backend_failed",
+            _update_session_affinity(
+                services=services,
+                context=context,
+                decision=decision,
                 backend_name=backend_name,
-                attempt_number=attempt_number,
-                error=str(exc),
                 fallback_used=attempt_number > 1,
             )
-            services.circuit_breaker.record_failure(
-                backend_name,
-                reason=_classify_backend_failure(exc),
-            )
-            continue
-
-        _append_execution_event(
-            decision,
-            f"attempt={attempt_number} backend={backend_name} outcome=succeeded",
-        )
-        services.telemetry.record_route_attempt(
-            request_id=context.request_id,
-            policy=decision_policy,
-            backend_name=backend_name,
-            attempt_number=attempt_number,
-            selected_by_router=attempt_number == 1,
-            outcome="succeeded",
-        )
-        execution = services.telemetry.record_backend_execution(
-            route=route,
-            method=method,
-            status_code=200,
-            streaming=False,
-            labels=labels,
-            total_latency_ms=(perf_counter() - execution_start) * 1000,
-            ttft_ms=None,
-            output_tokens=chat_response.usage.completion_tokens,
-        )
-        _set_execution_outcome(
-            decision,
-            executed_backend=backend_name,
-            fallback_used=attempt_number > 1,
-            final_outcome="succeeded",
-        )
-        _record_execution_observation(
-            services,
-            decision,
-            executed_backend=backend_name,
-            latency_ms=execution.total_latency_ms,
-            ttft_ms=execution.ttft_ms,
-            output_tokens=execution.output_tokens,
-            status_code=200,
-            error_category=None,
-            final_outcome="succeeded",
-        )
-        _update_session_affinity(
-            services=services,
-            context=context,
-            decision=decision,
-            backend_name=backend_name,
-            fallback_used=attempt_number > 1,
-        )
-        services.circuit_breaker.record_success(backend_name)
-        return chat_response, backend_name
+            services.circuit_breaker.record_success(backend_name)
+            return chat_response, backend_name
+    finally:
+        services.spillover.release_remote_permit(remote_permit)
 
     msg = (
         f"all backend candidates failed for model '{chat_request.model}' "
@@ -1342,6 +1381,68 @@ def _route_metadata_headers(decision: RouteDecision) -> dict[str, str]:
     }
 
 
+async def _remote_candidate_snapshots(
+    *,
+    services: GatewayServices,
+    serving_target: str,
+    context: RequestContext,
+) -> list[BackendStatusSnapshot]:
+    snapshot = await services.registry.snapshots_for_target(
+        serving_target,
+        pinned_backend_name=context.internal_backend_pin,
+    )
+    return [
+        item
+        for item in snapshot.deployments
+        if item.capabilities.device_class is not None
+        and (
+            item.capabilities.device_class.value == "remote"
+            or (
+                item.deployment is not None
+                and item.deployment.execution_mode is not None
+                and item.deployment.execution_mode.value in {"remote_worker", "external_service"}
+            )
+            or item.capabilities.execution_mode.value in {"remote_worker", "external_service"}
+        )
+    ]
+
+
+async def _maybe_acquire_remote_permit(
+    *,
+    services: GatewayServices,
+    context: RequestContext,
+    serving_target: str,
+    backend_name: str,
+    permit: RemotePermit | None,
+) -> RemotePermit | None:
+    if permit is not None:
+        return permit
+    remote_candidates = await _remote_candidate_snapshots(
+        services=services,
+        serving_target=serving_target,
+        context=context,
+    )
+    if not any(candidate.name == backend_name for candidate in remote_candidates):
+        return None
+    try:
+        return services.spillover.acquire_remote_permit(
+            context=context,
+            backend_name=backend_name,
+            remote_candidates=remote_candidates,
+        )
+    except SpilloverPermitRejectedError as exc:
+        raise AdmissionRejectedError(
+            AdmissionDecision(
+                state=AdmissionDecisionState.REJECTED,
+                reason_code=exc.decision.reason_code,
+                reason=exc.decision.reason,
+                limiter_key=context.tenant_id,
+                cooldown_until=services.spillover.inspect_state().cooldown_until,
+            ),
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        ) from exc
+
+
 async def _admit_request(
     *,
     chat_request: ChatCompletionRequest,
@@ -1356,6 +1457,51 @@ async def _admit_request(
             serving_target=chat_request.model,
         )
     except AdmissionRejectedError as exc:
+        remote_candidates = await _remote_candidate_snapshots(
+            services=services,
+            serving_target=chat_request.model,
+            context=context,
+        )
+        spillover = services.spillover.evaluate_local_admission_failure(
+            context=context,
+            remote_candidates=remote_candidates,
+        )
+        if spillover.allowed:
+            context.force_remote_candidates_only = True
+            decision = spillover_bypass_decision(
+                limiter_key=exc.decision.limiter_key or context.tenant_id,
+                reason="local admission rejected; request may use explicit remote spillover",
+            )
+            services.telemetry.record_admission_decision(
+                request_id=context.request_id,
+                tenant_id=context.tenant_id,
+                request_class=context.request_class.value,
+                state=decision.state.value,
+                reason_code=(
+                    None if decision.reason_code is None else decision.reason_code.value
+                ),
+                queue_depth=0,
+                queue_wait_ms=decision.queue_wait_ms,
+                status_code=200,
+            )
+            return AdmissionLease(
+                request_id=context.request_id,
+                tenant_id=context.tenant_id,
+                request_class=context.request_class.value,
+                decision=decision,
+            )
+        if spillover.reason_code is not None:
+            exc = AdmissionRejectedError(
+                AdmissionDecision(
+                    state=AdmissionDecisionState.REJECTED,
+                    reason_code=spillover.reason_code,
+                    reason=spillover.reason,
+                    limiter_key=exc.decision.limiter_key,
+                    queue_snapshot=exc.decision.queue_snapshot,
+                    queue_wait_ms=exc.decision.queue_wait_ms,
+                ),
+                status_code=exc.status_code,
+            )
         queue_depth = 0
         if exc.decision.queue_snapshot is not None:
             queue_depth = exc.decision.queue_snapshot.current_depth

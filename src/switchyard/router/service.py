@@ -8,10 +8,15 @@ from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
 from switchyard.control.locality import PrefixLocalityService
 from switchyard.control.policy_rollout import PolicyRolloutService
+from switchyard.control.spillover import RemoteSpilloverControlService
 from switchyard.router.features import extract_request_feature_vector
 from switchyard.router.policies import (
+    CandidateRejection,
     PolicyRegistry,
     rejection_reason,
+)
+from switchyard.router.policies import (
+    _is_remote_snapshot as _is_remote_candidate,
 )
 from switchyard.schemas.backend import BackendHealthState
 from switchyard.schemas.chat import ChatCompletionRequest
@@ -47,6 +52,7 @@ class RouterService:
         canary_routing: CanaryRoutingService | None = None,
         policy_registry: PolicyRegistry | None = None,
         policy_rollout: PolicyRolloutService | None = None,
+        spillover: RemoteSpilloverControlService | None = None,
     ) -> None:
         self._registry = registry
         self._circuit_breaker = circuit_breaker
@@ -55,6 +61,7 @@ class RouterService:
         self._canary_routing = canary_routing
         self._policy_registry = policy_registry or PolicyRegistry()
         self._policy_rollout = policy_rollout
+        self._spillover = spillover
 
     async def route(
         self,
@@ -100,6 +107,11 @@ class RouterService:
                 sticky_route = lookup.sticky_route
                 sticky_backend_name = lookup.sticky_route.backend_name
 
+        remote_candidates = [
+            snapshot for snapshot in target_snapshot.deployments if _is_remote_candidate(snapshot)
+        ]
+        spillover_guardrail_triggers: list[str] = []
+
         for snapshot in target_snapshot.deployments:
             breaker_state = None
             breaker_reason = None
@@ -119,6 +131,30 @@ class RouterService:
                 context=context,
                 policy=context.policy,
             )
+            if (
+                rejection is None
+                and self._spillover is not None
+                and _is_remote_candidate(snapshot)
+            ):
+                spillover_decision = self._spillover.evaluate_remote_candidate(
+                    context=context,
+                    snapshot=snapshot,
+                    remote_candidates=remote_candidates,
+                )
+                if not spillover_decision.allowed:
+                    rejection = CandidateRejection(
+                        reason=spillover_decision.reason or "remote spillover rejected",
+                        category="admission",
+                        reason_codes=(
+                            None
+                            if spillover_decision.route_reason_code is None
+                            else [spillover_decision.route_reason_code]
+                        ),
+                    )
+                    if spillover_decision.guardrail_trigger is not None:
+                        spillover_guardrail_triggers.append(
+                            spillover_decision.guardrail_trigger
+                        )
             if rejection is not None:
                 rejected_backends[snapshot.name] = rejection.reason
                 if rejection.category == "admission":
@@ -130,7 +166,7 @@ class RouterService:
                         backend_name=snapshot.name,
                         serving_target=request.model,
                         eligibility_state=RouteEligibilityState.REJECTED,
-                        reason_codes=[],
+                        reason_codes=rejection.reason_codes or [],
                         rationale=[f"policy={context.policy.value}"],
                         rejection_reason=rejection.reason,
                         deployment=snapshot.deployment,
@@ -216,6 +252,7 @@ class RouterService:
                 resolution=rollout_resolution,
                 primary_evaluation=primary_evaluation,
                 shadow_evaluations=shadow_evaluations,
+                extra_guardrail_triggers=spillover_guardrail_triggers,
             )
         shadow_explanations = [
             evaluation.to_shadow_explanation(serving_target=request.model)
@@ -224,6 +261,12 @@ class RouterService:
         chosen = primary_evaluation.selected_assessment()
         chosen_rationale = list(primary_evaluation.selected_reason)
         selected_reason_codes = list(primary_evaluation.selected_reason_codes)
+        if context.force_remote_candidates_only:
+            selected_reason_codes.insert(0, RouteSelectionReasonCode.LOCAL_ADMISSION_SPILLOVER)
+            chosen_rationale = [
+                "local admission overflow allowed explicit remote spillover",
+                *chosen_rationale,
+            ]
         canary_policy = None
         if (
             context.internal_backend_pin is not None

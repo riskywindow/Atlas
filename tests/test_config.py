@@ -156,7 +156,11 @@ def test_settings_load_phase7_hybrid_and_remote_worker_config(
             '{"hybrid_execution":{"enabled":true,"prefer_local":true,'
             '"spillover_enabled":true,"require_healthy_local_backends":true,'
             '"max_remote_share_percent":20.0,"remote_request_budget_per_minute":180,'
-            '"allowed_remote_environments":["staging","prod-remote"]},'
+            '"remote_concurrency_cap":12,"remote_kill_switch_enabled":false,'
+            '"remote_cooldown_seconds":45.0,"allow_high_priority_remote_escalation":true,'
+            '"allowed_remote_environments":["staging","prod-remote"],'
+            '"per_tenant_remote_spillover":[{"tenant_id":"tenant-a","remote_enabled":false,'
+            '"allow_high_priority_bypass":true}]},'
             '"remote_workers":{"secure_registration_required":true,'
             '"dynamic_registration_enabled":true,"auth_mode":"static_token",'
             '"heartbeat_timeout_seconds":45.0,"stale_eviction_seconds":120.0,'
@@ -169,10 +173,14 @@ def test_settings_load_phase7_hybrid_and_remote_worker_config(
     assert settings.phase7.hybrid_execution.enabled is True
     assert settings.phase7.hybrid_execution.spillover_enabled is True
     assert settings.phase7.hybrid_execution.max_remote_share_percent == 20.0
+    assert settings.phase7.hybrid_execution.remote_concurrency_cap == 12
+    assert settings.phase7.hybrid_execution.remote_cooldown_seconds == 45.0
     assert settings.phase7.hybrid_execution.allowed_remote_environments == (
         "staging",
         "prod-remote",
     )
+    assert settings.phase7.hybrid_execution.per_tenant_remote_spillover[0].tenant_id == "tenant-a"
+    assert settings.phase7.hybrid_execution.per_tenant_remote_spillover[0].remote_enabled is False
     assert settings.phase7.remote_workers.secure_registration_required is True
     assert settings.phase7.remote_workers.dynamic_registration_enabled is True
     assert settings.phase7.remote_workers.auth_mode.value == "static_token"
@@ -196,6 +204,26 @@ def test_settings_reject_duplicate_phase7_remote_environments(
         assert "allowed_remote_environments" in str(exc)
     else:
         raise AssertionError("Settings should reject duplicate Phase 7 remote environments")
+
+
+def test_settings_reject_duplicate_phase7_tenant_spillover_rules(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "SWITCHYARD_PHASE7",
+        (
+            '{"hybrid_execution":{"per_tenant_remote_spillover":['
+            '{"tenant_id":"tenant-a","remote_enabled":true},'
+            '{"tenant_id":"tenant-a","remote_enabled":false}]}}'
+        ),
+    )
+
+    try:
+        Settings()
+    except ValidationError as exc:
+        assert "per_tenant_remote_spillover" in str(exc)
+    else:
+        raise AssertionError("Settings should reject duplicate Phase 7 tenant spillover rules")
 
 
 def test_settings_reject_duplicate_phase4_tenant_limits(monkeypatch: MonkeyPatch) -> None:

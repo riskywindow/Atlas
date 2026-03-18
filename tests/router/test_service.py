@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import pytest
 
@@ -10,7 +11,9 @@ from switchyard.adapters.registry import AdapterRegistry
 from switchyard.config import (
     CanaryRoutingSettings,
     CircuitBreakerSettings,
+    HybridExecutionSettings,
     PolicyRolloutSettings,
+    RemoteTenantSpilloverRule,
     SessionAffinitySettings,
 )
 from switchyard.control.affinity import SessionAffinityService
@@ -18,6 +21,7 @@ from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
 from switchyard.control.locality import PrefixLocalityService
 from switchyard.control.policy_rollout import PolicyRolloutService
+from switchyard.control.spillover import RemoteSpilloverControlService
 from switchyard.router.policies import (
     AdaptivePolicyConfig,
     CandidateAssessment,
@@ -186,6 +190,16 @@ def build_context(policy: RoutingPolicy) -> RequestContext:
         policy=policy,
         workload_shape=WorkloadShape.INTERACTIVE,
     )
+
+
+def build_spillover(
+    **overrides: object,
+) -> RemoteSpilloverControlService:
+    settings = HybridExecutionSettings(
+        enabled=True,
+        spillover_enabled=True,
+    ).model_copy(update=cast(Mapping[str, object], overrides))
+    return RemoteSpilloverControlService(settings)
 
 
 def build_adapter(
@@ -493,6 +507,179 @@ async def test_router_burst_to_remote_prefers_remote_when_local_capacity_is_pres
         if candidate.backend_name == "local-busy"
     )
     assert RouteSelectionReasonCode.QUEUE_PREDICTION in local_candidate.reason_codes
+
+
+@pytest.mark.asyncio
+async def test_router_force_remote_spillover_rejects_local_candidates_after_local_admission_failure(
+) -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="local-primary",
+            latency_ms=40.0,
+            quality_tier=5,
+            device_class=DeviceClass.CPU,
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="remote-spill",
+            latency_ms=25.0,
+            quality_tier=5,
+            device_class=DeviceClass.REMOTE,
+        )
+    )
+    router = RouterService(registry, spillover=build_spillover())
+    context = build_context(RoutingPolicy.BURST_TO_REMOTE).model_copy(
+        update={"force_remote_candidates_only": True}
+    )
+
+    decision = await router.route(build_request(), context)
+
+    assert decision.backend_name == "remote-spill"
+    assert decision.rejected_backends["local-primary"] == (
+        "local admission was saturated; request was forced to remote spillover"
+    )
+    assert decision.explanation is not None
+    assert (
+        RouteSelectionReasonCode.LOCAL_ADMISSION_SPILLOVER
+        in decision.explanation.selection_reason_codes
+    )
+
+
+@pytest.mark.asyncio
+async def test_router_remote_budget_exhaustion_keeps_request_local_with_explainable_rejection(
+) -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="local-healthy",
+            latency_ms=35.0,
+            quality_tier=4,
+            device_class=DeviceClass.CPU,
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="remote-budgeted",
+            latency_ms=15.0,
+            quality_tier=5,
+            device_class=DeviceClass.REMOTE,
+        )
+    )
+    spillover = build_spillover(remote_request_budget_per_minute=1)
+    spillover.acquire_remote_permit(
+        context=build_context(RoutingPolicy.BURST_TO_REMOTE),
+        backend_name="remote-budgeted",
+        remote_candidates=[await registry.get("remote-budgeted").status()],
+    )
+    router = RouterService(registry, spillover=spillover)
+
+    decision = await router.route(build_request(), build_context(RoutingPolicy.BURST_TO_REMOTE))
+
+    assert decision.backend_name == "local-healthy"
+    assert decision.explanation is not None
+    remote_candidate = next(
+        candidate
+        for candidate in decision.explanation.candidates
+        if candidate.backend_name == "remote-budgeted"
+    )
+    assert remote_candidate.rejection_reason == (
+        "remote spillover budget is exhausted for the current minute"
+    )
+    assert RouteSelectionReasonCode.REMOTE_BUDGET_GUARDRAIL in remote_candidate.reason_codes
+
+
+@pytest.mark.asyncio
+async def test_router_remote_tenant_restriction_and_cooldown_are_visible() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="local-safe",
+            latency_ms=30.0,
+            quality_tier=4,
+            device_class=DeviceClass.CPU,
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="remote-guarded",
+            latency_ms=12.0,
+            quality_tier=5,
+            device_class=DeviceClass.REMOTE,
+        )
+    )
+    spillover = build_spillover(
+        remote_cooldown_seconds=60.0,
+        per_tenant_remote_spillover=(
+            RemoteTenantSpilloverRule(tenant_id="tenant-blocked", remote_enabled=False),
+        ),
+    )
+    spillover.record_remote_instability()
+    router = RouterService(registry, spillover=spillover)
+
+    denied_context = build_context(RoutingPolicy.BURST_TO_REMOTE).model_copy(
+        update={"tenant_id": "tenant-blocked"}
+    )
+    denied_decision = await router.route(build_request(), denied_context)
+    assert denied_decision.explanation is not None
+    denied_remote = next(
+        candidate
+        for candidate in denied_decision.explanation.candidates
+        if candidate.backend_name == "remote-guarded"
+    )
+    assert denied_decision.backend_name == "local-safe"
+    assert RouteSelectionReasonCode.REMOTE_TENANT_RESTRICTION in denied_remote.reason_codes
+
+    cooldown_context = build_context(RoutingPolicy.BURST_TO_REMOTE).model_copy(
+        update={"tenant_id": "tenant-open"}
+    )
+    cooldown_decision = await router.route(build_request(), cooldown_context)
+    assert cooldown_decision.explanation is not None
+    cooldown_remote = next(
+        candidate
+        for candidate in cooldown_decision.explanation.candidates
+        if candidate.backend_name == "remote-guarded"
+    )
+    assert cooldown_decision.backend_name == "local-safe"
+    assert RouteSelectionReasonCode.REMOTE_COOLDOWN in cooldown_remote.reason_codes
+
+
+@pytest.mark.asyncio
+async def test_router_remote_kill_switch_rejects_remote_candidates() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="local-safe",
+            latency_ms=28.0,
+            quality_tier=4,
+            device_class=DeviceClass.CPU,
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="remote-disabled",
+            latency_ms=8.0,
+            quality_tier=5,
+            device_class=DeviceClass.REMOTE,
+        )
+    )
+    router = RouterService(
+        registry,
+        spillover=build_spillover(remote_kill_switch_enabled=True),
+    )
+
+    decision = await router.route(build_request(), build_context(RoutingPolicy.BURST_TO_REMOTE))
+
+    assert decision.backend_name == "local-safe"
+    assert decision.explanation is not None
+    remote_candidate = next(
+        candidate
+        for candidate in decision.explanation.candidates
+        if candidate.backend_name == "remote-disabled"
+    )
+    assert remote_candidate.rejection_reason == "remote spillover kill switch is active"
+    assert RouteSelectionReasonCode.REMOTE_KILL_SWITCH in remote_candidate.reason_codes
 
 
 @pytest.mark.asyncio

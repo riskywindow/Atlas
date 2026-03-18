@@ -114,6 +114,13 @@ class AdmissionReasonCode(StrEnum):
     QUEUE_FULL = "queue_full"
     QUEUE_TIMEOUT = "queue_timeout"
     STALE_REQUEST = "stale_request"
+    LOCAL_ADMISSION_SPILLOVER_ELIGIBLE = "local_admission_spillover_eligible"
+    REMOTE_SPILLOVER_NOT_PERMITTED = "remote_spillover_not_permitted"
+    REMOTE_BUDGET_EXHAUSTED = "remote_budget_exhausted"
+    REMOTE_CONCURRENCY_LIMIT = "remote_concurrency_limit"
+    REMOTE_KILL_SWITCH = "remote_kill_switch"
+    REMOTE_HEALTH_FAILURE = "remote_health_failure"
+    REMOTE_COOLDOWN_ACTIVE = "remote_cooldown_active"
 
 
 class LimiterMode(StrEnum):
@@ -196,6 +203,14 @@ class RouteSelectionReasonCode(StrEnum):
     EVIDENCE_SUFFICIENT = "evidence_sufficient"
     EVIDENCE_INSUFFICIENT = "evidence_insufficient"
     TENANT_POLICY = "tenant_policy"
+    REMOTE_BUDGET_GUARDRAIL = "remote_budget_guardrail"
+    REMOTE_TENANT_RESTRICTION = "remote_tenant_restriction"
+    REMOTE_CONCURRENCY_GUARDRAIL = "remote_concurrency_guardrail"
+    REMOTE_KILL_SWITCH = "remote_kill_switch"
+    REMOTE_HEALTH_GUARDRAIL = "remote_health_guardrail"
+    REMOTE_COOLDOWN = "remote_cooldown"
+    REMOTE_ESCALATION = "remote_escalation"
+    LOCAL_ADMISSION_SPILLOVER = "local_admission_spillover"
 
 
 class TenantIdentity(BaseModel):
@@ -636,6 +651,7 @@ class RequestContext(BaseModel):
     tenant_id: str = Field(default="default", min_length=1, max_length=128)
     tenant_tier: TenantTier = TenantTier.STANDARD
     session_id: str | None = Field(default=None, min_length=1, max_length=128)
+    force_remote_candidates_only: bool = False
     tenant: TenantIdentity | None = None
     session_affinity_key: SessionAffinityKey | None = None
     request_features: RequestFeatureVector | None = None
