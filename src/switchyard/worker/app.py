@@ -38,6 +38,8 @@ from switchyard.schemas.worker import (
     WorkerGenerateResponse,
     WorkerHealthResponse,
     WorkerReadinessResponse,
+    WorkerRequestMetadata,
+    WorkerResponseMetadata,
     WorkerStreamChunkResponse,
     WorkerWarmupRequest,
     WorkerWarmupResponse,
@@ -76,6 +78,7 @@ class WorkerServiceState:
         return WorkerCapabilitiesResponse(
             worker_name=self.worker_name,
             backend_type=capabilities.backend_type,
+            execution_mode=capabilities.execution_mode,
             capabilities=capabilities,
         )
 
@@ -183,6 +186,11 @@ def create_worker_app(
     async def inject_request_id(request: Request, call_next: RequestResponseEndpoint) -> Response:
         request_id = request.headers.get("x-request-id", str(uuid4()))
         request.state.request_id = request_id
+        request.state.trace_id = request.headers.get("x-trace-id")
+        request.state.timeout_ms = _parse_timeout_ms(
+            request.headers.get("x-switchyard-timeout-ms")
+        )
+        request.state.worker_request_id = str(uuid4())
         bind_request_context(
             request_id=request_id,
             worker_name=state.worker_name,
@@ -231,32 +239,61 @@ def create_worker_app(
         )
 
     @app.get("/healthz", response_model=WorkerHealthResponse)
-    async def healthz() -> WorkerHealthResponse:
-        return await state.health_response()
+    async def healthz(request: Request) -> WorkerHealthResponse:
+        response = await state.health_response()
+        response.transport_metadata = _response_metadata(request)
+        return response
 
     @app.get("/internal/worker/ready", response_model=WorkerReadinessResponse)
-    async def readiness() -> WorkerReadinessResponse:
-        return await state.readiness_response()
+    async def readiness(request: Request) -> WorkerReadinessResponse:
+        response = await state.readiness_response()
+        response.transport_metadata = _response_metadata(request)
+        return response
 
     @app.get("/internal/worker/capabilities", response_model=WorkerCapabilitiesResponse)
-    async def capabilities() -> WorkerCapabilitiesResponse:
-        return await state.capabilities_response()
+    async def capabilities(request: Request) -> WorkerCapabilitiesResponse:
+        response = await state.capabilities_response()
+        response.transport_metadata = _response_metadata(request)
+        return response
 
     @app.post("/internal/worker/warmup", response_model=WorkerWarmupResponse)
-    async def warmup(payload: WorkerWarmupRequest | None = None) -> WorkerWarmupResponse:
-        return await state.warmup(model_id=payload.model_id if payload is not None else None)
+    async def warmup(
+        request: Request,
+        payload: WorkerWarmupRequest | None = None,
+    ) -> WorkerWarmupResponse:
+        _apply_request_metadata(
+            request,
+            payload.transport_metadata if payload is not None else None,
+        )
+        response = await state.warmup(model_id=payload.model_id if payload is not None else None)
+        response.transport_metadata = _response_metadata(request)
+        return response
 
     @app.post("/internal/worker/generate", response_model=WorkerGenerateResponse)
-    async def generate(payload: WorkerGenerateRequest) -> WorkerGenerateResponse:
+    async def generate(request: Request, payload: WorkerGenerateRequest) -> WorkerGenerateResponse:
+        _apply_request_metadata(request, payload.transport_metadata)
+        if payload.transport_metadata is None:
+            _apply_context_metadata(request, payload.context)
         async with state.track_request():
             response = await adapter.generate(payload.request, payload.context)
-        return WorkerGenerateResponse(worker_name=state.worker_name, response=response)
+        return WorkerGenerateResponse(
+            worker_name=state.worker_name,
+            response=response,
+            transport_metadata=_response_metadata(request),
+        )
 
     @app.post("/internal/worker/generate/stream")
-    async def stream_generate(payload: WorkerGenerateRequest) -> StreamingResponse:
+    async def stream_generate(
+        request: Request,
+        payload: WorkerGenerateRequest,
+    ) -> StreamingResponse:
+        _apply_request_metadata(request, payload.transport_metadata)
+        if payload.transport_metadata is None:
+            _apply_context_metadata(request, payload.context)
         return StreamingResponse(
             _stream_worker_chunks(
                 state=state,
+                transport_metadata=_response_metadata(request),
                 request=payload.request,
                 context=payload.context,
             ),
@@ -292,6 +329,7 @@ def create_worker_app(
 async def _stream_worker_chunks(
     *,
     state: WorkerServiceState,
+    transport_metadata: WorkerResponseMetadata,
     request: ChatCompletionRequest,
     context: RequestContext,
 ) -> AsyncIterator[str]:
@@ -300,6 +338,7 @@ async def _stream_worker_chunks(
             payload = WorkerStreamChunkResponse(
                 worker_name=state.worker_name,
                 chunk=chunk,
+                transport_metadata=transport_metadata,
             )
             yield f"data: {payload.model_dump_json()}\n\n"
     yield "data: [DONE]\n\n"
@@ -315,3 +354,38 @@ async def _stream_public_chunks(
         async for chunk in state.adapter.stream_generate(request, context):
             yield f"data: {chunk.model_dump_json()}\n\n"
     yield "data: [DONE]\n\n"
+
+
+def _apply_request_metadata(
+    request: Request,
+    metadata: WorkerRequestMetadata | None,
+) -> None:
+    if metadata is None:
+        return
+    request.state.request_id = metadata.request_id
+    request.state.trace_id = metadata.trace_id
+    request.state.timeout_ms = metadata.timeout_ms
+
+
+def _apply_context_metadata(request: Request, context: RequestContext) -> None:
+    request.state.request_id = context.request_id
+    if context.trace_id is not None:
+        request.state.trace_id = context.trace_id
+
+
+def _response_metadata(request: Request) -> WorkerResponseMetadata:
+    return WorkerResponseMetadata(
+        request_id=request.state.request_id,
+        trace_id=getattr(request.state, "trace_id", None),
+        worker_request_id=request.state.worker_request_id,
+    )
+
+
+def _parse_timeout_ms(raw_value: str | None) -> int | None:
+    if raw_value is None:
+        return None
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None

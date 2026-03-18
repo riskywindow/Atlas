@@ -10,6 +10,8 @@ from fastapi.responses import StreamingResponse
 
 from switchyard.adapters.remote_worker import (
     RemoteWorkerAdapter,
+    RemoteWorkerClient,
+    RemoteWorkerErrorKind,
     RemoteWorkerResponseError,
     RemoteWorkerTransportError,
 )
@@ -47,9 +49,11 @@ from switchyard.schemas.worker import (
     WorkerGenerateResponse,
     WorkerHealthResponse,
     WorkerReadinessResponse,
+    WorkerRequestMetadata,
     WorkerStreamChunkResponse,
     WorkerWarmupResponse,
 )
+from switchyard.worker.fake import FakeRemoteWorkerConfig, create_fake_remote_worker_app
 
 
 def _build_model_config() -> LocalModelConfig:
@@ -231,6 +235,86 @@ def _build_worker_app() -> FastAPI:
         return StreamingResponse(events(), media_type="text/event-stream")
 
     return app
+
+
+@pytest.mark.asyncio
+async def test_remote_worker_client_round_trips_with_fake_worker_app() -> None:
+    app = create_fake_remote_worker_app(
+        FakeRemoteWorkerConfig(
+            worker_name="fake-remote",
+            simulated_active_requests=2,
+            simulated_queue_depth=1,
+        )
+    )
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://worker.internal",
+    )
+    remote_client = RemoteWorkerClient(client=client)
+    instance = _build_model_config().instances[0]
+    metadata = WorkerRequestMetadata(
+        request_id="req-transport-001",
+        trace_id="trace-transport-001",
+        timeout_ms=5000,
+    )
+
+    try:
+        health = await remote_client.health(instance, metadata=metadata)
+        readiness = await remote_client.readiness(instance, metadata=metadata)
+        capabilities = await remote_client.capabilities(instance, metadata=metadata)
+        response = await remote_client.generate(
+            instance,
+            request=_build_request(),
+            context=_build_context(),
+            metadata=metadata,
+        )
+        chunks = [
+            item
+            async for item in remote_client.stream_generate(
+                instance,
+                request=_build_request(stream=True),
+                context=_build_context(),
+                metadata=metadata,
+            )
+        ]
+    finally:
+        await client.aclose()
+
+    assert health.transport_metadata is not None
+    assert health.transport_metadata.request_id == "req-transport-001"
+    assert readiness.ready is False
+    assert readiness.transport_metadata is not None
+    assert capabilities.execution_mode is not None
+    assert response.transport_metadata is not None
+    assert response.transport_metadata.trace_id == "trace-transport-001"
+    assert chunks[0].transport_metadata is not None
+    assert chunks[0].transport_metadata.request_id == "req-transport-001"
+
+
+@pytest.mark.asyncio
+async def test_remote_worker_client_classifies_timeout_errors() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out")
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://worker.internal",
+    )
+    remote_client = RemoteWorkerClient(client=client)
+    instance = _build_model_config().instances[0]
+
+    try:
+        with pytest.raises(RemoteWorkerTransportError) as exc_info:
+            await remote_client.generate(
+                instance,
+                request=_build_request(),
+                context=_build_context(),
+                metadata=WorkerRequestMetadata(request_id="req-timeout"),
+            )
+    finally:
+        await client.aclose()
+
+    assert exc_info.value.kind is RemoteWorkerErrorKind.TIMEOUT
 
 
 @pytest.mark.asyncio

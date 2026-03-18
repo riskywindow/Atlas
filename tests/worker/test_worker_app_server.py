@@ -37,6 +37,7 @@ async def test_worker_app_reports_real_readiness_and_supports_warmup() -> None:
     assert readiness_before.status_code == 200
     assert readiness_before.json()["ready"] is False
     assert readiness_before.json()["health"]["load_state"] == "cold"
+    assert readiness_before.json()["transport_metadata"]["request_id"]
     assert warmup.status_code == 200
     assert readiness_after.json()["ready"] is True
     assert readiness_after.json()["health"]["load_state"] == "ready"
@@ -72,6 +73,7 @@ async def test_worker_app_serves_internal_and_public_generate_paths() -> None:
 
     assert internal_response.status_code == 200
     assert internal_response.json()["worker_name"] == "mock-worker"
+    assert internal_response.json()["transport_metadata"]["request_id"] == "req-worker-001"
     assert internal_response.json()["response"]["backend_name"] == "mock-worker"
     assert public_response.status_code == 200
     assert public_response.json()["backend_name"] == "mock-worker"

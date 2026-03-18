@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TypeVar
 
 import httpx
@@ -36,6 +38,8 @@ from switchyard.schemas.worker import (
     WorkerGenerateResponse,
     WorkerHealthResponse,
     WorkerReadinessResponse,
+    WorkerRequestMetadata,
+    WorkerResponseMetadata,
     WorkerStreamChunkResponse,
     WorkerWarmupRequest,
     WorkerWarmupResponse,
@@ -58,12 +62,415 @@ class RemoteWorkerError(RuntimeError):
     """Base error for remote worker failures."""
 
 
+class RemoteWorkerOperation(StrEnum):
+    """Typed transport operations against a remote worker."""
+
+    HEALTH = "health"
+    READINESS = "readiness"
+    CAPABILITIES = "capabilities"
+    WARMUP = "warmup"
+    GENERATE = "generate"
+    STREAM = "stream"
+
+
+class RemoteWorkerErrorKind(StrEnum):
+    """Stable classification for remote worker transport failures."""
+
+    CONNECT = "connect"
+    TIMEOUT = "timeout"
+    HTTP_STATUS = "http_status"
+    REQUEST = "request"
+    INVALID_JSON = "invalid_json"
+    INVALID_PAYLOAD = "invalid_payload"
+    PROTOCOL = "protocol"
+
+
 class RemoteWorkerTransportError(RemoteWorkerError):
     """Raised when a network call to a worker fails."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: RemoteWorkerErrorKind,
+        operation: RemoteWorkerOperation,
+        instance_id: str | None = None,
+        status_code: int | None = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.operation = operation
+        self.instance_id = instance_id
+        self.status_code = status_code
+        self.retryable = retryable
 
 
 class RemoteWorkerResponseError(RemoteWorkerError):
     """Raised when a worker returns malformed or invalid data."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: RemoteWorkerErrorKind,
+        operation: RemoteWorkerOperation,
+        instance_id: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.operation = operation
+        self.instance_id = instance_id
+
+
+class RemoteWorkerClient:
+    """Typed client for the Switchyard internal worker transport."""
+
+    def __init__(self, *, client: httpx.AsyncClient | None = None) -> None:
+        self._client = client
+
+    async def health(
+        self,
+        instance_config: BackendInstanceConfig,
+        *,
+        metadata: WorkerRequestMetadata | None = None,
+    ) -> WorkerHealthResponse:
+        payload = await self._request_json(
+            "GET",
+            instance_config,
+            instance_config.health_path,
+            operation=RemoteWorkerOperation.HEALTH,
+            metadata=metadata,
+        )
+        return self._validate_payload(
+            payload,
+            WorkerHealthResponse,
+            operation=RemoteWorkerOperation.HEALTH,
+            instance_id=instance_config.instance_id,
+            request_metadata=metadata,
+        )
+
+    async def readiness(
+        self,
+        instance_config: BackendInstanceConfig,
+        *,
+        metadata: WorkerRequestMetadata | None = None,
+    ) -> WorkerReadinessResponse:
+        payload = await self._request_json(
+            "GET",
+            instance_config,
+            instance_config.readiness_path,
+            operation=RemoteWorkerOperation.READINESS,
+            metadata=metadata,
+        )
+        return self._validate_payload(
+            payload,
+            WorkerReadinessResponse,
+            operation=RemoteWorkerOperation.READINESS,
+            instance_id=instance_config.instance_id,
+            request_metadata=metadata,
+        )
+
+    async def capabilities(
+        self,
+        instance_config: BackendInstanceConfig,
+        *,
+        metadata: WorkerRequestMetadata | None = None,
+    ) -> WorkerCapabilitiesResponse:
+        payload = await self._request_json(
+            "GET",
+            instance_config,
+            instance_config.capabilities_path,
+            operation=RemoteWorkerOperation.CAPABILITIES,
+            metadata=metadata,
+        )
+        return self._validate_payload(
+            payload,
+            WorkerCapabilitiesResponse,
+            operation=RemoteWorkerOperation.CAPABILITIES,
+            instance_id=instance_config.instance_id,
+            request_metadata=metadata,
+        )
+
+    async def warmup(
+        self,
+        instance_config: BackendInstanceConfig,
+        *,
+        model_id: str | None = None,
+        metadata: WorkerRequestMetadata | None = None,
+    ) -> WorkerWarmupResponse:
+        payload = await self._request_json(
+            "POST",
+            instance_config,
+            instance_config.warmup_path,
+            operation=RemoteWorkerOperation.WARMUP,
+            json_body=WorkerWarmupRequest(
+                model_id=model_id,
+                transport_metadata=metadata,
+            ).model_dump(mode="json"),
+            metadata=metadata,
+        )
+        return self._validate_payload(
+            payload,
+            WorkerWarmupResponse,
+            operation=RemoteWorkerOperation.WARMUP,
+            instance_id=instance_config.instance_id,
+            request_metadata=metadata,
+        )
+
+    async def generate(
+        self,
+        instance_config: BackendInstanceConfig,
+        *,
+        request: ChatCompletionRequest,
+        context: RequestContext,
+        metadata: WorkerRequestMetadata | None = None,
+    ) -> WorkerGenerateResponse:
+        payload = await self._request_json(
+            "POST",
+            instance_config,
+            instance_config.chat_completions_path,
+            operation=RemoteWorkerOperation.GENERATE,
+            json_body=WorkerGenerateRequest(
+                request=request,
+                context=context,
+                transport_metadata=metadata,
+            ).model_dump(mode="json"),
+            metadata=metadata,
+        )
+        return self._validate_payload(
+            payload,
+            WorkerGenerateResponse,
+            operation=RemoteWorkerOperation.GENERATE,
+            instance_id=instance_config.instance_id,
+            request_metadata=metadata,
+        )
+
+    async def stream_generate(
+        self,
+        instance_config: BackendInstanceConfig,
+        *,
+        request: ChatCompletionRequest,
+        context: RequestContext,
+        metadata: WorkerRequestMetadata | None = None,
+    ) -> AsyncIterator[WorkerStreamChunkResponse]:
+        client = self._client or self._build_client(instance_config)
+        close_client = self._client is None
+        try:
+            async with client.stream(
+                "POST",
+                self._url_for(instance_config, instance_config.stream_chat_completions_path),
+                json=WorkerGenerateRequest(
+                    request=request,
+                    context=context,
+                    transport_metadata=metadata,
+                ).model_dump(mode="json"),
+                headers=self._headers_for_metadata(metadata),
+            ) as response:
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    raise RemoteWorkerTransportError(
+                        f"remote worker streaming request failed with status "
+                        f"{exc.response.status_code}",
+                        kind=RemoteWorkerErrorKind.HTTP_STATUS,
+                        operation=RemoteWorkerOperation.STREAM,
+                        instance_id=instance_config.instance_id,
+                        status_code=exc.response.status_code,
+                        retryable=exc.response.status_code >= 500,
+                    ) from exc
+
+                async for line in response.aiter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    data = line[6:]
+                    if data == "[DONE]":
+                        return
+                    try:
+                        payload = json.loads(data)
+                    except json.JSONDecodeError as exc:
+                        raise RemoteWorkerResponseError(
+                            "remote worker stream returned malformed JSON",
+                            kind=RemoteWorkerErrorKind.INVALID_JSON,
+                            operation=RemoteWorkerOperation.STREAM,
+                            instance_id=instance_config.instance_id,
+                        ) from exc
+                    yield self._validate_payload(
+                        payload,
+                        WorkerStreamChunkResponse,
+                        operation=RemoteWorkerOperation.STREAM,
+                        instance_id=instance_config.instance_id,
+                        request_metadata=metadata,
+                    )
+        except httpx.TimeoutException as exc:
+            raise RemoteWorkerTransportError(
+                "remote worker streaming request timed out",
+                kind=RemoteWorkerErrorKind.TIMEOUT,
+                operation=RemoteWorkerOperation.STREAM,
+                instance_id=instance_config.instance_id,
+                retryable=True,
+            ) from exc
+        except httpx.ConnectError as exc:
+            raise RemoteWorkerTransportError(
+                f"remote worker streaming request failed: {exc}",
+                kind=RemoteWorkerErrorKind.CONNECT,
+                operation=RemoteWorkerOperation.STREAM,
+                instance_id=instance_config.instance_id,
+                retryable=True,
+            ) from exc
+        except httpx.RequestError as exc:
+            raise RemoteWorkerTransportError(
+                f"remote worker streaming request failed: {exc}",
+                kind=RemoteWorkerErrorKind.REQUEST,
+                operation=RemoteWorkerOperation.STREAM,
+                instance_id=instance_config.instance_id,
+                retryable=True,
+            ) from exc
+        finally:
+            if close_client:
+                await client.aclose()
+
+    def _build_client(self, instance_config: BackendInstanceConfig) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                timeout=instance_config.request_timeout_seconds,
+                connect=instance_config.connect_timeout_seconds,
+            )
+        )
+
+    async def _request_json(
+        self,
+        method: str,
+        instance_config: BackendInstanceConfig,
+        path: str,
+        *,
+        operation: RemoteWorkerOperation,
+        json_body: dict[str, object] | None = None,
+        metadata: WorkerRequestMetadata | None = None,
+    ) -> dict[str, object]:
+        client = self._client or self._build_client(instance_config)
+        close_client = self._client is None
+        try:
+            response = await client.request(
+                method,
+                self._url_for(instance_config, path),
+                json=json_body,
+                headers=self._headers_for_metadata(metadata),
+            )
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise RemoteWorkerTransportError(
+                    f"remote worker request failed with status {exc.response.status_code}",
+                    kind=RemoteWorkerErrorKind.HTTP_STATUS,
+                    operation=operation,
+                    instance_id=instance_config.instance_id,
+                    status_code=exc.response.status_code,
+                    retryable=exc.response.status_code >= 500,
+                ) from exc
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise RemoteWorkerResponseError(
+                    "remote worker response must be a JSON object",
+                    kind=RemoteWorkerErrorKind.INVALID_JSON,
+                    operation=operation,
+                    instance_id=instance_config.instance_id,
+                )
+            return payload
+        except httpx.TimeoutException as exc:
+            raise RemoteWorkerTransportError(
+                "remote worker request timed out",
+                kind=RemoteWorkerErrorKind.TIMEOUT,
+                operation=operation,
+                instance_id=instance_config.instance_id,
+                retryable=True,
+            ) from exc
+        except httpx.ConnectError as exc:
+            raise RemoteWorkerTransportError(
+                f"remote worker request failed: {exc}",
+                kind=RemoteWorkerErrorKind.CONNECT,
+                operation=operation,
+                instance_id=instance_config.instance_id,
+                retryable=True,
+            ) from exc
+        except httpx.RequestError as exc:
+            raise RemoteWorkerTransportError(
+                f"remote worker request failed: {exc}",
+                kind=RemoteWorkerErrorKind.REQUEST,
+                operation=operation,
+                instance_id=instance_config.instance_id,
+                retryable=True,
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise RemoteWorkerResponseError(
+                "remote worker returned malformed JSON",
+                kind=RemoteWorkerErrorKind.INVALID_JSON,
+                operation=operation,
+                instance_id=instance_config.instance_id,
+            ) from exc
+        finally:
+            if close_client:
+                await client.aclose()
+
+    def _validate_payload(
+        self,
+        payload: dict[str, object],
+        model_type: type[TWorkerModel],
+        *,
+        operation: RemoteWorkerOperation,
+        instance_id: str,
+        request_metadata: WorkerRequestMetadata | None,
+    ) -> TWorkerModel:
+        try:
+            parsed = model_type.model_validate(payload)
+        except ValidationError as exc:
+            raise RemoteWorkerResponseError(
+                f"remote worker returned malformed {operation.value} payload",
+                kind=RemoteWorkerErrorKind.INVALID_PAYLOAD,
+                operation=operation,
+                instance_id=instance_id,
+            ) from exc
+        self._validate_response_metadata(
+            request_metadata=request_metadata,
+            response_metadata=getattr(parsed, "transport_metadata", None),
+            operation=operation,
+            instance_id=instance_id,
+        )
+        return parsed
+
+    def _validate_response_metadata(
+        self,
+        *,
+        request_metadata: WorkerRequestMetadata | None,
+        response_metadata: WorkerResponseMetadata | None,
+        operation: RemoteWorkerOperation,
+        instance_id: str,
+    ) -> None:
+        if request_metadata is None or response_metadata is None:
+            return
+        if response_metadata.request_id != request_metadata.request_id:
+            raise RemoteWorkerResponseError(
+                "remote worker response request_id did not match the request metadata",
+                kind=RemoteWorkerErrorKind.PROTOCOL,
+                operation=operation,
+                instance_id=instance_id,
+            )
+
+    def _headers_for_metadata(
+        self,
+        metadata: WorkerRequestMetadata | None,
+    ) -> dict[str, str]:
+        if metadata is None:
+            return {}
+        headers = {"x-request-id": metadata.request_id}
+        if metadata.trace_id is not None:
+            headers["x-trace-id"] = metadata.trace_id
+        if metadata.timeout_ms is not None:
+            headers["x-switchyard-timeout-ms"] = str(metadata.timeout_ms)
+        return headers
+
+    def _url_for(self, instance_config: BackendInstanceConfig, path: str) -> str:
+        return f"{instance_config.base_url.rstrip('/')}{path}"
 
 
 class RemoteWorkerAdapter:
@@ -88,6 +495,7 @@ class RemoteWorkerAdapter:
             raise ValueError(msg)
         self._instance_configs = resolved_instances
         self._client = client
+        self._transport = RemoteWorkerClient(client=client)
 
     async def health(self) -> BackendHealth:
         statuses = await self._describe_instances()
@@ -95,12 +503,12 @@ class RemoteWorkerAdapter:
 
     async def capabilities(self) -> BackendCapabilities:
         instance_config = await self._select_instance_config()
-        payload = await self._request_json(
-            "GET",
-            instance_config.capabilities_path,
-            instance_config=instance_config,
+        parsed = await self._transport.capabilities(
+            instance_config,
+            metadata=self._request_metadata(
+                request_id=f"capabilities:{instance_config.instance_id}",
+            ),
         )
-        parsed = self._validate_payload(payload, WorkerCapabilitiesResponse, "capabilities")
         capabilities = parsed.capabilities.model_copy(deep=True)
         capabilities.configured_priority = self.model_config.configured_priority
         capabilities.configured_weight = self.model_config.configured_weight
@@ -186,18 +594,20 @@ class RemoteWorkerAdapter:
         failures: list[str] = []
         for instance_config in self._instance_configs:
             try:
-                payload = await self._request_json(
-                    "POST",
-                    instance_config.warmup_path,
-                    json_body=WorkerWarmupRequest(model_id=model_id).model_dump(mode="json"),
-                    instance_config=instance_config,
+                await self._transport.warmup(
+                    instance_config,
+                    model_id=model_id,
+                    metadata=self._request_metadata(
+                        request_id=f"warmup:{instance_config.instance_id}",
+                    ),
                 )
-                self._validate_payload(payload, WorkerWarmupResponse, "warmup")
             except RemoteWorkerError as exc:
                 failures.append(f"{instance_config.instance_id}: {exc}")
         if failures:
             raise RemoteWorkerTransportError(
-                "remote worker warmup failed for one or more instances: " + "; ".join(failures)
+                "remote worker warmup failed for one or more instances: " + "; ".join(failures),
+                kind=RemoteWorkerErrorKind.REQUEST,
+                operation=RemoteWorkerOperation.WARMUP,
             )
 
     async def generate(
@@ -206,15 +616,16 @@ class RemoteWorkerAdapter:
         context: RequestContext,
     ) -> ChatCompletionResponse:
         instance_config = await self._select_instance_config()
-        payload = await self._request_json(
-            "POST",
-            instance_config.chat_completions_path,
-            json_body=WorkerGenerateRequest(request=request, context=context).model_dump(
-                mode="json"
+        parsed = await self._transport.generate(
+            instance_config,
+            request=request,
+            context=context,
+            metadata=self._request_metadata(
+                request_id=context.request_id,
+                trace_id=context.trace_id,
+                timeout_seconds=instance_config.request_timeout_seconds,
             ),
-            instance_config=instance_config,
         )
-        parsed = self._validate_payload(payload, WorkerGenerateResponse, "generate")
         response = parsed.response.model_copy(deep=True)
         response.backend_name = self.name
         return response
@@ -225,52 +636,19 @@ class RemoteWorkerAdapter:
         context: RequestContext,
     ) -> AsyncIterator[ChatCompletionChunk]:
         instance_config = await self._select_instance_config()
-        client = self._client or self._build_client()
-        close_client = self._client is None
-        try:
-            async with client.stream(
-                "POST",
-                self._url_for(
-                    instance_config,
-                    instance_config.stream_chat_completions_path,
-                ),
-                json=WorkerGenerateRequest(request=request, context=context).model_dump(
-                    mode="json"
-                ),
-            ) as response:
-                try:
-                    response.raise_for_status()
-                except httpx.HTTPStatusError as exc:
-                    raise RemoteWorkerTransportError(
-                        f"remote worker streaming request failed with status "
-                        f"{exc.response.status_code}"
-                    ) from exc
-
-                async for line in response.aiter_lines():
-                    if not line or not line.startswith("data: "):
-                        continue
-                    data = line[6:]
-                    if data == "[DONE]":
-                        return
-                    try:
-                        payload = json.loads(data)
-                    except json.JSONDecodeError as exc:
-                        raise RemoteWorkerResponseError(
-                            "remote worker stream returned malformed JSON"
-                        ) from exc
-                    parsed = self._validate_payload(payload, WorkerStreamChunkResponse, "stream")
-                    chunk = parsed.chunk.model_copy(deep=True)
-                    chunk.backend_name = self.name
-                    yield chunk
-        except httpx.TimeoutException as exc:
-            raise RemoteWorkerTransportError("remote worker streaming request timed out") from exc
-        except httpx.RequestError as exc:
-            raise RemoteWorkerTransportError(
-                f"remote worker streaming request failed: {exc}"
-            ) from exc
-        finally:
-            if close_client:
-                await client.aclose()
+        async for parsed in self._transport.stream_generate(
+            instance_config,
+            request=request,
+            context=context,
+            metadata=self._request_metadata(
+                request_id=context.request_id,
+                trace_id=context.trace_id,
+                timeout_seconds=instance_config.request_timeout_seconds,
+            ),
+        ):
+            chunk = parsed.chunk.model_copy(deep=True)
+            chunk.backend_name = self.name
+            yield chunk
 
     def _resolve_instance_configs(
         self,
@@ -315,68 +693,6 @@ class RemoteWorkerAdapter:
             ),
         )
 
-    def _build_client(self) -> httpx.AsyncClient:
-        default_instance = self._instance_configs[0]
-        return httpx.AsyncClient(
-            timeout=httpx.Timeout(
-                timeout=default_instance.request_timeout_seconds,
-                connect=default_instance.connect_timeout_seconds,
-            )
-        )
-
-    async def _request_json(
-        self,
-        method: str,
-        path: str,
-        *,
-        json_body: dict[str, object] | None = None,
-        instance_config: BackendInstanceConfig | None = None,
-    ) -> dict[str, object]:
-        resolved_instance = instance_config or self._instance_configs[0]
-        client = self._client or self._build_client()
-        close_client = self._client is None
-        try:
-            response = await client.request(
-                method,
-                self._url_for(resolved_instance, path),
-                json=json_body,
-            )
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                raise RemoteWorkerTransportError(
-                    f"remote worker request failed with status {exc.response.status_code}"
-                ) from exc
-            payload = response.json()
-            if not isinstance(payload, dict):
-                raise RemoteWorkerResponseError("remote worker response must be a JSON object")
-            return payload
-        except httpx.TimeoutException as exc:
-            raise RemoteWorkerTransportError("remote worker request timed out") from exc
-        except httpx.RequestError as exc:
-            raise RemoteWorkerTransportError(f"remote worker request failed: {exc}") from exc
-        except json.JSONDecodeError as exc:
-            raise RemoteWorkerResponseError("remote worker returned malformed JSON") from exc
-        finally:
-            if close_client:
-                await client.aclose()
-
-    def _url_for(self, instance_config: BackendInstanceConfig, path: str) -> str:
-        return f"{instance_config.base_url.rstrip('/')}{path}"
-
-    def _validate_payload(
-        self,
-        payload: dict[str, object],
-        model_type: type[TWorkerModel],
-        operation: str,
-    ) -> TWorkerModel:
-        try:
-            return model_type.model_validate(payload)
-        except ValidationError as exc:
-            raise RemoteWorkerResponseError(
-                f"remote worker returned malformed {operation} payload"
-            ) from exc
-
     async def _select_instance_config(self) -> BackendInstanceConfig:
         statuses = await self._describe_instances()
         selected = self._select_status(statuses)
@@ -400,12 +716,12 @@ class RemoteWorkerAdapter:
             active_requests = 0
             queue_depth = 0
             try:
-                payload = await self._request_json(
-                    "GET",
-                    instance_config.readiness_path,
-                    instance_config=instance_config,
+                readiness = await self._transport.readiness(
+                    instance_config,
+                    metadata=self._request_metadata(
+                        request_id=f"readiness:{instance_config.instance_id}",
+                    ),
                 )
-                readiness = self._validate_payload(payload, WorkerReadinessResponse, "readiness")
                 health = readiness.health
                 ready = readiness.ready and health.state is not BackendHealthState.UNAVAILABLE
                 active_requests = readiness.active_requests
@@ -445,19 +761,19 @@ class RemoteWorkerAdapter:
 
     async def _health_for_instance(self, instance_config: BackendInstanceConfig) -> BackendHealth:
         try:
-            payload = await self._request_json(
-                "GET",
-                instance_config.health_path,
-                instance_config=instance_config,
+            response = await self._transport.health(
+                instance_config,
+                metadata=self._request_metadata(
+                    request_id=f"health:{instance_config.instance_id}",
+                ),
             )
-            parsed = WorkerHealthResponse.model_validate(payload)
         except RemoteWorkerError as exc:
             return BackendHealth(
                 state=BackendHealthState.UNAVAILABLE,
                 detail="remote worker health check failed",
                 last_error=str(exc),
             )
-        return parsed.health
+        return response.health
 
     def _aggregate_health(self, statuses: list[RemoteWorkerInstanceStatus]) -> BackendHealth:
         if not statuses:
@@ -504,3 +820,19 @@ class RemoteWorkerAdapter:
                 status.instance.instance_id,
             ),
         )[0]
+
+    def _request_metadata(
+        self,
+        *,
+        request_id: str,
+        trace_id: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> WorkerRequestMetadata:
+        timeout_ms = None
+        if timeout_seconds is not None:
+            timeout_ms = max(1, math.ceil(timeout_seconds * 1000))
+        return WorkerRequestMetadata(
+            request_id=request_id,
+            trace_id=trace_id,
+            timeout_ms=timeout_ms,
+        )
