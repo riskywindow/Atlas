@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+
+FROM python:3.12-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    UV_LINK_MODE=copy
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir uv==0.8.13
+
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+
+RUN uv sync --frozen --no-dev
+
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH=/app/.venv/bin:$PATH \
+    SWITCHYARD_REMOTE_WORKER_START_MODE=fake \
+    SWITCHYARD_REMOTE_WORKER_HOST=0.0.0.0 \
+    SWITCHYARD_REMOTE_WORKER_PORT=8090
+
+WORKDIR /app
+
+RUN useradd --create-home --uid 10002 switchyard
+
+COPY --from=builder /app/.venv /app/.venv
+COPY src ./src
+COPY scripts/remote-worker-entrypoint.sh /app/scripts/remote-worker-entrypoint.sh
+
+RUN chmod 0755 /app/scripts/remote-worker-entrypoint.sh
+
+USER switchyard
+
+EXPOSE 8090
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD python -c "import os, urllib.request; port = os.getenv('SWITCHYARD_REMOTE_WORKER_PORT', '8090'); urllib.request.urlopen(f'http://127.0.0.1:{port}/healthz', timeout=3).read()"
+
+ENTRYPOINT ["/app/scripts/remote-worker-entrypoint.sh"]

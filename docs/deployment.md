@@ -258,6 +258,31 @@ kind smoke benchmark example:
 ```bash
 uv run python -m switchyard.bench.cli run-workload \
   --manifest-path docs/examples/phase5_kind_smoke_workload.json \
+
+## 8. Phase 7 Remote Worker Packaging
+
+Phase 7 keeps the control plane portable while adding a credible path to later Linux and
+NVIDIA-backed workers.
+
+The repo now includes:
+
+- [Dockerfile.remote-worker](/Users/rishivinodkumar/Atlas/infra/docker/Dockerfile.remote-worker)
+  for a generic remote worker image,
+- [compose.remote-worker.yaml](/Users/rishivinodkumar/Atlas/infra/compose/compose.remote-worker.yaml)
+  as a Compose overlay for a stub remote worker,
+- [phase7_remote_worker_stub_control_plane.env](/Users/rishivinodkumar/Atlas/docs/examples/phase7_remote_worker_stub_control_plane.env)
+  for control-plane static discovery,
+- [phase7_remote_worker_stub_worker.env](/Users/rishivinodkumar/Atlas/docs/examples/phase7_remote_worker_stub_worker.env)
+  for the CI-safe worker stub,
+- [remote-workers.md](/Users/rishivinodkumar/Atlas/docs/remote-workers.md)
+  for the discovery and authentication contract.
+
+This path is intentionally split cleanly:
+
+- the control plane only knows typed remote worker metadata and the shared HTTP protocol,
+- the remote worker image can stay generic today,
+- later `vllm_cuda` runtime dependencies can be added to a derived Linux worker image
+  without changing the control-plane contract or forcing CUDA into CI.
   --gateway-base-url http://127.0.0.1:8000 \
   --deployment-target kind \
   --deployment-profile kind \

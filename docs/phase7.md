@@ -120,3 +120,9 @@ repo needed typed runtime and deployment summaries for hybrid local/remote postu
 remote worker lifecycle state before hybrid routing behavior grows further. That is the
 kind of small blocker worth patching here. Larger routing or deployment changes should
 continue as follow-on vertical slices rather than being bundled into this alignment pass.
+
+The next obvious packaging blocker is similar: Phase 7 needs a reviewable Linux remote
+worker packaging path before any real cloud GPU rollout exists. That path should rely on
+the existing HTTP worker protocol, static discovery or typed registration, and CI-safe
+stub workers rather than rented GPUs. The packaging and documentation slice in this repo
+now covers that boundary directly.

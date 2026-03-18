@@ -360,6 +360,21 @@ def test_kind_overlay_env_files_match_documented_examples() -> None:
     ).read_text(encoding="utf-8")
 
 
+def test_phase7_remote_worker_stub_control_plane_env_loads(monkeypatch: MonkeyPatch) -> None:
+    _load_env_file(monkeypatch, Path("docs/examples/phase7_remote_worker_stub_control_plane.env"))
+
+    settings = Settings()
+
+    assert settings.default_model_alias == "chat-shared"
+    assert len(settings.local_models) == 1
+    assert settings.local_models[0].backend_type is BackendType.VLLM_CUDA
+    assert settings.local_models[0].worker_transport is WorkerTransportType.HTTP
+    assert settings.local_models[0].execution_mode.value == "remote_worker"
+    assert settings.local_models[0].instances[0].base_url == "http://remote-worker:8090"
+    assert settings.phase7.remote_workers.auth_mode.value == "static_token"
+    assert settings.phase7.hybrid_execution.enabled is True
+
+
 def _load_env_file(monkeypatch: MonkeyPatch, path: Path) -> None:
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()

@@ -34,6 +34,7 @@ apple-workers = [
 [project.scripts]
 switchyard-control-plane = "switchyard.control_plane.cli:main"
 switchyard-worker = "switchyard.worker.cli:main"
+switchyard-fake-remote-worker = "switchyard.worker.fake_cli:main"
 
 [dependency-groups]
 test = [
