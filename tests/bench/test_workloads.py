@@ -23,6 +23,9 @@ from switchyard.schemas.routing import WorkloadShape
         WorkloadScenarioFamily.SESSION_STICKINESS,
         WorkloadScenarioFamily.CANARY_ROLLOUT,
         WorkloadScenarioFamily.SHADOW_TRAFFIC,
+        WorkloadScenarioFamily.HYBRID_SPILLOVER,
+        WorkloadScenarioFamily.REMOTE_COLD_WARM,
+        WorkloadScenarioFamily.REMOTE_BUDGET_GUARDRAIL,
         WorkloadScenarioFamily.MIXED,
     ],
 )
@@ -183,6 +186,64 @@ def test_canary_and_shadow_manifests_carry_control_plane_matching_metadata() -> 
     assert all(item.metadata["tenant_id"] == "tenant-shadow" for item in shadow.items)
     assert all(item.metadata["shadow_opt_in"] == "true" for item in shadow.items)
     assert all(item.metadata["expected_signal"] == "shadow_traffic" for item in shadow.items)
+
+
+def test_hybrid_spillover_manifest_carries_remote_pressure_metadata() -> None:
+    scenario = build_workload_manifest(
+        family=WorkloadScenarioFamily.HYBRID_SPILLOVER,
+        model_alias="chat-shared",
+        request_count=6,
+        seed=5,
+    )
+
+    assert scenario.workload_generation.pattern.value == "bursty"
+    assert all(
+        item.metadata["expected_signal"] == "hybrid_spillover" for item in scenario.items
+    )
+    assert all(
+        item.metadata["hybrid_policy_target"] == "burst_to_remote"
+        for item in scenario.items
+    )
+    assert any(
+        item.metadata["injected_execution_path"] == "hybrid_spillover"
+        for item in scenario.items
+    )
+
+
+def test_remote_cold_warm_manifest_distinguishes_temperatures() -> None:
+    scenario = build_workload_manifest(
+        family=WorkloadScenarioFamily.REMOTE_COLD_WARM,
+        model_alias="chat-shared",
+        request_count=4,
+        seed=6,
+    )
+
+    temperatures = {item.metadata["injected_remote_temperature"] for item in scenario.items}
+
+    assert scenario.workload_generation.pattern.value == "repeated_prefix"
+    assert temperatures == {"cold", "warm"}
+    assert all(item.metadata["expected_signal"] == "remote_cold_warm" for item in scenario.items)
+
+
+def test_remote_budget_guardrail_manifest_marks_budget_exhaustion() -> None:
+    scenario = build_workload_manifest(
+        family=WorkloadScenarioFamily.REMOTE_BUDGET_GUARDRAIL,
+        model_alias="chat-shared",
+        request_count=6,
+        seed=6,
+    )
+
+    assert any(
+        item.metadata["injected_budget_outcome"] == "exhausted" for item in scenario.items
+    )
+    assert any(
+        item.metadata["injected_execution_path"] == "remote_blocked"
+        for item in scenario.items
+    )
+    assert all(
+        item.metadata["expected_signal"] == "remote_budget_guardrail"
+        for item in scenario.items
+    )
 
 
 def test_default_workload_manifest_path_uses_scenario_name(tmp_path: Path) -> None:

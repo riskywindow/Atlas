@@ -12,6 +12,12 @@ from switchyard.schemas.benchmark import (
     CapturedTraceRecord,
     ControlPlaneReportMetadata,
     ExecutionTarget,
+    HybridConditionProfile,
+    HybridConditionSource,
+    HybridExecutionContext,
+    HybridExecutionPath,
+    RemoteBudgetOutcome,
+    RemoteTemperature,
     TraceCaptureMode,
 )
 from switchyard.schemas.chat import (
@@ -114,6 +120,7 @@ class TraceCaptureService:
             error_category=error_category,
             capture_mode=self.mode,
             control_plane_metadata=None,
+            hybrid_context=_hybrid_context_from_route_decision(route_decision, chosen_backend),
             normalized_request_payload=_normalize_request_payload(request_payload, self.mode),
             normalized_response_payload=_normalize_response_payload(response_payload, self.mode),
             metadata={"tenant_tier": request_context.tenant_tier.value},
@@ -243,3 +250,47 @@ def chunk_text_from_stream(chunks: list[ChatCompletionChunk]) -> str:
             if content is not None:
                 fragments.append(content)
     return "".join(fragments)
+
+
+def _hybrid_context_from_route_decision(
+    route_decision: RouteDecision | None,
+    chosen_backend: str | None,
+) -> HybridExecutionContext | None:
+    if route_decision is None and chosen_backend is None:
+        return None
+    observed_path = HybridExecutionPath.LOCAL_ONLY
+    observed_temperature = RemoteTemperature.UNKNOWN
+    observed_budget = RemoteBudgetOutcome.UNKNOWN
+    reason_codes: list[str] = []
+    if route_decision is not None and route_decision.explanation is not None:
+        reason_codes = [code.value for code in route_decision.explanation.selection_reason_codes]
+    if (
+        route_decision is not None
+        and route_decision.selected_deployment is not None
+        and route_decision.selected_deployment.execution_mode.value != "host_native"
+    ) or (chosen_backend is not None and chosen_backend.startswith("remote-worker:")):
+        observed_path = HybridExecutionPath.HYBRID_SPILLOVER
+    if (
+        route_decision is not None
+        and route_decision.selected_deployment is not None
+        and route_decision.selected_deployment.readiness_hints.cold_start_likely
+    ):
+        observed_temperature = RemoteTemperature.COLD
+    predictor = None
+    if route_decision is not None and route_decision.selected_deployment is not None:
+        predictor = HybridConditionProfile(
+            source=HybridConditionSource.PREDICTOR_ESTIMATE,
+            execution_path=observed_path,
+            remote_temperature=observed_temperature,
+            budget_outcome=observed_budget,
+            cold_start_penalty_ms=route_decision.selected_deployment.readiness_hints.estimated_cold_start_ms,
+            modeled_cost=route_decision.selected_deployment.cost_profile.relative_cost_index,
+            notes=["derived from selected deployment hints during trace capture"],
+        )
+    return HybridExecutionContext(
+        observed_execution_path=observed_path,
+        observed_remote_temperature=observed_temperature,
+        observed_budget_outcome=observed_budget,
+        reason_codes=reason_codes,
+        predictor_condition=predictor,
+    )

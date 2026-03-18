@@ -48,6 +48,12 @@ _PHASE4_SESSION_TOPICS = (
     "preserve session-local context across retries",
 )
 
+_HYBRID_TOPICS = (
+    "spill over only when local latency is under pressure",
+    "keep local-first posture unless the queue is saturated",
+    "compare remote help against explicit budget guardrails",
+)
+
 
 def build_workload_manifest(
     *,
@@ -114,11 +120,21 @@ def _generation_config_for_family(
     if family in {
         WorkloadScenarioFamily.QUEUE_SATURATION,
         WorkloadScenarioFamily.TENANT_CONTENTION,
+        WorkloadScenarioFamily.HYBRID_SPILLOVER,
+        WorkloadScenarioFamily.REMOTE_BUDGET_GUARDRAIL,
     }:
         return WorkloadGenerationConfig(
             pattern=WorkloadPattern.BURSTY,
             seed=seed,
             burst_size=max(3, (seed % 4) + 3),
+        )
+    if family is WorkloadScenarioFamily.REMOTE_COLD_WARM:
+        return WorkloadGenerationConfig(
+            pattern=WorkloadPattern.REPEATED_PREFIX,
+            seed=seed,
+            shared_prefix=(
+                "Shared context: compare remote warm-path reuse against cold-start costs."
+            ),
         )
     return WorkloadGenerationConfig(seed=seed)
 
@@ -348,6 +364,111 @@ def _build_item(
             },
         )
 
+    if family is WorkloadScenarioFamily.HYBRID_SPILLOVER:
+        burst_size = max(3, (seed % 4) + 3)
+        burst_index = (index % burst_size) + 1
+        burst_group = (index // burst_size) + 1
+        topic = _HYBRID_TOPICS[index % len(_HYBRID_TOPICS)]
+        prompt = (
+            f"Hybrid spillover wave {burst_group}, request {index + 1}: {topic}. "
+            "Explain the serving tradeoff in two lines."
+        )
+        return _workload_item(
+            family=family,
+            model_alias=model_alias,
+            index=index,
+            seed=seed,
+            prompt=prompt,
+            burst_index=burst_index,
+            burst_size=burst_size,
+            metadata={
+                "family": family.value,
+                "variant": "hybrid_spillover",
+                "target_model_alias": model_alias,
+                "tenant_id": "tenant-hybrid",
+                "request_class": "latency_sensitive",
+                "burst_group": str(burst_group),
+                "expected_signal": "hybrid_spillover",
+                "hybrid_policy_target": "burst_to_remote",
+                "injected_execution_path": (
+                    "local_only" if burst_index == 1 else "hybrid_spillover"
+                ),
+                "injected_remote_temperature": "cold" if burst_group == 1 else "warm",
+                "injected_network_penalty_ms": str(25 + (burst_group * 5)),
+                "injected_modeled_cost": str(round(0.02 * burst_index, 3)),
+                "injected_budget_outcome": "within_budget",
+            },
+        )
+
+    if family is WorkloadScenarioFamily.REMOTE_COLD_WARM:
+        shared_prefix = (
+            "Shared context: exercise remote worker cold start versus warm reuse honestly."
+        )
+        remote_temperature = "cold" if index < max(1, request_count // 2) else "warm"
+        prompt = (
+            f"Remote temperature probe {index + 1}: compare the {remote_temperature} path "
+            "against the local fallback in two lines."
+        )
+        return _workload_item(
+            family=family,
+            model_alias=model_alias,
+            index=index,
+            seed=seed,
+            prompt=f"{shared_prefix}\n{prompt}",
+            shared_prefix=shared_prefix,
+            metadata={
+                "family": family.value,
+                "variant": "remote_temperature",
+                "target_model_alias": model_alias,
+                "tenant_id": "tenant-remote-temp",
+                "request_class": "standard",
+                "expected_signal": "remote_cold_warm",
+                "hybrid_policy_target": "burst_to_remote",
+                "injected_execution_path": "hybrid_spillover",
+                "injected_remote_temperature": remote_temperature,
+                "injected_network_penalty_ms": "40" if remote_temperature == "cold" else "12",
+                "injected_cold_start_penalty_ms": (
+                    "120" if remote_temperature == "cold" else "0"
+                ),
+                "injected_modeled_cost": "0.08",
+                "injected_budget_outcome": "within_budget",
+            },
+        )
+
+    if family is WorkloadScenarioFamily.REMOTE_BUDGET_GUARDRAIL:
+        burst_size = max(3, (seed % 4) + 3)
+        burst_index = (index % burst_size) + 1
+        burst_group = (index // burst_size) + 1
+        exhausted = index >= max(1, request_count // 2)
+        prompt = (
+            f"Remote budget guardrail {burst_group}, request {index + 1}: explain whether "
+            "the control plane should spend remote budget or stay local."
+        )
+        return _workload_item(
+            family=family,
+            model_alias=model_alias,
+            index=index,
+            seed=seed,
+            prompt=prompt,
+            burst_index=burst_index,
+            burst_size=burst_size,
+            metadata={
+                "family": family.value,
+                "variant": "remote_budget_guardrail",
+                "target_model_alias": model_alias,
+                "tenant_id": "tenant-budget",
+                "request_class": "bulk" if exhausted else "latency_sensitive",
+                "burst_group": str(burst_group),
+                "expected_signal": "remote_budget_guardrail",
+                "hybrid_policy_target": "remote_disabled" if exhausted else "burst_to_remote",
+                "injected_execution_path": "remote_blocked" if exhausted else "hybrid_spillover",
+                "injected_remote_temperature": "warm",
+                "injected_network_penalty_ms": "18",
+                "injected_modeled_cost": "0.05",
+                "injected_budget_outcome": "exhausted" if exhausted else "within_budget",
+            },
+        )
+
     burst_size = max(2, (seed % 3) + 2)
     burst_index = (index % burst_size) + 1
     burst_group = (index // burst_size) + 1
@@ -444,6 +565,8 @@ def _mixed_family_for_index(*, seed: int, index: int) -> WorkloadScenarioFamily:
         WorkloadScenarioFamily.LONG_PROMPT,
         WorkloadScenarioFamily.REPEATED_PREFIX,
         WorkloadScenarioFamily.CONCURRENCY_BURST,
+        WorkloadScenarioFamily.HYBRID_SPILLOVER,
+        WorkloadScenarioFamily.REMOTE_COLD_WARM,
     )
     rng = random.Random(seed + index)
     return rng.choice(families)

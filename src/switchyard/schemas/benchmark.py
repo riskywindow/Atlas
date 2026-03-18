@@ -9,6 +9,10 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from switchyard.schemas.admin import (
+    HybridExecutionRuntimeSummary,
+    RemoteWorkerLifecycleRuntimeSummary,
+)
 from switchyard.schemas.backend import (
     BackendImageMetadata,
     BackendInstance,
@@ -74,6 +78,9 @@ class WorkloadScenarioFamily(StrEnum):
     SESSION_STICKINESS = "session_stickiness"
     CANARY_ROLLOUT = "canary_rollout"
     SHADOW_TRAFFIC = "shadow_traffic"
+    HYBRID_SPILLOVER = "hybrid_spillover"
+    REMOTE_COLD_WARM = "remote_cold_warm"
+    REMOTE_BUDGET_GUARDRAIL = "remote_budget_guardrail"
     MIXED = "mixed"
 
 
@@ -120,6 +127,126 @@ class ComparisonSourceKind(StrEnum):
 
     WORKLOAD_MANIFEST = "workload_manifest"
     TRACE_SET = "trace_set"
+
+
+class HybridExecutionPath(StrEnum):
+    """Observed execution posture for one request."""
+
+    LOCAL_ONLY = "local_only"
+    HYBRID_SPILLOVER = "hybrid_spillover"
+    REMOTE_ONLY = "remote_only"
+    REMOTE_BLOCKED = "remote_blocked"
+    UNKNOWN = "unknown"
+
+
+class RemoteTemperature(StrEnum):
+    """Cold-versus-warm posture for remote execution when known."""
+
+    COLD = "cold"
+    WARM = "warm"
+    UNKNOWN = "unknown"
+
+
+class RemoteBudgetOutcome(StrEnum):
+    """Typed budget/admission posture for remote execution."""
+
+    WITHIN_BUDGET = "within_budget"
+    EXHAUSTED = "exhausted"
+    DISABLED = "disabled"
+    NOT_MODELED = "not_modeled"
+    UNKNOWN = "unknown"
+
+
+class HybridConditionSource(StrEnum):
+    """Where a remote/local hybrid condition came from."""
+
+    OBSERVED_RUNTIME = "observed_runtime"
+    INJECTED_MOCK = "injected_mock"
+    PREDICTOR_ESTIMATE = "predictor_estimate"
+
+
+class HybridComparisonOutcome(StrEnum):
+    """Human-facing interpretation of a hybrid comparison delta."""
+
+    BENEFICIAL = "beneficial"
+    HARMFUL = "harmful"
+    INCONCLUSIVE = "inconclusive"
+    UNSUPPORTED = "unsupported"
+
+
+class HybridConditionProfile(BaseModel):
+    """Injected or estimated remote-condition profile attached to a request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: HybridConditionSource
+    execution_path: HybridExecutionPath = HybridExecutionPath.UNKNOWN
+    remote_temperature: RemoteTemperature = RemoteTemperature.UNKNOWN
+    budget_outcome: RemoteBudgetOutcome = RemoteBudgetOutcome.UNKNOWN
+    network_penalty_ms: float | None = Field(default=None, ge=0.0)
+    cold_start_penalty_ms: float | None = Field(default=None, ge=0.0)
+    modeled_cost: float | None = Field(default=None, ge=0.0)
+    confidence: RecommendationConfidence | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class HybridExecutionContext(BaseModel):
+    """Observed plus modeled hybrid execution context for one request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    observed_execution_path: HybridExecutionPath = HybridExecutionPath.UNKNOWN
+    observed_remote_temperature: RemoteTemperature = RemoteTemperature.UNKNOWN
+    observed_budget_outcome: RemoteBudgetOutcome = RemoteBudgetOutcome.UNKNOWN
+    observed_network_penalty_ms: float | None = Field(default=None, ge=0.0)
+    observed_modeled_cost: float | None = Field(default=None, ge=0.0)
+    reason_codes: list[str] = Field(default_factory=list)
+    injected_condition: HybridConditionProfile | None = None
+    predictor_condition: HybridConditionProfile | None = None
+
+
+class HybridBenchmarkSummary(BaseModel):
+    """Aggregate hybrid-routing evidence summary for one run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    local_only_count: int = Field(default=0, ge=0)
+    hybrid_spillover_count: int = Field(default=0, ge=0)
+    remote_only_count: int = Field(default=0, ge=0)
+    remote_blocked_count: int = Field(default=0, ge=0)
+    remote_cold_count: int = Field(default=0, ge=0)
+    remote_warm_count: int = Field(default=0, ge=0)
+    observed_runtime_count: int = Field(default=0, ge=0)
+    injected_condition_count: int = Field(default=0, ge=0)
+    predictor_estimate_count: int = Field(default=0, ge=0)
+    low_confidence_count: int = Field(default=0, ge=0)
+    unsupported_count: int = Field(default=0, ge=0)
+    budget_exhausted_count: int = Field(default=0, ge=0)
+    budget_disabled_count: int = Field(default=0, ge=0)
+    avg_observed_network_penalty_ms: float | None = Field(default=None, ge=0.0)
+    avg_injected_network_penalty_ms: float | None = Field(default=None, ge=0.0)
+    avg_predicted_network_penalty_ms: float | None = Field(default=None, ge=0.0)
+    total_modeled_cost: float | None = Field(default=None, ge=0.0)
+    avg_modeled_cost: float | None = Field(default=None, ge=0.0)
+    notes: list[str] = Field(default_factory=list)
+
+
+class HybridComparisonSummary(BaseModel):
+    """Hybrid-specific comparison summary between two benchmark runs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    beneficial_count: int = Field(default=0, ge=0)
+    harmful_count: int = Field(default=0, ge=0)
+    inconclusive_count: int = Field(default=0, ge=0)
+    unsupported_count: int = Field(default=0, ge=0)
+    direct_observation_count: int = Field(default=0, ge=0)
+    predictor_estimate_count: int = Field(default=0, ge=0)
+    low_confidence_count: int = Field(default=0, ge=0)
+    observed_network_penalty_delta_ms: float | None = Field(default=None)
+    modeled_cost_delta: float | None = Field(default=None)
+    budget_exhausted_delta: int = 0
+    notes: list[str] = Field(default_factory=list)
 
 
 class BenchmarkDeploymentTarget(StrEnum):
@@ -351,6 +478,7 @@ class CapturedTraceRecord(BaseModel):
     normalized_request_payload: dict[str, object] | None = None
     normalized_response_payload: dict[str, object] | None = None
     control_plane_metadata: ControlPlaneReportMetadata | None = None
+    hybrid_context: HybridExecutionContext | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -432,6 +560,7 @@ class ReplayRequest(BaseModel):
     request_features: RequestFeatureVector | None = None
     policy_reference: PolicyReference | None = None
     topology_reference: TopologySnapshotReference | None = None
+    hybrid_context: HybridExecutionContext | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
@@ -476,6 +605,7 @@ class BenchmarkComparisonSideSummary(BaseModel):
     p95_tokens_per_second: float | None = Field(default=None, ge=0.0)
     route_distribution: dict[str, int] = Field(default_factory=dict)
     backend_distribution: dict[str, int] = Field(default_factory=dict)
+    hybrid_summary: HybridBenchmarkSummary | None = None
 
 
 class ScenarioDelta(BaseModel):
@@ -489,9 +619,16 @@ class ScenarioDelta(BaseModel):
     latency_delta_ms: float = 0.0
     ttft_delta_ms: float | None = Field(default=None)
     tokens_per_second_delta: float | None = Field(default=None)
+    modeled_cost_delta: float | None = Field(default=None)
     success_changed: bool = False
     backend_changed: bool = False
     route_changed: bool = False
+    evidence_kind: SimulationEvidenceKind = Field(
+        default_factory=lambda: SimulationEvidenceKind.UNSUPPORTED
+    )
+    hybrid_outcome: HybridComparisonOutcome = HybridComparisonOutcome.UNSUPPORTED
+    condition_sources: list[HybridConditionSource] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
 
 
 class BenchmarkComparisonDeltaSummary(BaseModel):
@@ -511,6 +648,7 @@ class BenchmarkComparisonDeltaSummary(BaseModel):
     p95_tokens_per_second_delta: float | None = None
     route_distribution_delta: dict[str, int] = Field(default_factory=dict)
     backend_distribution_delta: dict[str, int] = Field(default_factory=dict)
+    hybrid_summary: HybridComparisonSummary | None = None
     notable_scenario_deltas: list[ScenarioDelta] = Field(default_factory=list)
 
 
@@ -642,6 +780,7 @@ class BenchmarkRequestRecord(BaseModel):
     route_decision: RouteDecision | None = None
     execution_observation: RouteExecutionObservation | None = None
     control_plane_metadata: ControlPlaneReportMetadata | None = None
+    hybrid_context: HybridExecutionContext | None = None
     success: bool
     status_code: int = Field(ge=100, le=599)
     usage: UsageStats | None = None
@@ -781,6 +920,7 @@ class BenchmarkSummary(BaseModel):
     p95_tokens_per_second: float | None = Field(default=None, ge=0.0)
     fallback_count: int = Field(default=0, ge=0)
     chosen_backend_counts: dict[str, int] = Field(default_factory=dict)
+    hybrid_summary: HybridBenchmarkSummary | None = None
     family_summaries: dict[WorkloadScenarioFamily, FamilyBenchmarkSummary] = Field(
         default_factory=dict
     )
@@ -1283,6 +1423,8 @@ class BenchmarkEnvironmentMetadata(EnvironmentSnapshot):
     shadow_sampling_rate: float = Field(default=0.0, ge=0.0, le=1.0)
     deployed_topology: list[DeployedTopologyEndpoint] = Field(default_factory=list)
     worker_instance_inventory: list[BackendInstance] = Field(default_factory=list)
+    hybrid_execution: HybridExecutionRuntimeSummary | None = None
+    remote_workers: RemoteWorkerLifecycleRuntimeSummary | None = None
     remote_worker_snapshot: RegisteredRemoteWorkerSnapshot | None = None
     control_plane_image: BackendImageMetadata | None = None
     topology_capture_source: str | None = Field(default=None, min_length=1, max_length=128)

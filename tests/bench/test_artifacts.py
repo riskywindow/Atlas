@@ -47,12 +47,15 @@ from switchyard.gateway import create_app
 from switchyard.schemas.backend import BackendCapabilities, BackendType, DeviceClass
 from switchyard.schemas.benchmark import (
     BenchmarkArtifactSchemaVersion,
+    BenchmarkComparisonDeltaSummary,
+    BenchmarkComparisonSideSummary,
     BenchmarkDeploymentTarget,
     BenchmarkEnvironmentMetadata,
     BenchmarkRequestRecord,
     BenchmarkRunArtifact,
     BenchmarkScenario,
     BenchmarkSummary,
+    BenchmarkTargetComparisonArtifact,
     BenchmarkWarmupConfig,
     CacheObservation,
     CapturedTraceRecord,
@@ -62,8 +65,19 @@ from switchyard.schemas.benchmark import (
     ExecutionTarget,
     ExecutionTargetType,
     ExplainablePolicySpec,
+    HybridBenchmarkSummary,
+    HybridComparisonOutcome,
+    HybridComparisonSummary,
+    HybridConditionProfile,
+    HybridConditionSource,
+    HybridExecutionContext,
+    HybridExecutionPath,
     PolicyRecommendationReportArtifact,
+    RemoteBudgetOutcome,
+    RemoteTemperature,
     ReplayMode,
+    ScenarioDelta,
+    SimulationEvidenceKind,
     TraceCaptureMode,
     WorkloadGenerationConfig,
     WorkloadPattern,
@@ -86,6 +100,7 @@ from switchyard.schemas.routing import (
     ShadowPolicy,
     WorkloadShape,
 )
+from switchyard.schemas.worker import RemoteWorkerAuthMode
 from switchyard.telemetry import configure_telemetry
 
 
@@ -575,8 +590,463 @@ async def test_run_gateway_benchmark_captures_deployed_topology_metadata() -> No
     assert artifact.environment.deployed_topology[0].address == "http://testserver"
     assert artifact.environment.deployed_topology[1].metadata["backend_type"] == "mlx_lm"
     assert artifact.environment.metadata["topology_captured_at"] == "2026-03-16T12:00:00+00:00"
+    assert artifact.environment.hybrid_execution is not None
+    assert artifact.environment.hybrid_execution.remote_capable_backends == 0
+    assert artifact.environment.remote_workers is not None
+    assert artifact.environment.remote_workers.auth_mode is RemoteWorkerAuthMode.NONE
     assert artifact.environment.remote_worker_snapshot is not None
     assert artifact.environment.remote_worker_snapshot.workers[0].lifecycle_state.value == "ready"
+
+
+def test_render_run_report_markdown_includes_hybrid_runtime_sections() -> None:
+    artifact = BenchmarkRunArtifact.model_validate(
+        {
+            "run_id": "phase7-remote-report",
+            "timestamp": "2026-03-17T12:00:00Z",
+            "scenario": {
+                "name": "remote-aware",
+                "model": "chat-shared",
+                "model_alias": "chat-shared",
+                "policy": "burst_to_remote",
+                "workload_shape": "interactive",
+                "request_count": 1,
+            },
+            "policy": "burst_to_remote",
+            "execution_target": {
+                "target_type": "routing_policy",
+                "model_alias": "chat-shared",
+                "routing_policy": "burst_to_remote",
+            },
+            "backends_involved": ["mlx-lm:chat-mlx", "remote-worker:vllm-cuda"],
+            "backend_types_involved": ["mlx_lm", "vllm_cuda"],
+            "model_aliases_involved": ["chat-shared"],
+            "request_count": 1,
+            "summary": {
+                "request_count": 1,
+                "success_count": 1,
+                "failure_count": 0,
+                "avg_latency_ms": 25.0,
+                "p50_latency_ms": 25.0,
+                "p95_latency_ms": 25.0,
+                "avg_ttft_ms": 10.0,
+                "p50_ttft_ms": 10.0,
+                "p95_ttft_ms": 10.0,
+                "total_output_tokens": 8,
+                "avg_output_tokens": 8.0,
+                "avg_tokens_per_second": 16.0,
+                "p95_tokens_per_second": 16.0,
+                "fallback_count": 0,
+                "chosen_backend_counts": {"remote-worker:vllm-cuda": 1},
+            },
+            "environment": {
+                "benchmark_mode": "workload_manifest",
+                "platform": "macOS-15.0",
+                "machine": "arm64",
+                "python_version": "3.12.2",
+                "worker_instance_inventory": [
+                    {
+                        "instance_id": "local-mlx-01",
+                        "endpoint": {
+                            "base_url": "http://127.0.0.1:8101",
+                            "transport": "http",
+                        },
+                        "source_of_truth": "static_config",
+                        "backend_type": "mlx_lm",
+                        "device_class": "apple_gpu",
+                        "locality": "local",
+                        "locality_class": "local_host",
+                        "execution_mode": "host_native",
+                        "registration": {"state": "static"},
+                    },
+                    {
+                        "instance_id": "remote-cuda-01",
+                        "endpoint": {
+                            "base_url": "https://remote-cuda.internal",
+                            "transport": "https",
+                        },
+                        "source_of_truth": "registered",
+                        "backend_type": "vllm_cuda",
+                        "device_class": "nvidia_gpu",
+                        "locality": "remote",
+                        "locality_class": "remote_cloud",
+                        "execution_mode": "remote_worker",
+                        "registration": {"state": "registered"},
+                    },
+                ],
+                "hybrid_execution": {
+                    "enabled": True,
+                    "prefer_local": True,
+                    "spillover_enabled": True,
+                    "require_healthy_local_backends": True,
+                    "max_remote_share_percent": 25.0,
+                    "remote_request_budget_per_minute": 60,
+                    "remote_concurrency_cap": 4,
+                    "remote_kill_switch_enabled": False,
+                    "remote_cooldown_seconds": 30.0,
+                    "allow_high_priority_remote_escalation": True,
+                    "allowed_remote_environments": ["staging"],
+                    "tenant_remote_policy_count": 1,
+                    "local_capable_backends": 1,
+                    "remote_capable_backends": 1,
+                    "healthy_local_backends": 1,
+                    "healthy_remote_backends": 1,
+                    "degraded_remote_backends": 0,
+                    "unavailable_remote_backends": 0,
+                    "remote_instance_count": 1,
+                    "remote_budget_requests_used": 3,
+                    "remote_budget_requests_remaining": 57,
+                    "remote_in_flight_requests": 1,
+                    "cooldown_active": False,
+                    "notes": ["remote spillover within configured budget"],
+                },
+                "remote_workers": {
+                    "secure_registration_required": True,
+                    "auth_mode": "static_token",
+                    "dynamic_registration_enabled": True,
+                    "heartbeat_timeout_seconds": 30.0,
+                    "stale_eviction_seconds": 300.0,
+                    "allow_static_instances": True,
+                    "static_instance_count": 1,
+                    "registered_instance_count": 1,
+                    "discovered_instance_count": 0,
+                    "stale_instance_count": 0,
+                    "ready_instance_count": 1,
+                    "draining_instance_count": 0,
+                    "unhealthy_instance_count": 0,
+                    "lost_instance_count": 0,
+                    "retired_instance_count": 0,
+                    "notes": ["remote registration healthy"],
+                },
+            },
+            "records": [
+                {
+                    "request_id": "req-1",
+                    "backend_name": "remote-worker:vllm-cuda",
+                    "backend_type": "vllm_cuda",
+                    "model_alias": "chat-shared",
+                    "started_at": "2026-03-17T12:00:00Z",
+                    "completed_at": "2026-03-17T12:00:00Z",
+                    "latency_ms": 25.0,
+                    "output_tokens": 8,
+                    "tokens_per_second": 16.0,
+                    "success": True,
+                    "status_code": 200,
+                }
+            ],
+        }
+    )
+
+    markdown = render_run_report_markdown(artifact)
+
+    assert "## Hybrid Execution" in markdown
+    assert "## Remote Worker Lifecycle" in markdown
+    assert "Captured locality mix: `1 local / 1 remote / 0 external`" in markdown
+    assert "Remote budget usage: `3` used / `57` remaining" in markdown
+    assert "Auth mode: `static_token`" in markdown
+
+
+def test_summarize_records_captures_hybrid_evidence_honestly() -> None:
+    started_at = datetime(2026, 3, 17, 12, 0, tzinfo=UTC)
+    records = [
+        BenchmarkRequestRecord(
+            request_id="req-local",
+            backend_name="mock-local",
+            started_at=started_at,
+            completed_at=started_at,
+            latency_ms=8.0,
+            success=True,
+            status_code=200,
+            hybrid_context=HybridExecutionContext(
+                observed_execution_path=HybridExecutionPath.LOCAL_ONLY,
+                observed_budget_outcome=RemoteBudgetOutcome.DISABLED,
+            ),
+        ),
+        BenchmarkRequestRecord(
+            request_id="req-hybrid",
+            backend_name="remote-worker:cuda-a",
+            started_at=started_at,
+            completed_at=started_at,
+            latency_ms=20.0,
+            success=True,
+            status_code=200,
+            hybrid_context=HybridExecutionContext(
+                observed_execution_path=HybridExecutionPath.HYBRID_SPILLOVER,
+                observed_remote_temperature=RemoteTemperature.WARM,
+                injected_condition=HybridConditionProfile(
+                    source=HybridConditionSource.INJECTED_MOCK,
+                    execution_path=HybridExecutionPath.HYBRID_SPILLOVER,
+                    remote_temperature=RemoteTemperature.WARM,
+                    budget_outcome=RemoteBudgetOutcome.WITHIN_BUDGET,
+                    network_penalty_ms=18.0,
+                    modeled_cost=0.05,
+                ),
+            ),
+        ),
+        BenchmarkRequestRecord(
+            request_id="req-unsupported",
+            backend_name="mock-local",
+            started_at=started_at,
+            completed_at=started_at,
+            latency_ms=9.0,
+            success=True,
+            status_code=200,
+        ),
+    ]
+
+    summary = summarize_records(records)
+
+    assert summary.hybrid_summary is not None
+    assert summary.hybrid_summary.local_only_count == 1
+    assert summary.hybrid_summary.hybrid_spillover_count == 1
+    assert summary.hybrid_summary.injected_condition_count == 1
+    assert summary.hybrid_summary.unsupported_count == 1
+    assert summary.hybrid_summary.total_modeled_cost == 0.05
+
+
+def test_compare_benchmark_runs_marks_hybrid_benefit_and_uncertainty() -> None:
+    started_at = datetime(2026, 3, 17, 12, 0, tzinfo=UTC)
+    left = BenchmarkRunArtifact(
+        run_id="left-local",
+        timestamp=started_at,
+        scenario=BenchmarkScenario(
+            name="hybrid-compare",
+            model="chat-shared",
+            policy=RoutingPolicy.LOCAL_ONLY,
+            workload_shape=WorkloadShape.INTERACTIVE,
+            request_count=2,
+        ),
+        policy=RoutingPolicy.LOCAL_ONLY,
+        execution_target=ExecutionTarget(
+            target_type=ExecutionTargetType.ROUTING_POLICY,
+            model_alias="chat-shared",
+            routing_policy=RoutingPolicy.LOCAL_ONLY,
+        ),
+        backends_involved=["mock-local"],
+        backend_types_involved=["mock"],
+        model_aliases_involved=["chat-shared"],
+        request_count=2,
+        summary=BenchmarkSummary(
+            request_count=2,
+            success_count=2,
+            failure_count=0,
+            avg_latency_ms=20.0,
+            p50_latency_ms=20.0,
+            p95_latency_ms=22.0,
+            avg_ttft_ms=None,
+            p95_ttft_ms=None,
+            total_output_tokens=10,
+            avg_output_tokens=5.0,
+            avg_tokens_per_second=10.0,
+            p95_tokens_per_second=10.0,
+            fallback_count=0,
+            chosen_backend_counts={"mock-local": 2},
+            hybrid_summary=HybridBenchmarkSummary(local_only_count=2, observed_runtime_count=2),
+        ),
+        environment=BenchmarkEnvironmentMetadata(benchmark_mode="workload_manifest"),
+        records=[
+            BenchmarkRequestRecord(
+                request_id="req-a-left",
+                workload_item_id="item-a",
+                backend_name="mock-local",
+                started_at=started_at,
+                completed_at=started_at,
+                latency_ms=30.0,
+                success=True,
+                status_code=200,
+                hybrid_context=HybridExecutionContext(
+                    observed_execution_path=HybridExecutionPath.LOCAL_ONLY,
+                    observed_budget_outcome=RemoteBudgetOutcome.DISABLED,
+                ),
+            ),
+            BenchmarkRequestRecord(
+                request_id="req-b-left",
+                workload_item_id="item-b",
+                backend_name="mock-local",
+                started_at=started_at,
+                completed_at=started_at,
+                latency_ms=10.0,
+                success=True,
+                status_code=200,
+            ),
+        ],
+    )
+    right = BenchmarkRunArtifact(
+        run_id="right-hybrid",
+        timestamp=started_at,
+        scenario=BenchmarkScenario(
+            name="hybrid-compare",
+            model="chat-shared",
+            policy=RoutingPolicy.BURST_TO_REMOTE,
+            workload_shape=WorkloadShape.INTERACTIVE,
+            request_count=2,
+        ),
+        policy=RoutingPolicy.BURST_TO_REMOTE,
+        execution_target=ExecutionTarget(
+            target_type=ExecutionTargetType.ROUTING_POLICY,
+            model_alias="chat-shared",
+            routing_policy=RoutingPolicy.BURST_TO_REMOTE,
+        ),
+        backends_involved=["remote-worker:cuda-a", "mock-local"],
+        backend_types_involved=["mock", "vllm_cuda"],
+        model_aliases_involved=["chat-shared"],
+        request_count=2,
+        summary=BenchmarkSummary(
+            request_count=2,
+            success_count=2,
+            failure_count=0,
+            avg_latency_ms=14.0,
+            p50_latency_ms=14.0,
+            p95_latency_ms=18.0,
+            avg_ttft_ms=None,
+            p95_ttft_ms=None,
+            total_output_tokens=10,
+            avg_output_tokens=5.0,
+            avg_tokens_per_second=12.0,
+            p95_tokens_per_second=12.0,
+            fallback_count=0,
+            chosen_backend_counts={"mock-local": 1, "remote-worker:cuda-a": 1},
+            hybrid_summary=HybridBenchmarkSummary(
+                local_only_count=1,
+                hybrid_spillover_count=1,
+                observed_runtime_count=1,
+                injected_condition_count=1,
+                total_modeled_cost=0.05,
+                avg_modeled_cost=0.05,
+            ),
+        ),
+        environment=BenchmarkEnvironmentMetadata(benchmark_mode="workload_manifest"),
+        records=[
+            BenchmarkRequestRecord(
+                request_id="req-a-right",
+                workload_item_id="item-a",
+                backend_name="remote-worker:cuda-a",
+                started_at=started_at,
+                completed_at=started_at,
+                latency_ms=12.0,
+                success=True,
+                status_code=200,
+                hybrid_context=HybridExecutionContext(
+                    observed_execution_path=HybridExecutionPath.HYBRID_SPILLOVER,
+                    observed_remote_temperature=RemoteTemperature.WARM,
+                    injected_condition=HybridConditionProfile(
+                        source=HybridConditionSource.INJECTED_MOCK,
+                        execution_path=HybridExecutionPath.HYBRID_SPILLOVER,
+                        remote_temperature=RemoteTemperature.WARM,
+                        budget_outcome=RemoteBudgetOutcome.WITHIN_BUDGET,
+                        network_penalty_ms=18.0,
+                        modeled_cost=0.05,
+                    ),
+                ),
+            ),
+            BenchmarkRequestRecord(
+                request_id="req-b-right",
+                workload_item_id="item-b",
+                backend_name="mock-local",
+                started_at=started_at,
+                completed_at=started_at,
+                latency_ms=16.0,
+                success=True,
+                status_code=200,
+                hybrid_context=HybridExecutionContext(
+                    predictor_condition=HybridConditionProfile(
+                        source=HybridConditionSource.PREDICTOR_ESTIMATE,
+                        execution_path=HybridExecutionPath.HYBRID_SPILLOVER,
+                        budget_outcome=RemoteBudgetOutcome.EXHAUSTED,
+                        network_penalty_ms=22.0,
+                        modeled_cost=0.07,
+                    )
+                ),
+            ),
+        ],
+    )
+
+    comparison = compare_benchmark_runs(
+        left_artifact=left,
+        right_artifact=right,
+        source_kind=ComparisonSourceKind.WORKLOAD_MANIFEST,
+        source_name="hybrid-compare",
+    )
+
+    assert comparison.delta.hybrid_summary is not None
+    assert comparison.delta.hybrid_summary.beneficial_count == 1
+    assert comparison.delta.hybrid_summary.low_confidence_count == 0
+    assert comparison.delta.hybrid_summary.predictor_estimate_count == 1
+    assert (
+        comparison.delta.notable_scenario_deltas[0].hybrid_outcome
+        is HybridComparisonOutcome.BENEFICIAL
+    )
+    assert any(
+        delta.evidence_kind is SimulationEvidenceKind.PREDICTOR_ESTIMATE
+        for delta in comparison.delta.notable_scenario_deltas
+    )
+
+
+def test_render_target_comparison_report_marks_unsupported_hybrid_evidence() -> None:
+    artifact = BenchmarkTargetComparisonArtifact(
+        comparison_id="hybrid-report",
+        source_kind=ComparisonSourceKind.WORKLOAD_MANIFEST,
+        source_name="hybrid-report-source",
+        request_count=1,
+        left=BenchmarkComparisonSideSummary(
+            run_id="left",
+            execution_target=ExecutionTarget(
+                target_type=ExecutionTargetType.ROUTING_POLICY,
+                model_alias="chat-shared",
+                routing_policy=RoutingPolicy.LOCAL_ONLY,
+            ),
+            request_count=1,
+            success_rate=1.0,
+            error_rate=0.0,
+            fallback_rate=0.0,
+            p50_latency_ms=10.0,
+            p95_latency_ms=10.0,
+            route_distribution={"mock-local": 1},
+            backend_distribution={"mock-local": 1},
+        ),
+        right=BenchmarkComparisonSideSummary(
+            run_id="right",
+            execution_target=ExecutionTarget(
+                target_type=ExecutionTargetType.ROUTING_POLICY,
+                model_alias="chat-shared",
+                routing_policy=RoutingPolicy.BURST_TO_REMOTE,
+            ),
+            request_count=1,
+            success_rate=1.0,
+            error_rate=0.0,
+            fallback_rate=0.0,
+            p50_latency_ms=12.0,
+            p95_latency_ms=12.0,
+            route_distribution={"remote-worker:cuda-a": 1},
+            backend_distribution={"remote-worker:cuda-a": 1},
+        ),
+        delta=BenchmarkComparisonDeltaSummary(
+            p50_latency_delta_ms=2.0,
+            p95_latency_delta_ms=2.0,
+            hybrid_summary=HybridComparisonSummary(
+                unsupported_count=1,
+                low_confidence_count=1,
+                notes=["comparison relied on injected/mock remote conditions"],
+            ),
+            notable_scenario_deltas=[
+                ScenarioDelta(
+                    key="workload:item-a",
+                    left_request_id="left-1",
+                    right_request_id="right-1",
+                    latency_delta_ms=2.0,
+                    evidence_kind=SimulationEvidenceKind.LOW_CONFIDENCE_ESTIMATE,
+                    hybrid_outcome=HybridComparisonOutcome.UNSUPPORTED,
+                    condition_sources=[HybridConditionSource.INJECTED_MOCK],
+                    notes=["comparison relied on injected/mock remote conditions"],
+                )
+            ],
+        ),
+    )
+
+    markdown = render_target_comparison_report_markdown(artifact)
+
+    assert "## Hybrid Evaluation" in markdown
+    assert "unsupported" in markdown
+    assert "comparison relied on injected/mock remote conditions" in markdown
 
 
 @pytest.mark.asyncio
@@ -1303,14 +1773,7 @@ async def test_compare_synthetic_policies_builds_comparison_artifact() -> None:
     assert len(comparison.results) == len(RoutingPolicy) * 2
     assert comparison.best_policy_by_latency in RoutingPolicy
     assert comparison.best_result_by_latency in {
-        "latency_first",
-        "balanced",
-        "quality_first",
-        "local_only",
-        "latency_first:pinned:mock-local-fast",
-        "balanced:pinned:mock-local-fast",
-        "quality_first:pinned:mock-local-fast",
-        "local_only:pinned:mock-local-fast",
+        result.comparison_label for result in comparison.results
     }
     assert any(result.internal_backend_pin == "mock-local-fast" for result in comparison.results)
 

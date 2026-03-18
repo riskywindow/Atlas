@@ -74,11 +74,22 @@ from switchyard.schemas.benchmark import (
     ExecutionTarget,
     ExecutionTargetType,
     FamilyBenchmarkSummary,
+    HybridBenchmarkSummary,
+    HybridComparisonOutcome,
+    HybridComparisonSummary,
+    HybridConditionProfile,
+    HybridConditionSource,
+    HybridExecutionContext,
+    HybridExecutionPath,
     PolicyRecommendationReportArtifact,
+    RecommendationConfidence,
+    RemoteBudgetOutcome,
+    RemoteTemperature,
     ReplayMode,
     ReplayPlan,
     ReplayRequest,
     ScenarioDelta,
+    SimulationEvidenceKind,
     WorkloadGenerationConfig,
     WorkloadItem,
     WorkloadPattern,
@@ -466,6 +477,7 @@ async def run_gateway_benchmark(
                     model_alias=scenario.model,
                     workload_item_id=None,
                     scenario_family=scenario.family,
+                    request_metadata=None,
                     started_at=started_at,
                     started_perf=started_perf,
                 )
@@ -478,6 +490,7 @@ async def run_gateway_benchmark(
                     model_alias=scenario.model,
                     workload_item_id=None,
                     scenario_family=scenario.family,
+                    request_metadata=None,
                     started_at=started_at,
                     started_perf=started_perf,
                 )
@@ -960,6 +973,10 @@ def compare_benchmark_runs(
                 left_summary.backend_distribution,
                 right_summary.backend_distribution,
             ),
+            hybrid_summary=_hybrid_comparison_summary(
+                left_artifact.records,
+                right_artifact.records,
+            ),
             notable_scenario_deltas=_scenario_deltas(
                 left_artifact.records,
                 right_artifact.records,
@@ -1004,6 +1021,7 @@ def summarize_records(records: list[BenchmarkRequestRecord]) -> BenchmarkSummary
         p95_tokens_per_second=None if not tps_values else _percentile(tps_values, 95),
         fallback_count=sum(1 for record in records if record.fallback_used),
         chosen_backend_counts=dict(sorted(chosen_backend_counts.items())),
+        hybrid_summary=_summarize_hybrid_records(records),
         family_summaries=family_summaries,
     )
 
@@ -1083,6 +1101,7 @@ def summarize_records_without_families(records: list[BenchmarkRequestRecord]) ->
         p95_tokens_per_second=None if not tps_values else _percentile(tps_values, 95),
         fallback_count=sum(1 for record in records if record.fallback_used),
         chosen_backend_counts=dict(sorted(chosen_backend_counts.items())),
+        hybrid_summary=_summarize_hybrid_records(records),
     )
 
 
@@ -1166,6 +1185,9 @@ def render_run_report_markdown(artifact: BenchmarkRunArtifact) -> str:
     """Render a compact Markdown report for a single benchmark artifact."""
 
     workload = artifact.scenario.workload_generation
+    worker_inventory_summary = _worker_inventory_summary(
+        artifact.environment.worker_instance_inventory
+    )
     route_distribution = _route_distribution(artifact.records)
     error_categories = _error_category_counts(artifact.records)
     admission_outcomes = _admission_outcome_counts(artifact.records)
@@ -1221,6 +1243,12 @@ def render_run_report_markdown(artifact: BenchmarkRunArtifact) -> str:
         f"- Deployment profile: `{deployment_profile}`",
         f"- Config profile: `{config_profile_name}`",
         f"- Worker instances captured: `{len(artifact.environment.worker_instance_inventory)}`",
+        (
+            "- Captured locality mix: "
+            f"`{worker_inventory_summary['local']} local / "
+            f"{worker_inventory_summary['remote']} remote / "
+            f"{worker_inventory_summary['external']} external`"
+        ),
         f"- Topology capture source: `{topology_capture_source}`",
         "",
         "## Benchmark Configuration",
@@ -1259,6 +1287,114 @@ def render_run_report_markdown(artifact: BenchmarkRunArtifact) -> str:
         lines.append(
             f"| Average tokens/sec | `{artifact.summary.avg_tokens_per_second:.3f}` |"
         )
+    if artifact.summary.hybrid_summary is not None:
+        hybrid_summary = artifact.summary.hybrid_summary
+        lines.extend(
+            [
+                "",
+                "## Hybrid Evidence",
+                (
+                    "- Observed paths: "
+                    f"`{hybrid_summary.local_only_count}` local / "
+                    f"`{hybrid_summary.hybrid_spillover_count}` hybrid spillover / "
+                    f"`{hybrid_summary.remote_only_count}` remote only / "
+                    f"`{hybrid_summary.remote_blocked_count}` remote blocked"
+                ),
+                (
+                    "- Evidence sources: "
+                    f"`{hybrid_summary.observed_runtime_count}` observed / "
+                    f"`{hybrid_summary.injected_condition_count}` injected mock / "
+                    f"`{hybrid_summary.predictor_estimate_count}` predictor"
+                ),
+                (
+                    "- Remote temperature: "
+                    f"`{hybrid_summary.remote_cold_count}` cold / "
+                    f"`{hybrid_summary.remote_warm_count}` warm"
+                ),
+                (
+                    "- Budget posture: "
+                    f"`{hybrid_summary.budget_exhausted_count}` exhausted / "
+                    f"`{hybrid_summary.budget_disabled_count}` disabled"
+                ),
+                (
+                    "- Network penalty (ms): "
+                    f"observed=`{hybrid_summary.avg_observed_network_penalty_ms}` "
+                    f"injected=`{hybrid_summary.avg_injected_network_penalty_ms}` "
+                    f"predicted=`{hybrid_summary.avg_predicted_network_penalty_ms}`"
+                ),
+                (
+                    "- Modeled cost: "
+                    f"total=`{hybrid_summary.total_modeled_cost}` "
+                    f"avg=`{hybrid_summary.avg_modeled_cost}`"
+                ),
+                (
+                    "- Uncertainty: "
+                    f"`{hybrid_summary.low_confidence_count}` low-confidence / "
+                    f"`{hybrid_summary.unsupported_count}` unsupported"
+                ),
+            ]
+        )
+        if hybrid_summary.notes:
+            lines.append(f"- Notes: {'; '.join(hybrid_summary.notes)}")
+    if artifact.environment.hybrid_execution is not None:
+        hybrid = artifact.environment.hybrid_execution
+        remote_budget_remaining = (
+            "unbounded"
+            if hybrid.remote_budget_requests_remaining is None
+            else str(hybrid.remote_budget_requests_remaining)
+        )
+        lines.extend(
+            [
+                "",
+                "## Hybrid Execution",
+                f"- Enabled: `{hybrid.enabled}`",
+                f"- Prefer local: `{hybrid.prefer_local}`",
+                f"- Spillover enabled: `{hybrid.spillover_enabled}`",
+                (
+                    "- Remote budget usage: "
+                    f"`{hybrid.remote_budget_requests_used}` used / "
+                    f"`{remote_budget_remaining}` remaining"
+                ),
+                (
+                    "- Remote health posture: "
+                    f"`{hybrid.healthy_remote_backends}` healthy / "
+                    f"`{hybrid.degraded_remote_backends}` degraded / "
+                    f"`{hybrid.unavailable_remote_backends}` unavailable"
+                ),
+                (
+                    "- Remote concurrency: "
+                    f"`{hybrid.remote_in_flight_requests}` in flight / "
+                    f"`{hybrid.remote_concurrency_cap or 'unbounded'}` cap"
+                ),
+            ]
+        )
+        if hybrid.notes:
+            lines.append(f"- Notes: {'; '.join(hybrid.notes)}")
+    if artifact.environment.remote_workers is not None:
+        remote_workers = artifact.environment.remote_workers
+        lines.extend(
+            [
+                "",
+                "## Remote Worker Lifecycle",
+                f"- Secure registration required: `{remote_workers.secure_registration_required}`",
+                f"- Auth mode: `{remote_workers.auth_mode.value}`",
+                (
+                    "- Registered workers: "
+                    f"`{remote_workers.registered_instance_count}` registered / "
+                    f"`{remote_workers.ready_instance_count}` ready / "
+                    f"`{remote_workers.stale_instance_count}` stale"
+                ),
+                (
+                    "- Lifecycle posture: "
+                    f"`{remote_workers.draining_instance_count}` draining / "
+                    f"`{remote_workers.unhealthy_instance_count}` unhealthy / "
+                    f"`{remote_workers.lost_instance_count}` lost / "
+                    f"`{remote_workers.retired_instance_count}` retired"
+                ),
+            ]
+        )
+        if remote_workers.notes:
+            lines.append(f"- Notes: {'; '.join(remote_workers.notes)}")
     lines.extend(
         [
             "",
@@ -1455,6 +1591,41 @@ def render_target_comparison_report_markdown(
     lines.extend(
         [
             "",
+            "## Hybrid Evaluation",
+        ]
+    )
+    if artifact.delta.hybrid_summary is not None:
+        hybrid = artifact.delta.hybrid_summary
+        lines.extend(
+            [
+                (
+                    "- Outcome counts: "
+                    f"`{hybrid.beneficial_count}` beneficial / "
+                    f"`{hybrid.harmful_count}` harmful / "
+                    f"`{hybrid.inconclusive_count}` inconclusive / "
+                    f"`{hybrid.unsupported_count}` unsupported"
+                ),
+                (
+                    "- Evidence quality: "
+                    f"`{hybrid.direct_observation_count}` direct / "
+                    f"`{hybrid.predictor_estimate_count}` predictor / "
+                    f"`{hybrid.low_confidence_count}` low-confidence"
+                ),
+                (
+                    "- Delta posture: "
+                    f"observed penalty delta=`{hybrid.observed_network_penalty_delta_ms}` "
+                    f"modeled cost delta=`{hybrid.modeled_cost_delta}` "
+                    f"budget exhausted delta=`{hybrid.budget_exhausted_delta}`"
+                ),
+            ]
+        )
+        if hybrid.notes:
+            lines.append(f"- Notes: {'; '.join(hybrid.notes)}")
+    else:
+        lines.append("- No hybrid-specific evidence was captured for this comparison.")
+    lines.extend(
+        [
+            "",
             "## Route and Backend Distributions",
             f"- Left routes: {_format_distribution(artifact.left.route_distribution)}",
             f"- Right routes: {_format_distribution(artifact.right.route_distribution)}",
@@ -1466,18 +1637,24 @@ def render_target_comparison_report_markdown(
             f"- Best throughput run: `{best_throughput_run}`",
             "",
             "## Notable Per-Scenario Deltas",
-            "| Key | Latency Delta (ms) | Success Changed | Backend Changed | Route Changed |",
-            "| --- | --- | --- | --- | --- |",
+            (
+                "| Key | Latency Delta (ms) | Hybrid Outcome | Evidence | "
+                "Success Changed | Backend Changed | Route Changed |"
+            ),
+            "| --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for delta in artifact.delta.notable_scenario_deltas[:10]:
         lines.append(
             f"| `{delta.key}` | `{delta.latency_delta_ms:.3f}` | "
+            f"`{delta.hybrid_outcome.value}` | `{delta.evidence_kind.value}` | "
             f"`{delta.success_changed}` | `{delta.backend_changed}` | "
             f"`{delta.route_changed}` |"
         )
     if len(artifact.delta.notable_scenario_deltas) == 0:
-        lines.append("| none | `0.000` | `False` | `False` | `False` |")
+        lines.append(
+            "| none | `0.000` | `unsupported` | `unsupported` | `False` | `False` | `False` |"
+        )
     return "\n".join(lines)
 
 
@@ -1752,6 +1929,7 @@ def _comparison_side_summary(
         p95_tokens_per_second=artifact.summary.p95_tokens_per_second,
         route_distribution=_route_distribution(artifact.records),
         backend_distribution=dict(sorted(artifact.summary.chosen_backend_counts.items())),
+        hybrid_summary=artifact.summary.hybrid_summary,
     )
 
 
@@ -2012,15 +2190,24 @@ def _scenario_deltas(
                 right.tokens_per_second,
                 left.tokens_per_second,
             ),
+            modeled_cost_delta=_optional_delta(
+                _modeled_cost_for_record(right),
+                _modeled_cost_for_record(left),
+            ),
             success_changed=left.success != right.success,
             backend_changed=left.backend_name != right.backend_name,
             route_changed=_route_backend_for_record(left) != _route_backend_for_record(right),
+            evidence_kind=_comparison_evidence_kind(left, right),
+            hybrid_outcome=_hybrid_comparison_outcome(left, right),
+            condition_sources=_comparison_condition_sources(left, right),
+            notes=_hybrid_comparison_notes(left, right),
         )
         if (
             delta.success_changed
             or delta.backend_changed
             or delta.route_changed
             or abs(delta.latency_delta_ms) >= 1.0
+            or delta.hybrid_outcome is not HybridComparisonOutcome.INCONCLUSIVE
         ):
             deltas.append(delta)
     return deltas
@@ -2044,6 +2231,320 @@ def _route_backend_for_record(record: BenchmarkRequestRecord) -> str:
     if record.route_decision is not None:
         return record.route_decision.backend_name
     return record.backend_name
+
+
+def _modeled_cost_for_record(record: BenchmarkRequestRecord) -> float | None:
+    if record.hybrid_context is None:
+        return None
+    if record.hybrid_context.injected_condition is not None:
+        return record.hybrid_context.injected_condition.modeled_cost
+    if record.hybrid_context.predictor_condition is not None:
+        return record.hybrid_context.predictor_condition.modeled_cost
+    return record.hybrid_context.observed_modeled_cost
+
+
+def _summarize_hybrid_records(
+    records: list[BenchmarkRequestRecord],
+) -> HybridBenchmarkSummary | None:
+    if not records:
+        return None
+    local_only_count = 0
+    hybrid_spillover_count = 0
+    remote_only_count = 0
+    remote_blocked_count = 0
+    remote_cold_count = 0
+    remote_warm_count = 0
+    observed_runtime_count = 0
+    injected_condition_count = 0
+    predictor_estimate_count = 0
+    low_confidence_count = 0
+    unsupported_count = 0
+    budget_exhausted_count = 0
+    budget_disabled_count = 0
+    observed_penalties: list[float] = []
+    injected_penalties: list[float] = []
+    predicted_penalties: list[float] = []
+    modeled_costs: list[float] = []
+    notes: list[str] = []
+    for record in records:
+        context = record.hybrid_context
+        if context is None:
+            unsupported_count += 1
+            continue
+        observed_path = context.observed_execution_path
+        if observed_path is HybridExecutionPath.LOCAL_ONLY:
+            local_only_count += 1
+        elif observed_path is HybridExecutionPath.HYBRID_SPILLOVER:
+            hybrid_spillover_count += 1
+        elif observed_path is HybridExecutionPath.REMOTE_ONLY:
+            remote_only_count += 1
+        elif observed_path is HybridExecutionPath.REMOTE_BLOCKED:
+            remote_blocked_count += 1
+        if observed_path is not HybridExecutionPath.UNKNOWN:
+            observed_runtime_count += 1
+        if context.observed_remote_temperature is RemoteTemperature.COLD:
+            remote_cold_count += 1
+        elif context.observed_remote_temperature is RemoteTemperature.WARM:
+            remote_warm_count += 1
+        if context.observed_network_penalty_ms is not None:
+            observed_penalties.append(context.observed_network_penalty_ms)
+        if context.observed_modeled_cost is not None:
+            modeled_costs.append(context.observed_modeled_cost)
+        if context.observed_budget_outcome is RemoteBudgetOutcome.EXHAUSTED:
+            budget_exhausted_count += 1
+        elif context.observed_budget_outcome is RemoteBudgetOutcome.DISABLED:
+            budget_disabled_count += 1
+        injected = context.injected_condition
+        if injected is not None:
+            injected_condition_count += 1
+            if injected.network_penalty_ms is not None:
+                injected_penalties.append(injected.network_penalty_ms)
+            if injected.modeled_cost is not None:
+                modeled_costs.append(injected.modeled_cost)
+            if injected.budget_outcome is RemoteBudgetOutcome.EXHAUSTED:
+                budget_exhausted_count += 1
+            elif injected.budget_outcome is RemoteBudgetOutcome.DISABLED:
+                budget_disabled_count += 1
+            if injected.confidence is RecommendationConfidence.LOW:
+                low_confidence_count += 1
+        predictor = context.predictor_condition
+        if predictor is not None:
+            predictor_estimate_count += 1
+            if predictor.network_penalty_ms is not None:
+                predicted_penalties.append(predictor.network_penalty_ms)
+            if predictor.modeled_cost is not None:
+                modeled_costs.append(predictor.modeled_cost)
+            if predictor.confidence in {
+                RecommendationConfidence.LOW,
+                RecommendationConfidence.INSUFFICIENT,
+            }:
+                low_confidence_count += 1
+        if observed_path is HybridExecutionPath.UNKNOWN and injected is None and predictor is None:
+            unsupported_count += 1
+    if observed_runtime_count == 0 and injected_condition_count > 0:
+        notes.append("hybrid evidence relied on injected/mock conditions")
+    if predictor_estimate_count > 0:
+        notes.append("predictor-based remote cost or network estimates were included")
+    if unsupported_count > 0:
+        notes.append(f"{unsupported_count} requests lacked usable hybrid evidence")
+    return HybridBenchmarkSummary(
+        local_only_count=local_only_count,
+        hybrid_spillover_count=hybrid_spillover_count,
+        remote_only_count=remote_only_count,
+        remote_blocked_count=remote_blocked_count,
+        remote_cold_count=remote_cold_count,
+        remote_warm_count=remote_warm_count,
+        observed_runtime_count=observed_runtime_count,
+        injected_condition_count=injected_condition_count,
+        predictor_estimate_count=predictor_estimate_count,
+        low_confidence_count=low_confidence_count,
+        unsupported_count=unsupported_count,
+        budget_exhausted_count=budget_exhausted_count,
+        budget_disabled_count=budget_disabled_count,
+        avg_observed_network_penalty_ms=(
+            None if not observed_penalties else _average(observed_penalties)
+        ),
+        avg_injected_network_penalty_ms=(
+            None if not injected_penalties else _average(injected_penalties)
+        ),
+        avg_predicted_network_penalty_ms=(
+            None if not predicted_penalties else _average(predicted_penalties)
+        ),
+        total_modeled_cost=None if not modeled_costs else round(sum(modeled_costs), 6),
+        avg_modeled_cost=None if not modeled_costs else _average(modeled_costs),
+        notes=notes,
+    )
+
+
+def _hybrid_comparison_summary(
+    left_records: list[BenchmarkRequestRecord],
+    right_records: list[BenchmarkRequestRecord],
+) -> HybridComparisonSummary | None:
+    deltas = _scenario_deltas(left_records, right_records)
+    if not deltas:
+        return None
+    beneficial_count = sum(
+        1 for delta in deltas if delta.hybrid_outcome is HybridComparisonOutcome.BENEFICIAL
+    )
+    harmful_count = sum(
+        1 for delta in deltas if delta.hybrid_outcome is HybridComparisonOutcome.HARMFUL
+    )
+    inconclusive_count = sum(
+        1 for delta in deltas if delta.hybrid_outcome is HybridComparisonOutcome.INCONCLUSIVE
+    )
+    unsupported_count = sum(
+        1 for delta in deltas if delta.hybrid_outcome is HybridComparisonOutcome.UNSUPPORTED
+    )
+    direct_count = sum(
+        1 for delta in deltas if delta.evidence_kind is SimulationEvidenceKind.DIRECT_OBSERVATION
+    )
+    predictor_count = sum(
+        1 for delta in deltas if delta.evidence_kind is SimulationEvidenceKind.PREDICTOR_ESTIMATE
+    )
+    low_confidence_count = sum(
+        1
+        for delta in deltas
+        if delta.evidence_kind is SimulationEvidenceKind.LOW_CONFIDENCE_ESTIMATE
+    )
+    observed_penalty_deltas = [
+        penalty_delta
+        for left, right in _paired_records(left_records, right_records)
+        if (penalty_delta := _observed_network_penalty_delta(left, right)) is not None
+    ]
+    modeled_cost_deltas = [
+        delta.modeled_cost_delta for delta in deltas if delta.modeled_cost_delta is not None
+    ]
+    budget_exhausted_delta = (
+        sum(1 for record in right_records if _budget_exhausted(record))
+        - sum(1 for record in left_records if _budget_exhausted(record))
+    )
+    notes: list[str] = []
+    if beneficial_count > 0:
+        notes.append(f"{beneficial_count} requests showed hybrid benefit on the right-hand side")
+    if harmful_count > 0:
+        notes.append(f"{harmful_count} requests regressed under the right-hand side")
+    if unsupported_count > 0:
+        notes.append(f"{unsupported_count} requests remained unsupported or inconclusive")
+    return HybridComparisonSummary(
+        beneficial_count=beneficial_count,
+        harmful_count=harmful_count,
+        inconclusive_count=inconclusive_count,
+        unsupported_count=unsupported_count,
+        direct_observation_count=direct_count,
+        predictor_estimate_count=predictor_count,
+        low_confidence_count=low_confidence_count,
+        observed_network_penalty_delta_ms=(
+            None if not observed_penalty_deltas else _average(observed_penalty_deltas)
+        ),
+        modeled_cost_delta=None if not modeled_cost_deltas else _average(modeled_cost_deltas),
+        budget_exhausted_delta=budget_exhausted_delta,
+        notes=notes,
+    )
+
+
+def _paired_records(
+    left_records: list[BenchmarkRequestRecord],
+    right_records: list[BenchmarkRequestRecord],
+) -> list[tuple[BenchmarkRequestRecord, BenchmarkRequestRecord]]:
+    left_by_key = {
+        _comparison_record_key(record=record, index=index): record
+        for index, record in enumerate(left_records)
+    }
+    right_by_key = {
+        _comparison_record_key(record=record, index=index): record
+        for index, record in enumerate(right_records)
+    }
+    return [
+        (left_by_key[key], right_by_key[key])
+        for key in sorted(set(left_by_key) & set(right_by_key))
+    ]
+
+
+def _observed_network_penalty_delta(
+    left: BenchmarkRequestRecord,
+    right: BenchmarkRequestRecord,
+) -> float | None:
+    left_penalty = (
+        None
+        if left.hybrid_context is None
+        else left.hybrid_context.observed_network_penalty_ms
+    )
+    right_penalty = (
+        None
+        if right.hybrid_context is None
+        else right.hybrid_context.observed_network_penalty_ms
+    )
+    return _optional_delta(right_penalty, left_penalty)
+
+
+def _budget_exhausted(record: BenchmarkRequestRecord) -> bool:
+    context = record.hybrid_context
+    if context is None:
+        return False
+    if context.observed_budget_outcome is RemoteBudgetOutcome.EXHAUSTED:
+        return True
+    if (
+        context.injected_condition is not None
+        and context.injected_condition.budget_outcome is RemoteBudgetOutcome.EXHAUSTED
+    ):
+        return True
+    return bool(
+        context.predictor_condition is not None
+        and context.predictor_condition.budget_outcome is RemoteBudgetOutcome.EXHAUSTED
+    )
+
+
+def _comparison_condition_sources(
+    left: BenchmarkRequestRecord,
+    right: BenchmarkRequestRecord,
+) -> list[HybridConditionSource]:
+    sources: list[HybridConditionSource] = []
+    for record in (left, right):
+        context = record.hybrid_context
+        if context is None:
+            continue
+        if context.observed_execution_path is not HybridExecutionPath.UNKNOWN:
+            sources.append(HybridConditionSource.OBSERVED_RUNTIME)
+        if context.injected_condition is not None:
+            sources.append(HybridConditionSource.INJECTED_MOCK)
+        if context.predictor_condition is not None:
+            sources.append(HybridConditionSource.PREDICTOR_ESTIMATE)
+    return sorted(set(sources), key=lambda item: item.value)
+
+
+def _comparison_evidence_kind(
+    left: BenchmarkRequestRecord,
+    right: BenchmarkRequestRecord,
+) -> SimulationEvidenceKind:
+    sources = _comparison_condition_sources(left, right)
+    if HybridConditionSource.OBSERVED_RUNTIME in sources:
+        return SimulationEvidenceKind.DIRECT_OBSERVATION
+    if HybridConditionSource.PREDICTOR_ESTIMATE in sources:
+        return SimulationEvidenceKind.PREDICTOR_ESTIMATE
+    if HybridConditionSource.INJECTED_MOCK in sources:
+        return SimulationEvidenceKind.LOW_CONFIDENCE_ESTIMATE
+    return SimulationEvidenceKind.UNSUPPORTED
+
+
+def _hybrid_comparison_outcome(
+    left: BenchmarkRequestRecord,
+    right: BenchmarkRequestRecord,
+) -> HybridComparisonOutcome:
+    evidence_kind = _comparison_evidence_kind(left, right)
+    if evidence_kind is SimulationEvidenceKind.UNSUPPORTED:
+        return HybridComparisonOutcome.UNSUPPORTED
+    if right.success and not left.success:
+        return HybridComparisonOutcome.BENEFICIAL
+    if left.success and not right.success:
+        return HybridComparisonOutcome.HARMFUL
+    right_cost = _modeled_cost_for_record(right)
+    left_cost = _modeled_cost_for_record(left)
+    if right.latency_ms + 5.0 < left.latency_ms:
+        return HybridComparisonOutcome.BENEFICIAL
+    if right.latency_ms > left.latency_ms + 5.0:
+        return HybridComparisonOutcome.HARMFUL
+    if right_cost is not None and left_cost is not None and right_cost + 0.001 < left_cost:
+        return HybridComparisonOutcome.BENEFICIAL
+    if right_cost is not None and left_cost is not None and right_cost > left_cost + 0.001:
+        return HybridComparisonOutcome.HARMFUL
+    return HybridComparisonOutcome.INCONCLUSIVE
+
+
+def _hybrid_comparison_notes(
+    left: BenchmarkRequestRecord,
+    right: BenchmarkRequestRecord,
+) -> list[str]:
+    notes: list[str] = []
+    evidence_kind = _comparison_evidence_kind(left, right)
+    if evidence_kind is SimulationEvidenceKind.LOW_CONFIDENCE_ESTIMATE:
+        notes.append("comparison relied on injected/mock remote conditions")
+    elif evidence_kind is SimulationEvidenceKind.PREDICTOR_ESTIMATE:
+        notes.append("comparison included predictor-based remote estimates")
+    elif evidence_kind is SimulationEvidenceKind.UNSUPPORTED:
+        notes.append("comparison lacked enough hybrid evidence")
+    if _budget_exhausted(right) and not _budget_exhausted(left):
+        notes.append("right-hand side hit remote budget exhaustion")
+    return notes
 
 
 def get_git_sha() -> str | None:
@@ -2124,6 +2625,299 @@ def _unescape_prometheus_label_value(value: str) -> str:
     return value.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
 
 
+def _hybrid_context_for_record(
+    *,
+    metadata: Mapping[str, str] | None,
+    route_decision: RouteDecision | None,
+    backend_name: str,
+    routing_policy: RoutingPolicy,
+) -> HybridExecutionContext | None:
+    injected = _condition_profile_from_metadata(
+        metadata=metadata,
+        prefix="injected",
+        source=HybridConditionSource.INJECTED_MOCK,
+    )
+    predictor = _predictor_condition_from_route_decision(route_decision)
+    observed_path, observed_budget, reason_codes = _observed_hybrid_outcome(
+        route_decision=route_decision,
+        backend_name=backend_name,
+        routing_policy=routing_policy,
+    )
+    observed_temperature = _observed_remote_temperature(
+        route_decision=route_decision,
+        injected=injected,
+    )
+    observed_network_penalty_ms = _observed_network_penalty(route_decision)
+    observed_cost = _observed_modeled_cost(route_decision)
+    if (
+        observed_path is HybridExecutionPath.UNKNOWN
+        and observed_temperature is RemoteTemperature.UNKNOWN
+        and observed_budget is RemoteBudgetOutcome.UNKNOWN
+        and observed_network_penalty_ms is None
+        and observed_cost is None
+        and injected is None
+        and predictor is None
+    ):
+        return None
+    return HybridExecutionContext(
+        observed_execution_path=observed_path,
+        observed_remote_temperature=observed_temperature,
+        observed_budget_outcome=observed_budget,
+        observed_network_penalty_ms=observed_network_penalty_ms,
+        observed_modeled_cost=observed_cost,
+        reason_codes=reason_codes,
+        injected_condition=injected,
+        predictor_condition=predictor,
+    )
+
+
+def _condition_profile_from_metadata(
+    *,
+    metadata: Mapping[str, str] | None,
+    prefix: str,
+    source: HybridConditionSource,
+) -> HybridConditionProfile | None:
+    if metadata is None:
+        return None
+    key_prefix = f"{prefix}_"
+    path = _safe_hybrid_execution_path(metadata.get(f"{key_prefix}execution_path"))
+    temperature = _safe_remote_temperature(metadata.get(f"{key_prefix}remote_temperature"))
+    budget = _safe_remote_budget_outcome(metadata.get(f"{key_prefix}budget_outcome"))
+    network_penalty = _maybe_parse_float(metadata.get(f"{key_prefix}network_penalty_ms"))
+    cold_start_penalty = _maybe_parse_float(metadata.get(f"{key_prefix}cold_start_penalty_ms"))
+    modeled_cost = _maybe_parse_float(metadata.get(f"{key_prefix}modeled_cost"))
+    confidence = _safe_recommendation_confidence(metadata.get(f"{key_prefix}confidence"))
+    if (
+        path is HybridExecutionPath.UNKNOWN
+        and temperature is RemoteTemperature.UNKNOWN
+        and budget is RemoteBudgetOutcome.UNKNOWN
+        and network_penalty is None
+        and cold_start_penalty is None
+        and modeled_cost is None
+        and confidence is None
+    ):
+        return None
+    notes = []
+    expected_signal = metadata.get("expected_signal")
+    if expected_signal is not None:
+        notes.append(f"scenario signal={expected_signal}")
+    return HybridConditionProfile(
+        source=source,
+        execution_path=path,
+        remote_temperature=temperature,
+        budget_outcome=budget,
+        network_penalty_ms=network_penalty,
+        cold_start_penalty_ms=cold_start_penalty,
+        modeled_cost=modeled_cost,
+        confidence=confidence,
+        notes=notes,
+    )
+
+
+def _predictor_condition_from_route_decision(
+    route_decision: RouteDecision | None,
+) -> HybridConditionProfile | None:
+    if route_decision is None or route_decision.selected_deployment is None:
+        return None
+    deployment = route_decision.selected_deployment
+    network_penalty = deployment.readiness_hints.estimated_cold_start_ms
+    expected_rtt = (
+        deployment.instances[0].network_characteristics.expected_rtt_ms
+        if deployment.instances
+        else None
+    )
+    if expected_rtt is not None:
+        network_penalty = (
+            float(expected_rtt)
+            if network_penalty is None
+            else float(network_penalty) + float(expected_rtt)
+        )
+    modeled_cost = deployment.cost_profile.relative_cost_index
+    confidence = (
+        RecommendationConfidence.LOW
+        if deployment.readiness_hints.cold_start_likely
+        or expected_rtt is None
+        else RecommendationConfidence.MEDIUM
+    )
+    execution_path = (
+        HybridExecutionPath.REMOTE_ONLY
+        if deployment.execution_mode in {
+            ExecutionModeLabel.REMOTE_WORKER,
+            ExecutionModeLabel.EXTERNAL_SERVICE,
+        }
+        else HybridExecutionPath.LOCAL_ONLY
+    )
+    temperature = (
+        RemoteTemperature.COLD
+        if deployment.readiness_hints.cold_start_likely
+        else RemoteTemperature.UNKNOWN
+    )
+    budget_outcome = (
+        RemoteBudgetOutcome.UNKNOWN
+        if deployment.cost_profile.budget_bucket is None
+        else RemoteBudgetOutcome.WITHIN_BUDGET
+    )
+    if (
+        network_penalty is None
+        and modeled_cost is None
+        and temperature is RemoteTemperature.UNKNOWN
+    ):
+        return None
+    return HybridConditionProfile(
+        source=HybridConditionSource.PREDICTOR_ESTIMATE,
+        execution_path=execution_path,
+        remote_temperature=temperature,
+        budget_outcome=budget_outcome,
+        network_penalty_ms=network_penalty,
+        cold_start_penalty_ms=deployment.readiness_hints.estimated_cold_start_ms,
+        modeled_cost=None if modeled_cost is None else float(modeled_cost),
+        confidence=confidence,
+        notes=["derived from selected deployment hints"],
+    )
+
+
+def _observed_hybrid_outcome(
+    *,
+    route_decision: RouteDecision | None,
+    backend_name: str,
+    routing_policy: RoutingPolicy,
+) -> tuple[HybridExecutionPath, RemoteBudgetOutcome, list[str]]:
+    reason_codes: list[str] = []
+    if route_decision is not None and route_decision.explanation is not None:
+        reason_codes.extend(
+            code.value for code in route_decision.explanation.selection_reason_codes
+        )
+    if route_decision is not None and route_decision.admission_decision is not None:
+        reason = route_decision.admission_decision.reason_code
+        if reason is not None:
+            reason_codes.append(reason.value)
+    if (
+        route_decision is not None
+        and route_decision.admission_decision is not None
+        and route_decision.admission_decision.reason_code is not None
+    ):
+        if route_decision.admission_decision.reason_code.value == "remote_budget_exhausted":
+            return HybridExecutionPath.REMOTE_BLOCKED, RemoteBudgetOutcome.EXHAUSTED, reason_codes
+        if route_decision.admission_decision.reason_code.value == "remote_spillover_not_permitted":
+            return HybridExecutionPath.REMOTE_BLOCKED, RemoteBudgetOutcome.DISABLED, reason_codes
+    deployment = None if route_decision is None else route_decision.selected_deployment
+    remote_selected = False
+    if deployment is not None and deployment.execution_mode in {
+        ExecutionModeLabel.REMOTE_WORKER,
+        ExecutionModeLabel.EXTERNAL_SERVICE,
+    }:
+        remote_selected = True
+    elif backend_name.startswith("remote-worker:"):
+        remote_selected = True
+    if remote_selected:
+        if routing_policy in {
+            RoutingPolicy.BURST_TO_REMOTE,
+            RoutingPolicy.LOCAL_PREFERRED,
+            RoutingPolicy.LATENCY_SLO,
+            RoutingPolicy.QUALITY_ON_DEMAND,
+            RoutingPolicy.REMOTE_PREFERRED_IF_LOCAL_UNHEALTHY,
+        }:
+            return (
+                HybridExecutionPath.HYBRID_SPILLOVER,
+                RemoteBudgetOutcome.WITHIN_BUDGET,
+                reason_codes,
+            )
+        return HybridExecutionPath.REMOTE_ONLY, RemoteBudgetOutcome.WITHIN_BUDGET, reason_codes
+    if routing_policy in {RoutingPolicy.REMOTE_DISABLED, RoutingPolicy.LOCAL_ONLY}:
+        return HybridExecutionPath.LOCAL_ONLY, RemoteBudgetOutcome.DISABLED, reason_codes
+    return HybridExecutionPath.LOCAL_ONLY, RemoteBudgetOutcome.UNKNOWN, reason_codes
+
+
+def _observed_remote_temperature(
+    *,
+    route_decision: RouteDecision | None,
+    injected: HybridConditionProfile | None,
+) -> RemoteTemperature:
+    if (
+        route_decision is not None
+        and route_decision.selected_deployment is not None
+        and route_decision.selected_deployment.readiness_hints.cold_start_likely
+    ):
+        return RemoteTemperature.COLD
+    if injected is not None:
+        return injected.remote_temperature
+    return RemoteTemperature.UNKNOWN
+
+
+def _observed_network_penalty(route_decision: RouteDecision | None) -> float | None:
+    if route_decision is None or route_decision.selected_deployment is None:
+        return None
+    deployment = route_decision.selected_deployment
+    values = [
+        value
+        for value in (
+            deployment.readiness_hints.estimated_cold_start_ms,
+            deployment.instances[0].network_characteristics.expected_rtt_ms
+            if deployment.instances
+            else None,
+        )
+        if value is not None
+    ]
+    if not values:
+        return None
+    return round(sum(values), 3)
+
+
+def _observed_modeled_cost(route_decision: RouteDecision | None) -> float | None:
+    if (
+        route_decision is None
+        or route_decision.selected_deployment is None
+        or route_decision.selected_deployment.cost_profile.relative_cost_index is None
+    ):
+        return None
+    return float(route_decision.selected_deployment.cost_profile.relative_cost_index)
+
+
+def _maybe_parse_float(raw_value: str | None) -> float | None:
+    if raw_value is None:
+        return None
+    try:
+        return round(float(raw_value), 6)
+    except ValueError:
+        return None
+
+
+def _safe_hybrid_execution_path(raw_value: str | None) -> HybridExecutionPath:
+    if raw_value is None:
+        return HybridExecutionPath.UNKNOWN
+    try:
+        return HybridExecutionPath(raw_value)
+    except ValueError:
+        return HybridExecutionPath.UNKNOWN
+
+
+def _safe_remote_temperature(raw_value: str | None) -> RemoteTemperature:
+    if raw_value is None:
+        return RemoteTemperature.UNKNOWN
+    try:
+        return RemoteTemperature(raw_value)
+    except ValueError:
+        return RemoteTemperature.UNKNOWN
+
+
+def _safe_remote_budget_outcome(raw_value: str | None) -> RemoteBudgetOutcome:
+    if raw_value is None:
+        return RemoteBudgetOutcome.UNKNOWN
+    try:
+        return RemoteBudgetOutcome(raw_value)
+    except ValueError:
+        return RemoteBudgetOutcome.UNKNOWN
+
+
+def _safe_recommendation_confidence(raw_value: str | None) -> RecommendationConfidence | None:
+    if raw_value is None:
+        return None
+    try:
+        return RecommendationConfidence(raw_value)
+    except ValueError:
+        return None
+
+
 async def _run_non_streaming_gateway_request(
     *,
     benchmark_client: httpx.AsyncClient,
@@ -2133,6 +2927,7 @@ async def _run_non_streaming_gateway_request(
     model_alias: str,
     workload_item_id: str | None,
     scenario_family: WorkloadScenarioFamily | None,
+    request_metadata: Mapping[str, str] | None,
     started_at: datetime,
     started_perf: float,
 ) -> BenchmarkRequestRecord:
@@ -2163,6 +2958,12 @@ async def _run_non_streaming_gateway_request(
                 route_decision=route_decision,
                 tenant_id=headers.get("x-switchyard-tenant-id", "default"),
                 session_id=headers.get("x-switchyard-session-id"),
+            ),
+            hybrid_context=_hybrid_context_for_record(
+                metadata=request_metadata,
+                route_decision=route_decision,
+                backend_name="error",
+                routing_policy=RoutingPolicy(headers["x-switchyard-routing-policy"]),
             ),
             success=False,
             status_code=response.status_code,
@@ -2201,6 +3002,12 @@ async def _run_non_streaming_gateway_request(
             tenant_id=headers.get("x-switchyard-tenant-id", "default"),
             session_id=headers.get("x-switchyard-session-id"),
         ),
+        hybrid_context=_hybrid_context_for_record(
+            metadata=request_metadata,
+            route_decision=route_decision,
+            backend_name=response_payload["backend_name"],
+            routing_policy=RoutingPolicy(headers["x-switchyard-routing-policy"]),
+        ),
         cache_observation=CacheObservation(),
         success=True,
         status_code=response.status_code,
@@ -2217,6 +3024,7 @@ async def _run_streaming_gateway_request(
     model_alias: str,
     workload_item_id: str | None,
     scenario_family: WorkloadScenarioFamily | None,
+    request_metadata: Mapping[str, str] | None,
     started_at: datetime,
     started_perf: float,
 ) -> BenchmarkRequestRecord:
@@ -2277,6 +3085,12 @@ async def _run_streaming_gateway_request(
                 tenant_id=headers.get("x-switchyard-tenant-id", "default"),
                 session_id=headers.get("x-switchyard-session-id"),
             ),
+            hybrid_context=_hybrid_context_for_record(
+                metadata=request_metadata,
+                route_decision=route_decision,
+                backend_name=backend_name,
+                routing_policy=RoutingPolicy(headers["x-switchyard-routing-policy"]),
+            ),
             success=False,
             status_code=status_code,
             cache_observation=CacheObservation(),
@@ -2312,6 +3126,12 @@ async def _run_streaming_gateway_request(
             route_decision=route_decision,
             tenant_id=headers.get("x-switchyard-tenant-id", "default"),
             session_id=headers.get("x-switchyard-session-id"),
+        ),
+        hybrid_context=_hybrid_context_for_record(
+            metadata=request_metadata,
+            route_decision=route_decision,
+            backend_name=backend_name,
+            routing_policy=RoutingPolicy(headers["x-switchyard-routing-policy"]),
         ),
         cache_observation=CacheObservation(),
         success=True,
@@ -2498,6 +3318,8 @@ async def _build_http_benchmark_environment(
     ]
     worker_inventory: list[BackendInstance] = []
     remote_worker_snapshot = None
+    hybrid_execution = None
+    remote_workers = None
     topology_capture_source: str | None = None
     capture_metadata = dict(metadata)
     if runtime_inspection_path is not None:
@@ -2507,6 +3329,8 @@ async def _build_http_benchmark_environment(
             runtime_snapshot = RuntimeInspectionResponse.model_validate(runtime_response.json())
             topology.extend(_runtime_topology_endpoints(runtime_snapshot))
             worker_inventory = _runtime_worker_inventory(runtime_snapshot)
+            hybrid_execution = runtime_snapshot.hybrid_execution
+            remote_workers = runtime_snapshot.remote_workers
             remote_worker_snapshot = runtime_snapshot.remote_worker_registry
             topology_capture_source = "gateway_admin_runtime"
             capture_metadata["topology_captured_at"] = runtime_snapshot.captured_at.isoformat()
@@ -2523,6 +3347,8 @@ async def _build_http_benchmark_environment(
         timeout_seconds=timeout_seconds,
         deployed_topology=topology,
         worker_instance_inventory=worker_inventory,
+        hybrid_execution=hybrid_execution,
+        remote_workers=remote_workers,
         remote_worker_snapshot=remote_worker_snapshot,
         control_plane_image=control_plane_image,
         topology_capture_source=topology_capture_source,
@@ -2747,6 +3573,20 @@ def _safe_device_class(
         except ValueError:
             pass
     return _device_class_for_backend_type(backend_type)
+
+
+def _worker_inventory_summary(
+    inventory: list[BackendInstance],
+) -> dict[str, int]:
+    counts = {"local": 0, "remote": 0, "external": 0}
+    for instance in inventory:
+        if instance.execution_mode is ExecutionModeLabel.EXTERNAL_SERVICE:
+            counts["external"] += 1
+        elif instance.execution_mode is ExecutionModeLabel.REMOTE_WORKER:
+            counts["remote"] += 1
+        else:
+            counts["local"] += 1
+    return counts
 
 
 def _average(values: list[float]) -> float:
@@ -3021,6 +3861,7 @@ async def _execute_workload_item(
             model_alias=execution_target.model_alias,
             workload_item_id=item.item_id,
             scenario_family=item.family,
+            request_metadata=item.metadata,
             started_at=started_at,
             started_perf=started_perf,
         )
@@ -3032,6 +3873,7 @@ async def _execute_workload_item(
         model_alias=execution_target.model_alias,
         workload_item_id=item.item_id,
         scenario_family=item.family,
+        request_metadata=item.metadata,
         started_at=started_at,
         started_perf=started_perf,
     )
@@ -3315,7 +4157,11 @@ def _planned_replay_requests(
                 request_features=trace.request_features,
                 policy_reference=trace.policy_reference,
                 topology_reference=trace.topology_reference,
-                metadata={"original_capture_mode": trace.capture_mode.value},
+                hybrid_context=trace.hybrid_context,
+                metadata={
+                    "original_capture_mode": trace.capture_mode.value,
+                    **trace.metadata,
+                },
             )
         )
         previous_timestamp = trace.request_timestamp
@@ -3353,6 +4199,7 @@ async def _execute_one_replay_request(
             model_alias=execution_target.model_alias,
             workload_item_id=None,
             scenario_family=None,
+            request_metadata=replay_request.metadata,
             started_at=started_at,
             started_perf=started_perf,
         )
@@ -3365,6 +4212,7 @@ async def _execute_one_replay_request(
             model_alias=execution_target.model_alias,
             workload_item_id=None,
             scenario_family=None,
+            request_metadata=replay_request.metadata,
             started_at=started_at,
             started_perf=started_perf,
         )
