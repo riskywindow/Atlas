@@ -232,7 +232,11 @@ def summarize_hybrid_execution(
         notes.extend(spillover_runtime.notes)
 
     return HybridExecutionRuntimeSummary(
-        enabled=settings.phase7.hybrid_execution.enabled,
+        enabled=(
+            settings.phase7.hybrid_execution.enabled
+            if spillover_runtime is None
+            else spillover_runtime.enabled
+        ),
         prefer_local=settings.phase7.hybrid_execution.prefer_local,
         spillover_enabled=settings.phase7.hybrid_execution.spillover_enabled,
         require_healthy_local_backends=(
@@ -277,6 +281,12 @@ def summarize_hybrid_execution(
         ),
         cooldown_active=False if spillover_runtime is None else spillover_runtime.cooldown_active,
         cooldown_until=None if spillover_runtime is None else spillover_runtime.cooldown_until,
+        remote_policy_eligible=(
+            [] if spillover_runtime is None else spillover_runtime.remote_policy_eligible
+        ),
+        remote_policy_ineligible=(
+            [] if spillover_runtime is None else spillover_runtime.remote_policy_ineligible
+        ),
         notes=notes,
     )
 

@@ -137,3 +137,33 @@ def test_spillover_budget_window_recovers_after_one_minute() -> None:
         remote_candidates=remote_candidates,
     )
     assert recovered.allowed is True
+
+
+def test_spillover_runtime_controls_support_operator_disable_and_budget_reset() -> None:
+    service = RemoteSpilloverControlService(
+        HybridExecutionSettings(
+            enabled=True,
+            spillover_enabled=True,
+            remote_request_budget_per_minute=2,
+        )
+    )
+    context = build_context()
+    remote_candidates = [build_remote_snapshot()]
+
+    permit = service.acquire_remote_permit(
+        context=context,
+        backend_name="remote-a",
+        remote_candidates=remote_candidates,
+    )
+    service.release_remote_permit(permit)
+    service.set_remote_enabled(False, reason="operator stop")
+
+    blocked = service.evaluate_local_admission_failure(
+        context=context,
+        remote_candidates=remote_candidates,
+    )
+    assert blocked.allowed is False
+
+    reset = service.reset_budget_window()
+    assert reset.remote_budget_requests_used == 0
+    assert "burst_to_remote" in reset.remote_policy_eligible

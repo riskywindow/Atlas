@@ -91,10 +91,26 @@ class RemoteSpilloverControlService:
         self._budget_requests_used = 0
         self._remote_in_flight_requests = 0
         self._cooldown_until: datetime | None = None
+        self._remote_enabled_override: bool | None = None
 
     @property
     def enabled(self) -> bool:
-        return self._settings.enabled
+        if self._remote_enabled_override is None:
+            return self._settings.enabled
+        return self._remote_enabled_override
+
+    @property
+    def remote_enabled_override(self) -> bool | None:
+        return self._remote_enabled_override
+
+    def set_remote_enabled(self, enabled: bool, *, reason: str | None = None) -> None:
+        del reason
+        self._remote_enabled_override = enabled
+
+    def reset_budget_window(self) -> HybridExecutionRuntimeSummary:
+        self._budget_window_started_at = self._clock.now()
+        self._budget_requests_used = 0
+        return self.inspect_state()
 
     def remote_policy_enabled(self, policy: RoutingPolicy) -> bool:
         if policy in {RoutingPolicy.LOCAL_ONLY, RoutingPolicy.REMOTE_DISABLED}:
@@ -223,10 +239,14 @@ class RemoteSpilloverControlService:
         notes: list[str] = []
         if self._settings.remote_kill_switch_enabled:
             notes.append("remote spillover kill switch is active")
+        if self._remote_enabled_override is False:
+            notes.append("remote spillover is operator-disabled")
+        elif self._remote_enabled_override is True and not self._settings.enabled:
+            notes.append("remote spillover is operator-enabled despite config default")
         if cooldown_active:
             notes.append("remote spillover cooldown is active after recent instability")
         return HybridExecutionRuntimeSummary(
-            enabled=self._settings.enabled,
+            enabled=self.enabled,
             prefer_local=self._settings.prefer_local,
             spillover_enabled=self._settings.spillover_enabled,
             require_healthy_local_backends=self._settings.require_healthy_local_backends,
@@ -246,6 +266,16 @@ class RemoteSpilloverControlService:
             remote_in_flight_requests=self._remote_in_flight_requests,
             cooldown_active=cooldown_active,
             cooldown_until=self._cooldown_until if cooldown_active else None,
+            remote_policy_eligible=sorted(
+                policy.value
+                for policy in RoutingPolicy
+                if self.remote_policy_enabled(policy)
+            ),
+            remote_policy_ineligible=sorted(
+                policy.value
+                for policy in RoutingPolicy
+                if not self.remote_policy_enabled(policy)
+            ),
             notes=notes,
         )
 

@@ -29,9 +29,14 @@ from switchyard.logging import bind_request_context, get_logger
 from switchyard.router.features import routing_feature_runtime_summary
 from switchyard.schemas.admin import (
     DeploymentDiagnosticsResponse,
+    HybridBudgetResetResponse,
+    HybridOperatorRuntimeSummary,
+    HybridRemoteToggleRequest,
+    HybridRouteExample,
     PolicyRolloutRuntimeSummary,
     PolicyRolloutStateSnapshot,
     PolicyRolloutUpdateRequest,
+    RemoteWorkerOperatorRequest,
     RuntimeInspectionResponse,
 )
 from switchyard.schemas.backend import BackendHealthState, BackendStatusSnapshot
@@ -138,6 +143,9 @@ async def admin_runtime(
             runtime_backends=runtime_backends,
             spillover_runtime=services.spillover.inspect_state(),
         ),
+        hybrid_operator=services.operator.inspect_state(
+            remote_effectively_enabled=services.spillover.enabled
+        ),
         remote_workers=summarize_remote_worker_lifecycle(
             settings=services.settings,
             runtime_backends=runtime_backends,
@@ -216,6 +224,107 @@ async def admin_remote_workers(
     """Return the dynamic remote worker registration snapshot."""
 
     return services.remote_workers.snapshot()
+
+
+@router.get("/admin/hybrid", response_model=HybridOperatorRuntimeSummary)
+async def admin_hybrid(
+    services: GatewayServices = Depends(get_services),
+) -> HybridOperatorRuntimeSummary:
+    """Return recent operator-facing hybrid routing state."""
+
+    return services.operator.inspect_state(
+        remote_effectively_enabled=services.spillover.enabled
+    )
+
+
+@router.post("/admin/hybrid/remote-enabled", response_model=HybridOperatorRuntimeSummary)
+async def update_hybrid_remote_enabled(
+    update: HybridRemoteToggleRequest,
+    services: GatewayServices = Depends(get_services),
+) -> HybridOperatorRuntimeSummary:
+    """Enable or disable remote hybrid routing at runtime."""
+
+    services.spillover.set_remote_enabled(update.enabled, reason=update.reason)
+    services.operator.set_remote_enabled_override(update.enabled)
+    return services.operator.inspect_state(
+        remote_effectively_enabled=services.spillover.enabled
+    )
+
+
+@router.post("/admin/hybrid/budget/reset", response_model=HybridBudgetResetResponse)
+async def reset_hybrid_budget(
+    services: GatewayServices = Depends(get_services),
+) -> HybridBudgetResetResponse:
+    """Reset the active remote budget window."""
+
+    state = services.spillover.reset_budget_window()
+    return HybridBudgetResetResponse(
+        budget_window_started_at=state.remote_budget_window_started_at or datetime.now(UTC),
+        remote_budget_requests_used=state.remote_budget_requests_used,
+        remote_budget_requests_remaining=state.remote_budget_requests_remaining,
+        notes=state.notes,
+    )
+
+
+@router.get("/admin/hybrid/routes", response_model=list[HybridRouteExample])
+async def admin_hybrid_routes(
+    services: GatewayServices = Depends(get_services),
+) -> list[HybridRouteExample]:
+    """Return recent operator-facing hybrid route examples wrapped for consistency."""
+
+    return services.operator.inspect_state(
+        remote_effectively_enabled=services.spillover.enabled
+    ).recent_route_examples
+
+
+@router.post(
+    "/admin/remote-workers/{worker_id}/drain",
+    response_model=RemoteWorkerRegistrationResponse,
+)
+async def drain_remote_worker(
+    worker_id: str,
+    update: RemoteWorkerOperatorRequest,
+    services: GatewayServices = Depends(get_services),
+) -> RemoteWorkerRegistrationResponse:
+    """Mark a registered remote worker as draining."""
+
+    return services.remote_workers.mark_draining(worker_id, reason=update.reason)
+
+
+@router.post(
+    "/admin/remote-workers/{worker_id}/quarantine",
+    response_model=RemoteWorkerRegistrationResponse,
+)
+async def quarantine_remote_worker(
+    worker_id: str,
+    update: RemoteWorkerOperatorRequest,
+    services: GatewayServices = Depends(get_services),
+) -> RemoteWorkerRegistrationResponse:
+    """Mark or clear quarantine for a registered remote worker."""
+
+    return services.remote_workers.set_quarantined(
+        worker_id,
+        enabled=update.enabled,
+        reason=update.reason,
+    )
+
+
+@router.post(
+    "/admin/remote-workers/{worker_id}/canary-only",
+    response_model=RemoteWorkerRegistrationResponse,
+)
+async def canary_only_remote_worker(
+    worker_id: str,
+    update: RemoteWorkerOperatorRequest,
+    services: GatewayServices = Depends(get_services),
+) -> RemoteWorkerRegistrationResponse:
+    """Mark or clear canary-only posture for a registered remote worker."""
+
+    return services.remote_workers.set_canary_only(
+        worker_id,
+        enabled=update.enabled,
+        reason=update.reason,
+    )
 
 
 @router.post(
@@ -692,6 +801,12 @@ async def _stream_chat_completion(
                 )
                 if remote_permit is not None:
                     services.spillover.record_remote_instability()
+                    services.operator.record_remote_transport_error(
+                        request_id=context.request_id,
+                        backend_name=backend_name,
+                        error=str(exc),
+                        cooldown_triggered=services.spillover.inspect_state().cooldown_active,
+                    )
                 continue
 
             _append_execution_event(
@@ -961,6 +1076,12 @@ async def _generate_with_fallback(
                 )
                 if remote_permit is not None:
                     services.spillover.record_remote_instability()
+                    services.operator.record_remote_transport_error(
+                        request_id=context.request_id,
+                        backend_name=backend_name,
+                        error=str(exc),
+                        cooldown_triggered=services.spillover.inspect_state().cooldown_active,
+                    )
                 continue
 
             _append_execution_event(
@@ -1136,6 +1257,18 @@ def _record_execution_observation(
         status_code=status_code,
         error_category=error_category,
         final_outcome=final_outcome,
+    )
+    remote_candidate_count = sum(
+        1
+        for candidate in decision.considered_backends
+        if candidate.startswith("remote-worker:")
+    )
+    services.operator.record_route_example(
+        decision=decision,
+        executed_backend=executed_backend,
+        remote_candidate_count=remote_candidate_count,
+        final_outcome=final_outcome,
+        fallback_used=executed_backend is not None and executed_backend != decision.backend_name,
     )
     if (
         final_outcome == "succeeded"

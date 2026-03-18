@@ -101,7 +101,100 @@ class HybridExecutionRuntimeSummary(BaseModel):
     remote_in_flight_requests: int = Field(default=0, ge=0)
     cooldown_active: bool = False
     cooldown_until: datetime | None = None
+    remote_policy_eligible: list[str] = Field(default_factory=list)
+    remote_policy_ineligible: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+
+
+class HybridRemoteToggleRequest(BaseModel):
+    """Mutable operator request for remote enable/disable posture."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    reason: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+class HybridBudgetResetResponse(BaseModel):
+    """Result of resetting the current remote budget window."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    budget_window_started_at: datetime
+    remote_budget_requests_used: int = Field(ge=0)
+    remote_budget_requests_remaining: int | None = Field(default=None, ge=0)
+    notes: list[str] = Field(default_factory=list)
+
+
+class HybridRouteExample(BaseModel):
+    """Recent operator-facing route example for hybrid placement decisions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=128)
+    recorded_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    policy: str = Field(min_length=1, max_length=64)
+    tenant_id: str = Field(min_length=1, max_length=128)
+    chosen_backend: str = Field(min_length=1, max_length=128)
+    executed_backend: str | None = Field(default=None, min_length=1, max_length=128)
+    execution_path: str = Field(min_length=1, max_length=64)
+    fallback_used: bool = False
+    final_outcome: str | None = Field(default=None, min_length=1, max_length=128)
+    route_reason_codes: list[str] = Field(default_factory=list)
+    admission_reason_code: str | None = Field(default=None, min_length=1, max_length=128)
+    remote_candidate_count: int = Field(default=0, ge=0)
+    notes: list[str] = Field(default_factory=list)
+
+
+class PlacementDistributionRuntimeSummary(BaseModel):
+    """Recent local-vs-remote placement distribution for operator inspection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sample_size: int = Field(default=0, ge=0)
+    local_count: int = Field(default=0, ge=0)
+    remote_count: int = Field(default=0, ge=0)
+    remote_blocked_count: int = Field(default=0, ge=0)
+    unknown_count: int = Field(default=0, ge=0)
+
+
+class RemoteTransportErrorRuntimeEntry(BaseModel):
+    """Bounded recent remote transport error entry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recorded_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    request_id: str = Field(min_length=1, max_length=128)
+    backend_name: str = Field(min_length=1, max_length=128)
+    error: str = Field(min_length=1, max_length=512)
+    cooldown_triggered: bool = False
+
+
+class HybridOperatorRuntimeSummary(BaseModel):
+    """Operator-facing recent hybrid-routing decisions and controls."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    remote_enabled_override: bool | None = None
+    remote_effectively_enabled: bool = True
+    recent_route_examples: list[HybridRouteExample] = Field(default_factory=list)
+    recent_route_example_count: int = Field(default=0, ge=0)
+    recent_placement_distribution: PlacementDistributionRuntimeSummary = Field(
+        default_factory=PlacementDistributionRuntimeSummary
+    )
+    recent_remote_transport_errors: list[RemoteTransportErrorRuntimeEntry] = Field(
+        default_factory=list
+    )
+    notes: list[str] = Field(default_factory=list)
+
+
+class RemoteWorkerOperatorRequest(BaseModel):
+    """Operator request to mutate remote worker posture."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = Field(default=None, min_length=1, max_length=256)
+    enabled: bool = True
 
 
 class RemoteWorkerLifecycleRuntimeSummary(BaseModel):
@@ -326,6 +419,9 @@ class RuntimeInspectionResponse(BaseModel):
     policy_rollout: PolicyRolloutRuntimeSummary
     session_affinity: SessionAffinityRuntimeSummary
     hybrid_execution: HybridExecutionRuntimeSummary
+    hybrid_operator: HybridOperatorRuntimeSummary = Field(
+        default_factory=HybridOperatorRuntimeSummary
+    )
     remote_workers: RemoteWorkerLifecycleRuntimeSummary
     remote_worker_registry: RegisteredRemoteWorkerSnapshot | None = None
     routing_features: RoutingFeatureRuntimeSummary

@@ -16,6 +16,7 @@ from switchyard.control.affinity import SessionAffinityService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
 from switchyard.control.locality import PrefixLocalityService
+from switchyard.control.operator import HybridOperatorService
 from switchyard.control.policy_rollout import PolicyRolloutService
 from switchyard.control.remote_workers import RemoteWorkerRegistryService
 from switchyard.control.shadow import ShadowTrafficService
@@ -39,6 +40,7 @@ class GatewayServices:
     circuit_breaker: CircuitBreakerService
     session_affinity: SessionAffinityService
     prefix_locality: PrefixLocalityService
+    operator: HybridOperatorService
     canary: CanaryRoutingService
     shadow: ShadowTrafficService
     policy_rollout: PolicyRolloutService

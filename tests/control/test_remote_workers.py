@@ -188,6 +188,31 @@ def test_remote_worker_registry_supports_graceful_drain_and_retire() -> None:
     assert retired.live is False
 
 
+def test_remote_worker_registry_supports_operator_quarantine_and_canary_only() -> None:
+    service = RemoteWorkerRegistryService(
+        RemoteWorkerLifecycleSettings(dynamic_registration_enabled=True)
+    )
+    service.register(_registration_request(), token=None)
+
+    quarantined = service.set_quarantined(
+        "worker-1",
+        enabled=True,
+        reason="transport failures",
+    )
+    assert quarantined.lifecycle_state is WorkerLifecycleState.UNHEALTHY
+    snapshot = service.snapshot()
+    assert "quarantined" in snapshot.workers[0].instance.tags
+
+    canary_only = service.set_canary_only(
+        "worker-1",
+        enabled=True,
+        reason="operator canary bucket",
+    )
+    assert canary_only.worker_id == "worker-1"
+    snapshot = service.snapshot()
+    assert "canary-only" in snapshot.workers[0].instance.tags
+
+
 def test_remote_worker_registry_requires_valid_static_token_and_lease_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

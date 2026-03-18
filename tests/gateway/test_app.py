@@ -1131,8 +1131,17 @@ async def test_chat_completions_can_spill_to_remote_when_local_admission_is_full
 
     assert first_response.status_code == 200
     assert second_response.status_code == 200
-    assert second_response.json()["choices"][0]["message"]["content"] == "remote:mock-remote"
-    admission_header = json.loads(second_response.headers["x-switchyard-admission-decision"])
+    response_contents = {
+        first_response.json()["choices"][0]["message"]["content"],
+        second_response.json()["choices"][0]["message"]["content"],
+    }
+    assert response_contents == {"local:mock-local", "remote:mock-remote"}
+    spillover_response = next(
+        response
+        for response in (first_response, second_response)
+        if response.json()["choices"][0]["message"]["content"] == "remote:mock-remote"
+    )
+    admission_header = json.loads(spillover_response.headers["x-switchyard-admission-decision"])
     assert admission_header["state"] == "bypassed"
     assert admission_header["reason_code"] == "local_admission_spillover_eligible"
 
@@ -2218,6 +2227,16 @@ def test_admin_runtime_endpoint_reports_phase4_runtime_state() -> None:
     assert payload["session_affinity"]["bindings_by_target"] == {}
     assert payload["hybrid_execution"]["enabled"] is False
     assert payload["hybrid_execution"]["local_capable_backends"] == 2
+    assert "local_preferred" in payload["hybrid_execution"]["remote_policy_eligible"]
+    assert "remote_disabled" in payload["hybrid_execution"]["remote_policy_ineligible"]
+    assert payload["hybrid_operator"]["remote_effectively_enabled"] is False
+    assert payload["hybrid_operator"]["recent_route_example_count"] == 1
+    assert payload["hybrid_operator"]["recent_placement_distribution"]["local_count"] == 1
+    assert (
+        payload["hybrid_operator"]["recent_route_examples"][0]["request_id"]
+        == "req-admin-runtime"
+    )
+    assert payload["hybrid_operator"]["recent_route_examples"][0]["execution_path"] == "local"
     assert payload["remote_workers"]["heartbeat_timeout_seconds"] == 30.0
     assert payload["routing_features"]["feature_version"] == "phase6.v2"
     assert "repeated_prefix" in payload["routing_features"]["workload_tags"]

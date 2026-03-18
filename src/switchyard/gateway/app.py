@@ -20,6 +20,7 @@ from switchyard.control.affinity import SessionAffinityService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
 from switchyard.control.locality import PrefixLocalityService
+from switchyard.control.operator import HybridOperatorService
 from switchyard.control.policy_rollout import PolicyRolloutService
 from switchyard.control.remote_workers import (
     RemoteWorkerRegistrationError,
@@ -68,6 +69,7 @@ def create_app(
         resolved_settings.phase4.session_affinity
     )
     resolved_prefix_locality = prefix_locality or PrefixLocalityService()
+    resolved_operator = HybridOperatorService()
     resolved_canary = CanaryRoutingService(resolved_settings.phase4.canary_routing)
     resolved_shadow = ShadowTrafficService(resolved_settings.phase4.shadow_routing)
     resolved_remote_workers = RemoteWorkerRegistryService(
@@ -103,6 +105,7 @@ def create_app(
         circuit_breaker=resolved_circuit_breaker,
         session_affinity=resolved_session_affinity,
         prefix_locality=resolved_prefix_locality,
+        operator=resolved_operator,
         canary=resolved_canary,
         shadow=resolved_shadow,
         policy_rollout=resolved_policy_rollout,

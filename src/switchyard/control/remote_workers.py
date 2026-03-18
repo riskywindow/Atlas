@@ -52,6 +52,7 @@ class _RegisteredWorkerState:
     heartbeat_count: int
     health: BackendHealth | None
     metadata: dict[str, str]
+    operator_tags: set[str]
     enrollment_verified: bool
     lease_token: str
 
@@ -100,6 +101,7 @@ class RemoteWorkerRegistryService:
             heartbeat_count=1,
             health=request.health.model_copy(deep=True) if request.health is not None else None,
             metadata=dict(request.metadata),
+            operator_tags=set(),
             enrollment_verified=enrollment_verified,
             lease_token=lease_token,
         )
@@ -230,6 +232,83 @@ class RemoteWorkerRegistryService:
             remaining_worker_count=len(self._workers),
         )
 
+    def mark_draining(
+        self,
+        worker_id: str,
+        *,
+        reason: str | None = None,
+    ) -> RemoteWorkerRegistrationResponse:
+        state = self._require_worker(worker_id)
+        state.lifecycle_state = WorkerLifecycleState.DRAINING
+        state.ready = False
+        self._record_event(
+            RemoteWorkerLifecycleEventType.STATE_CHANGED,
+            worker_id=worker_id,
+            lifecycle_state=state.lifecycle_state,
+            detail=reason or "operator marked worker draining",
+        )
+        return self._response_for(state)
+
+    def set_quarantined(
+        self,
+        worker_id: str,
+        *,
+        enabled: bool,
+        reason: str | None = None,
+    ) -> RemoteWorkerRegistrationResponse:
+        state = self._require_worker(worker_id)
+        if enabled:
+            state.operator_tags.add("quarantined")
+            state.lifecycle_state = WorkerLifecycleState.UNHEALTHY
+            state.ready = False
+        else:
+            state.operator_tags.discard("quarantined")
+            if state.lifecycle_state is WorkerLifecycleState.UNHEALTHY:
+                state.lifecycle_state = self._normalize_lifecycle_state(
+                    WorkerLifecycleState.WARMING,
+                    ready=state.ready,
+                    health=state.health,
+                )
+        self._record_event(
+            RemoteWorkerLifecycleEventType.STATE_CHANGED,
+            worker_id=worker_id,
+            lifecycle_state=state.lifecycle_state,
+            detail=reason
+            or (
+                "operator quarantined worker"
+                if enabled
+                else "operator cleared quarantine"
+            ),
+            metadata={"tag": "quarantined", "enabled": str(enabled).lower()},
+        )
+        return self._response_for(state)
+
+    def set_canary_only(
+        self,
+        worker_id: str,
+        *,
+        enabled: bool,
+        reason: str | None = None,
+    ) -> RemoteWorkerRegistrationResponse:
+        state = self._require_worker(worker_id)
+        if enabled:
+            state.operator_tags.add("canary-only")
+        else:
+            state.operator_tags.discard("canary-only")
+        self._record_event(
+            RemoteWorkerLifecycleEventType.STATE_CHANGED,
+            worker_id=worker_id,
+            lifecycle_state=state.lifecycle_state,
+            detail=reason
+            or (
+                "operator marked worker canary-only"
+                if enabled
+                else "operator cleared canary-only"
+            ),
+            metadata={"tag": "canary-only", "enabled": str(enabled).lower()},
+        )
+        return self._response_for(state)
+
     def snapshot(self) -> RegisteredRemoteWorkerSnapshot:
         now = self._now()
         workers = [
@@ -350,6 +429,7 @@ class RemoteWorkerRegistryService:
                 "ready": str(ready).lower(),
             },
         )
+        instance.tags = sorted(set(instance.tags) | state.operator_tags)
         return RegisteredRemoteWorkerRecord(
             worker_id=worker_id,
             worker_name=request.worker_name,

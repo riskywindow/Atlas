@@ -2,18 +2,31 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, tzinfo
 
+import httpx
 import pytest
+from fastapi import FastAPI, Response
 from fastapi.testclient import TestClient
 
+from switchyard.adapters.registry import AdapterRegistry
+from switchyard.adapters.remote_worker import RemoteWorkerAdapter
 from switchyard.config import (
+    AppEnvironment,
+    BackendInstanceConfig,
+    GenerationDefaults,
+    HybridExecutionSettings,
+    LocalModelConfig,
     Phase7ControlPlaneSettings,
     RemoteWorkerLifecycleSettings,
     Settings,
+    WarmupSettings,
 )
 from switchyard.control.remote_workers import build_signed_enrollment_token
 from switchyard.gateway.app import create_app
 from switchyard.schemas.backend import (
     BackendCapabilities,
+    BackendHealth,
+    BackendHealthState,
+    BackendLoadState,
     BackendNetworkEndpoint,
     BackendType,
     DeviceClass,
@@ -21,6 +34,7 @@ from switchyard.schemas.backend import (
     WorkerLifecycleState,
     WorkerTransportType,
 )
+from switchyard.schemas.routing import RoutingPolicy
 from switchyard.schemas.worker import RemoteWorkerAuthMode, RemoteWorkerRegistrationRequest
 
 
@@ -66,6 +80,86 @@ def _registration_payload() -> dict[str, object]:
         "ready": False,
         "tags": ["remote", "gpu"],
     }
+
+
+def _remote_model_config() -> LocalModelConfig:
+    return LocalModelConfig(
+        alias="remote-chat",
+        serving_target="chat-shared",
+        model_identifier="mock-chat",
+        backend_type=BackendType.MOCK,
+        worker_transport=WorkerTransportType.HTTP,
+        instances=(
+            BackendInstanceConfig(
+                instance_id="worker-1",
+                base_url="http://worker.internal",
+                transport=WorkerTransportType.HTTP,
+            ),
+        ),
+        generation_defaults=GenerationDefaults(),
+        warmup=WarmupSettings(),
+    )
+
+
+def _worker_app(*, failing_generate: bool = False) -> FastAPI:
+    app = FastAPI()
+    health = BackendHealth(
+        state=BackendHealthState.HEALTHY,
+        load_state=BackendLoadState.READY,
+        warmed_models=["chat-shared"],
+    )
+    capabilities = BackendCapabilities(
+        backend_type=BackendType.MOCK,
+        engine_type=EngineType.MOCK,
+        device_class=DeviceClass.REMOTE,
+        model_ids=["chat-shared", "mock-chat"],
+        serving_targets=["chat-shared"],
+        max_context_tokens=8192,
+        supports_streaming=False,
+        concurrency_limit=2,
+    )
+
+    @app.get("/healthz")
+    async def healthz() -> dict[str, object]:
+        return {"worker_name": "worker-1", "health": health.model_dump(mode="json")}
+
+    @app.get("/internal/worker/ready")
+    async def ready() -> dict[str, object]:
+        return {
+            "worker_name": "worker-1",
+            "ready": True,
+            "health": health.model_dump(mode="json"),
+        }
+
+    @app.get("/internal/worker/capabilities")
+    async def worker_capabilities() -> dict[str, object]:
+        return {
+            "worker_name": "worker-1",
+            "backend_type": BackendType.MOCK.value,
+            "capabilities": capabilities.model_dump(mode="json"),
+        }
+
+    @app.post("/internal/worker/generate")
+    async def generate() -> Response:
+        if failing_generate:
+            return Response(
+                content='{"detail":"remote transport failed"}',
+                status_code=503,
+                media_type="application/json",
+            )
+        return Response(
+            content=(
+                '{"worker_name":"worker-1","response":{"id":"remote-1","object":"chat.completion",'
+                '"created_at":"2026-03-17T00:00:00Z","model":"chat-shared",'
+                '"choices":[{"index":0,"message":{"role":"assistant","content":"remote ok"},'
+                '"finish_reason":"stop"}],'
+                '"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5},'
+                '"backend_name":"worker-1"}}'
+            ),
+            media_type="application/json",
+        )
+
+    return app
 
 
 def test_remote_worker_admin_endpoints_track_lifecycle_and_cleanup(
@@ -198,6 +292,137 @@ def test_remote_worker_admin_supports_graceful_deregister() -> None:
     assert retire.status_code == 200
     assert retire.json()["lifecycle_state"] == "retired"
     assert retire.json()["live"] is False
+
+
+def test_remote_worker_admin_operator_controls_mutate_worker_posture() -> None:
+    client = _app(
+        remote_worker_settings=RemoteWorkerLifecycleSettings(
+            dynamic_registration_enabled=True,
+        )
+    )
+    register = client.post(
+        "/internal/control-plane/remote-workers/register",
+        json=_registration_payload(),
+    )
+    assert register.status_code == 200
+
+    drain = client.post(
+        "/admin/remote-workers/worker-1/drain",
+        json={"reason": "rotate node"},
+    )
+    assert drain.status_code == 200
+    assert drain.json()["lifecycle_state"] == "draining"
+
+    quarantine = client.post(
+        "/admin/remote-workers/worker-1/quarantine",
+        json={"enabled": True, "reason": "transport instability"},
+    )
+    assert quarantine.status_code == 200
+    assert quarantine.json()["lifecycle_state"] == "unhealthy"
+
+    canary_only = client.post(
+        "/admin/remote-workers/worker-1/canary-only",
+        json={"enabled": True, "reason": "limit blast radius"},
+    )
+    assert canary_only.status_code == 200
+
+    snapshot = client.get("/admin/remote-workers")
+    assert snapshot.status_code == 200
+    tags = snapshot.json()["workers"][0]["instance"]["tags"]
+    assert "quarantined" in tags
+    assert "canary-only" in tags
+
+
+@pytest.mark.asyncio
+async def test_admin_hybrid_endpoints_expose_remote_controls_and_transport_errors() -> None:
+    worker_app = _worker_app(failing_generate=True)
+    worker_client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=worker_app),
+        base_url="http://worker.internal",
+    )
+    registry = AdapterRegistry()
+    registry.register(RemoteWorkerAdapter(_remote_model_config(), client=worker_client))
+    app = create_app(
+        registry=registry,
+        settings=Settings(
+            env=AppEnvironment.TEST,
+            log_level="INFO",
+            local_models=(_remote_model_config(),),
+            default_routing_policy=RoutingPolicy.BURST_TO_REMOTE,
+            phase7=Phase7ControlPlaneSettings(
+                hybrid_execution=HybridExecutionSettings(
+                    enabled=True,
+                    spillover_enabled=True,
+                    remote_request_budget_per_minute=2,
+                ),
+                remote_workers=RemoteWorkerLifecycleSettings(
+                    dynamic_registration_enabled=True,
+                ),
+            ),
+        )
+    )
+    gateway_client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    )
+
+    try:
+        failure = await gateway_client.post(
+            "/v1/chat/completions",
+            headers={
+                "x-request-id": "req-remote-failure",
+                "x-switchyard-routing-policy": "burst_to_remote",
+            },
+            json={
+                "model": "chat-shared",
+                "messages": [{"role": "user", "content": "force remote"}],
+            },
+        )
+        hybrid = await gateway_client.get("/admin/hybrid")
+        routes = await gateway_client.get("/admin/hybrid/routes")
+        disabled = await gateway_client.post(
+            "/admin/hybrid/remote-enabled",
+            json={"enabled": False, "reason": "incident response"},
+        )
+        reset = await gateway_client.post("/admin/hybrid/budget/reset")
+        runtime = await gateway_client.get("/admin/runtime")
+    finally:
+        await gateway_client.aclose()
+        await worker_client.aclose()
+
+    assert failure.status_code == 503
+    assert hybrid.status_code == 200
+    hybrid_payload = hybrid.json()
+    assert hybrid_payload["recent_route_example_count"] == 1
+    assert hybrid_payload["recent_placement_distribution"]["remote_count"] == 1
+    assert hybrid_payload["recent_route_examples"][0]["request_id"] == "req-remote-failure"
+    assert hybrid_payload["recent_route_examples"][0]["execution_path"] == "remote"
+    assert hybrid_payload["recent_route_examples"][0]["remote_candidate_count"] == 1
+    assert hybrid_payload["recent_remote_transport_errors"][0]["request_id"] == "req-remote-failure"
+    assert hybrid_payload["recent_remote_transport_errors"][0]["cooldown_triggered"] is False
+
+    assert routes.status_code == 200
+    assert routes.json()[0]["request_id"] == "req-remote-failure"
+
+    assert disabled.status_code == 200
+    assert disabled.json()["remote_enabled_override"] is False
+    assert disabled.json()["remote_effectively_enabled"] is False
+
+    assert reset.status_code == 200
+    assert reset.json()["remote_budget_requests_used"] == 0
+    assert reset.json()["remote_budget_requests_remaining"] == 2
+
+    assert runtime.status_code == 200
+    runtime_payload = runtime.json()
+    assert runtime_payload["hybrid_execution"]["enabled"] is False
+    assert runtime_payload["hybrid_execution"]["remote_budget_requests_used"] == 0
+    assert runtime_payload["hybrid_operator"]["remote_enabled_override"] is False
+    assert (
+        runtime_payload["hybrid_operator"]["recent_remote_transport_errors"][0][
+            "backend_name"
+        ]
+        == "remote-worker:remote-chat"
+    )
 
 
 def test_remote_worker_registration_returns_400_for_invalid_token(
