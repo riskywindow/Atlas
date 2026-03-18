@@ -7,7 +7,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from switchyard.schemas.backend import BackendDeployment, EngineType
+from switchyard.schemas.backend import BackendDeployment, EngineType, TopologySchemaVersion
 
 
 class RoutingPolicy(StrEnum):
@@ -395,6 +395,7 @@ class TopologySnapshotReference(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    topology_schema_version: TopologySchemaVersion = TopologySchemaVersion.V1
     topology_snapshot_id: str = Field(min_length=1, max_length=128)
     capture_source: str = Field(min_length=1, max_length=128)
     captured_at: datetime | None = None

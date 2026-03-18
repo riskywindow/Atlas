@@ -147,6 +147,54 @@ def test_settings_load_phase4_control_plane_config(monkeypatch: MonkeyPatch) -> 
     assert settings.phase4.feature_toggles.canary_routing_enabled is True
 
 
+def test_settings_load_phase7_hybrid_and_remote_worker_config(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "SWITCHYARD_PHASE7",
+        (
+            '{"hybrid_execution":{"enabled":true,"prefer_local":true,'
+            '"spillover_enabled":true,"require_healthy_local_backends":true,'
+            '"max_remote_share_percent":20.0,"remote_request_budget_per_minute":180,'
+            '"allowed_remote_environments":["staging","prod-remote"]},'
+            '"remote_workers":{"secure_registration_required":true,'
+            '"dynamic_registration_enabled":true,"heartbeat_timeout_seconds":45.0,'
+            '"registration_token_name":"SWITCHYARD_WORKER_TOKEN","allow_static_instances":false}}'
+        ),
+    )
+
+    settings = Settings()
+
+    assert settings.phase7.hybrid_execution.enabled is True
+    assert settings.phase7.hybrid_execution.spillover_enabled is True
+    assert settings.phase7.hybrid_execution.max_remote_share_percent == 20.0
+    assert settings.phase7.hybrid_execution.allowed_remote_environments == (
+        "staging",
+        "prod-remote",
+    )
+    assert settings.phase7.remote_workers.secure_registration_required is True
+    assert settings.phase7.remote_workers.dynamic_registration_enabled is True
+    assert settings.phase7.remote_workers.heartbeat_timeout_seconds == 45.0
+    assert settings.phase7.remote_workers.registration_token_name == "SWITCHYARD_WORKER_TOKEN"
+    assert settings.phase7.remote_workers.allow_static_instances is False
+
+
+def test_settings_reject_duplicate_phase7_remote_environments(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "SWITCHYARD_PHASE7",
+        '{"hybrid_execution":{"allowed_remote_environments":["prod","prod"]}}',
+    )
+
+    try:
+        Settings()
+    except ValidationError as exc:
+        assert "allowed_remote_environments" in str(exc)
+    else:
+        raise AssertionError("Settings should reject duplicate Phase 7 remote environments")
+
+
 def test_settings_reject_duplicate_phase4_tenant_limits(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setenv(
         "SWITCHYARD_PHASE4",

@@ -88,6 +88,7 @@ class MLXLMAdapter(BackendAdapter):
             quality_tier=4,
             quality_hint=QualityHint.PREMIUM,
             performance_hint=PerformanceHint.BALANCED,
+            execution_mode=self.model_config.execution_mode,
             model_aliases={
                 self.model_config.serving_target or self.model_config.alias: (
                     self.model_config.model_identifier
@@ -95,6 +96,13 @@ class MLXLMAdapter(BackendAdapter):
             },
             default_model=self.model_config.serving_target or self.model_config.alias,
             warmup_required=self.model_config.warmup.enabled,
+            placement=self.model_config.placement.model_copy(deep=True),
+            cost_profile=self.model_config.cost_profile.model_copy(deep=True),
+            readiness_hints=self.model_config.readiness_hints.model_copy(deep=True),
+            trust=self.model_config.trust.model_copy(deep=True),
+            network_characteristics=self.model_config.network_characteristics.model_copy(
+                deep=True
+            ),
         )
 
     async def status(self) -> BackendStatusSnapshot:
@@ -111,7 +119,11 @@ class MLXLMAdapter(BackendAdapter):
                 configured_priority=self.model_config.configured_priority,
                 configured_weight=self.model_config.configured_weight,
                 deployment_profile=self.model_config.deployment_profile,
+                execution_mode=self.model_config.execution_mode,
                 environment=self.model_config.environment,
+                placement=self.model_config.placement.model_copy(deep=True),
+                cost_profile=self.model_config.cost_profile.model_copy(deep=True),
+                readiness_hints=self.model_config.readiness_hints.model_copy(deep=True),
                 build_metadata=BackendImageMetadata(
                     image_tag=self.model_config.image_tag,
                     build_metadata=dict(self.model_config.build_metadata),

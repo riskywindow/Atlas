@@ -28,6 +28,12 @@ class BackendRuntimeSummary(BaseModel):
 
     backend_name: str = Field(min_length=1, max_length=128)
     backend_type: str = Field(min_length=1, max_length=64)
+    deployment_profile: str = Field(min_length=1, max_length=64)
+    execution_mode: str | None = Field(default=None, min_length=1, max_length=64)
+    environment: str = Field(min_length=1, max_length=64)
+    provider: str | None = Field(default=None, min_length=1, max_length=128)
+    region: str | None = Field(default=None, min_length=1, max_length=128)
+    zone: str | None = Field(default=None, min_length=1, max_length=128)
     health_state: str = Field(min_length=1, max_length=64)
     load_state: str = Field(min_length=1, max_length=64)
     latency_ms: float | None = Field(default=None, ge=0.0)
@@ -47,10 +53,60 @@ class BackendInstanceRuntimeSummary(BaseModel):
     source_of_truth: str = Field(min_length=1, max_length=64)
     endpoint: str = Field(min_length=1, max_length=512)
     transport: str = Field(min_length=1, max_length=64)
+    device_class: str | None = Field(default=None, min_length=1, max_length=64)
+    locality: str = Field(default="local", min_length=1, max_length=64)
+    locality_class: str | None = Field(default=None, min_length=1, max_length=64)
+    execution_mode: str | None = Field(default=None, min_length=1, max_length=64)
+    provider: str | None = Field(default=None, min_length=1, max_length=128)
+    region: str | None = Field(default=None, min_length=1, max_length=128)
+    zone: str | None = Field(default=None, min_length=1, max_length=128)
+    network_profile: str | None = Field(default=None, min_length=1, max_length=64)
+    auth_state: str | None = Field(default=None, min_length=1, max_length=64)
+    trust_state: str | None = Field(default=None, min_length=1, max_length=64)
+    registration_state: str | None = Field(default=None, min_length=1, max_length=64)
     health_state: str = Field(min_length=1, max_length=64)
     load_state: str = Field(min_length=1, max_length=64)
     last_seen_at: datetime | None = None
     tags: list[str] = Field(default_factory=list)
+
+
+class HybridExecutionRuntimeSummary(BaseModel):
+    """Configured hybrid local/remote posture plus current runtime health counts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    prefer_local: bool = True
+    spillover_enabled: bool = False
+    require_healthy_local_backends: bool = True
+    max_remote_share_percent: float = Field(default=0.0, ge=0.0, le=100.0)
+    remote_request_budget_per_minute: int | None = Field(default=None, ge=1)
+    allowed_remote_environments: list[str] = Field(default_factory=list)
+    local_capable_backends: int = Field(default=0, ge=0)
+    remote_capable_backends: int = Field(default=0, ge=0)
+    healthy_local_backends: int = Field(default=0, ge=0)
+    healthy_remote_backends: int = Field(default=0, ge=0)
+    degraded_remote_backends: int = Field(default=0, ge=0)
+    unavailable_remote_backends: int = Field(default=0, ge=0)
+    remote_instance_count: int = Field(default=0, ge=0)
+    notes: list[str] = Field(default_factory=list)
+
+
+class RemoteWorkerLifecycleRuntimeSummary(BaseModel):
+    """Operator-facing registration and heartbeat view for remote workers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    secure_registration_required: bool = False
+    dynamic_registration_enabled: bool = False
+    heartbeat_timeout_seconds: float = Field(gt=0.0, le=3600.0)
+    registration_token_name: str | None = Field(default=None, min_length=1, max_length=128)
+    allow_static_instances: bool = True
+    static_instance_count: int = Field(default=0, ge=0)
+    registered_instance_count: int = Field(default=0, ge=0)
+    discovered_instance_count: int = Field(default=0, ge=0)
+    stale_instance_count: int = Field(default=0, ge=0)
+    notes: list[str] = Field(default_factory=list)
 
 
 class TenantLimiterRuntimeSummary(BaseModel):
@@ -250,6 +306,8 @@ class RuntimeInspectionResponse(BaseModel):
     shadow_routing: ShadowRoutingRuntimeSummary
     policy_rollout: PolicyRolloutRuntimeSummary
     session_affinity: SessionAffinityRuntimeSummary
+    hybrid_execution: HybridExecutionRuntimeSummary
+    remote_workers: RemoteWorkerLifecycleRuntimeSummary
     routing_features: RoutingFeatureRuntimeSummary
     prefix_locality: PrefixLocalityRuntimeSummary
 
@@ -348,5 +406,7 @@ class DeploymentDiagnosticsResponse(BaseModel):
     control_plane_image: BackendImageMetadata | None = None
     worker_deployments: list[WorkerDeploymentDiagnostic] = Field(default_factory=list)
     runtime_backends: list[BackendRuntimeSummary] = Field(default_factory=list)
+    hybrid_execution: HybridExecutionRuntimeSummary
+    remote_workers: RemoteWorkerLifecycleRuntimeSummary
     supporting_services: list[SupportingServiceDiagnostic] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)

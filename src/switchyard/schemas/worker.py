@@ -6,7 +6,13 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from switchyard.schemas.backend import BackendCapabilities, BackendHealth, BackendType
+from switchyard.schemas.backend import (
+    BackendCapabilities,
+    BackendHealth,
+    BackendType,
+    ExecutionModeLabel,
+    TopologySchemaVersion,
+)
 from switchyard.schemas.chat import (
     ChatCompletionChunk,
     ChatCompletionRequest,
@@ -19,6 +25,7 @@ class WorkerProtocolVersion(StrEnum):
     """Explicit version for the internal worker HTTP protocol."""
 
     V1 = "switchyard.worker.v1"
+    V2 = "switchyard.worker.v2"
 
 
 class WorkerProtocolEnvelope(BaseModel):
@@ -27,6 +34,7 @@ class WorkerProtocolEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     protocol_version: WorkerProtocolVersion = WorkerProtocolVersion.V1
+    topology_schema_version: TopologySchemaVersion = TopologySchemaVersion.V1
     worker_name: str = Field(min_length=1, max_length=128)
 
 
@@ -49,6 +57,7 @@ class WorkerCapabilitiesResponse(WorkerProtocolEnvelope):
     """Worker capabilities response."""
 
     backend_type: BackendType | None = None
+    execution_mode: ExecutionModeLabel | None = None
     capabilities: BackendCapabilities
 
 

@@ -1,16 +1,16 @@
 # Switchyard
 
-Switchyard is a Mac-first, backend-agnostic inference fabric. In Phase 6 it can expose
+Switchyard is a Mac-first, backend-agnostic inference fabric. In Phase 7 it can expose
 one logical model alias through either MLX-LM, vLLM-Metal, or both, route requests
 across explicit network-addressable worker instances, and emit typed route decisions
 that are benchmarkable, replayable, and explainable. The current routing slice carries
 tenant and session context, rejects saturated backends with bounded admission rules,
 uses circuit-breaker protection to stop hammering failing backends, supports bounded
 session-affinity reuse, records canary/shadow decisions in runtime inspection and
-benchmark artifacts, and now starts adding deterministic request-feature extraction for
-future cache/locality-aware scorers and offline policy simulation.
+benchmark artifacts, and preserves deterministic request-feature extraction for
+cache/locality-aware scorers and offline policy simulation.
 
-Phase 6 also adds:
+Phase 7 adds:
 - deterministic request and workload feature extraction,
 - repeated-prefix and locality-aware signals without storing raw prompt text,
 - historical performance summaries and transparent predictor inputs,
@@ -18,9 +18,12 @@ Phase 6 also adds:
 - offline simulation that distinguishes direct observations from estimates,
 - a conservative adaptive policy with abstention, confidence thresholds, and guardrails,
 - safe rollout controls with shadow, report-only, canary, and guarded-active modes,
-- evidence-based recommendation reports that do not auto-apply changes.
+- evidence-based recommendation reports that do not auto-apply changes,
+- typed hybrid local/remote execution settings and runtime inspection,
+- operator-visible remote spillover budgets and remote-health summaries,
+- remote worker lifecycle posture for later secure registration and cloud-ready workers.
 
-Phase 6 is Mac-first, not Mac-locked:
+Phase 7 is Mac-first, not Mac-locked:
 - real local backends are currently Apple Silicon focused,
 - the gateway, router, schemas, and artifacts stay backend-agnostic,
 - Apple-specific imports stay behind adapter and runtime boundaries,

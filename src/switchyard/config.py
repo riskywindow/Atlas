@@ -15,8 +15,15 @@ from switchyard.schemas.backend import (
     BackendNetworkEndpoint,
     BackendRegistrationMetadata,
     BackendType,
+    CloudPlacementMetadata,
+    CostBudgetProfile,
     DeploymentProfile,
     DeviceClass,
+    ExecutionModeLabel,
+    NetworkCharacteristics,
+    ReadinessHints,
+    TrustMetadata,
+    WorkerLocalityClass,
     WorkerTransportType,
 )
 from switchyard.schemas.benchmark import TraceCaptureMode
@@ -96,6 +103,15 @@ class BackendInstanceConfig(BaseModel):
     request_timeout_seconds: float = Field(default=30.0, gt=0.0, le=3600.0)
     device_class: DeviceClass | None = None
     locality: str = Field(default="local", min_length=1, max_length=64)
+    locality_class: WorkerLocalityClass = WorkerLocalityClass.UNKNOWN
+    execution_mode: ExecutionModeLabel = ExecutionModeLabel.HOST_NATIVE
+    placement: CloudPlacementMetadata = Field(default_factory=CloudPlacementMetadata)
+    cost_profile: CostBudgetProfile = Field(default_factory=CostBudgetProfile)
+    readiness_hints: ReadinessHints = Field(default_factory=ReadinessHints)
+    trust: TrustMetadata = Field(default_factory=TrustMetadata)
+    network_characteristics: NetworkCharacteristics = Field(
+        default_factory=NetworkCharacteristics
+    )
     source_of_truth: BackendInstanceSource = BackendInstanceSource.STATIC_CONFIG
     tags: tuple[str, ...] = ()
     registration: BackendRegistrationMetadata = Field(
@@ -146,6 +162,13 @@ class BackendInstanceConfig(BaseModel):
             device_class=self.device_class or default_device_class,
             model_identifier=model_identifier,
             locality=self.locality,
+            locality_class=self.locality_class,
+            execution_mode=self.execution_mode,
+            placement=self.placement.model_copy(deep=True),
+            cost_profile=self.cost_profile.model_copy(deep=True),
+            readiness_hints=self.readiness_hints.model_copy(deep=True),
+            trust=self.trust.model_copy(deep=True),
+            network_characteristics=self.network_characteristics.model_copy(deep=True),
             tags=list(self.tags),
             registration=self.registration.model_copy(deep=True),
             image_metadata=self.image_metadata.model_copy(deep=True)
@@ -206,7 +229,15 @@ class LocalModelConfig(BaseModel):
     configured_priority: int = Field(default=100, ge=0, le=1000)
     configured_weight: float = Field(default=1.0, gt=0.0, le=1000.0)
     worker_transport: WorkerTransportType = WorkerTransportType.IN_PROCESS
+    execution_mode: ExecutionModeLabel = ExecutionModeLabel.HOST_NATIVE
     image_tag: str | None = Field(default=None, min_length=1, max_length=128)
+    placement: CloudPlacementMetadata = Field(default_factory=CloudPlacementMetadata)
+    cost_profile: CostBudgetProfile = Field(default_factory=CostBudgetProfile)
+    readiness_hints: ReadinessHints = Field(default_factory=ReadinessHints)
+    trust: TrustMetadata = Field(default_factory=TrustMetadata)
+    network_characteristics: NetworkCharacteristics = Field(
+        default_factory=NetworkCharacteristics
+    )
     build_metadata: dict[str, str] = Field(default_factory=dict)
     instances: tuple[BackendInstanceConfig, ...] = ()
     generation_defaults: GenerationDefaults = Field(default_factory=GenerationDefaults)
@@ -321,6 +352,50 @@ class PolicyRolloutSettings(BaseModel):
     max_recent_decisions: int = Field(default=25, ge=1, le=200)
 
 
+class HybridExecutionSettings(BaseModel):
+    """Phase 7 hybrid local/remote execution guardrails and operator budgets."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    prefer_local: bool = True
+    spillover_enabled: bool = False
+    require_healthy_local_backends: bool = True
+    max_remote_share_percent: float = Field(default=0.0, ge=0.0, le=100.0)
+    remote_request_budget_per_minute: int | None = Field(default=None, ge=1, le=1_000_000)
+    allowed_remote_environments: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_remote_envs(self) -> HybridExecutionSettings:
+        if len(self.allowed_remote_environments) != len(set(self.allowed_remote_environments)):
+            msg = "allowed_remote_environments must not contain duplicate entries"
+            raise ValueError(msg)
+        return self
+
+
+class RemoteWorkerLifecycleSettings(BaseModel):
+    """Phase 7 worker registration and heartbeat posture."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    secure_registration_required: bool = False
+    dynamic_registration_enabled: bool = False
+    heartbeat_timeout_seconds: float = Field(default=30.0, gt=0.0, le=3600.0)
+    registration_token_name: str | None = Field(default=None, min_length=1, max_length=128)
+    allow_static_instances: bool = True
+
+
+class Phase7ControlPlaneSettings(BaseModel):
+    """Phase 7 hybrid execution and remote worker controls."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    hybrid_execution: HybridExecutionSettings = Field(default_factory=HybridExecutionSettings)
+    remote_workers: RemoteWorkerLifecycleSettings = Field(
+        default_factory=RemoteWorkerLifecycleSettings
+    )
+
+
 class Phase4ControlPlaneSettings(BaseModel):
     """Phase 4 control-plane configuration."""
 
@@ -365,6 +440,7 @@ class Settings(BaseSettings):
     default_model_alias: str | None = Field(default=None, min_length=1, max_length=128)
     topology: DeploymentTopologySettings = Field(default_factory=DeploymentTopologySettings)
     phase4: Phase4ControlPlaneSettings = Field(default_factory=Phase4ControlPlaneSettings)
+    phase7: Phase7ControlPlaneSettings = Field(default_factory=Phase7ControlPlaneSettings)
 
     model_config = SettingsConfigDict(
         env_prefix="SWITCHYARD_",

@@ -34,10 +34,20 @@ from switchyard.schemas.backend import (
     BackendNetworkEndpoint,
     BackendRegistrationMetadata,
     BackendType,
+    CloudPlacementMetadata,
+    CostBudgetProfile,
     DeploymentProfile,
     DeviceClass,
+    ExecutionModeLabel,
+    NetworkCharacteristics,
+    NetworkProfile,
+    ReadinessHints,
+    TrustMetadata,
+    WorkerAuthState,
+    WorkerLocalityClass,
     WorkerRegistrationState,
     WorkerTransportType,
+    WorkerTrustState,
 )
 from switchyard.schemas.benchmark import (
     BenchmarkArtifactSchemaVersion,
@@ -2528,6 +2538,13 @@ def _runtime_topology_endpoints(
                     endpoint_id=instance.instance_id,
                     role="worker_instance",
                     address=instance.endpoint,
+                    transport=_safe_worker_transport(instance.transport),
+                    execution_mode=_safe_execution_mode(instance.execution_mode),
+                    locality_class=_safe_locality_class(instance.locality_class),
+                    provider=instance.provider,
+                    region=instance.region,
+                    zone=instance.zone,
+                    network_profile=_safe_network_profile(instance.network_profile),
                     metadata={
                         "backend_name": backend.backend_name,
                         "backend_type": backend.backend_type,
@@ -2558,11 +2575,33 @@ def _runtime_worker_inventory(
                     ),
                     source_of_truth=source_of_truth,
                     backend_type=backend_type,
-                    device_class=_device_class_for_backend_type(backend_type),
-                    locality="local" if "local" in instance.tags else "remote",
+                    device_class=_safe_device_class(
+                        instance.device_class,
+                        backend_type=backend_type,
+                    ),
+                    locality=instance.locality,
+                    locality_class=_safe_locality_class(instance.locality_class),
+                    execution_mode=_safe_execution_mode(instance.execution_mode),
+                    placement=CloudPlacementMetadata(
+                        provider=instance.provider,
+                        region=instance.region,
+                        zone=instance.zone,
+                    ),
+                    cost_profile=CostBudgetProfile(),
+                    readiness_hints=ReadinessHints(),
+                    trust=TrustMetadata(
+                        auth_state=_safe_auth_state(instance.auth_state),
+                        trust_state=_safe_trust_state(instance.trust_state),
+                    ),
+                    network_characteristics=NetworkCharacteristics(
+                        profile=_safe_network_profile(instance.network_profile)
+                    ),
                     tags=list(instance.tags),
                     registration=BackendRegistrationMetadata(
-                        state=_registration_state_for_instance_source(source_of_truth),
+                        state=_safe_registration_state(
+                            raw_value=instance.registration_state,
+                            fallback_source=source_of_truth,
+                        ),
                         last_heartbeat_at=instance.last_seen_at,
                         source="admin_runtime",
                     ),
@@ -2602,6 +2641,51 @@ def _safe_worker_transport(raw_value: str) -> WorkerTransportType:
         return WorkerTransportType.HTTP
 
 
+def _safe_locality_class(raw_value: str | None) -> WorkerLocalityClass:
+    if raw_value is None:
+        return WorkerLocalityClass.UNKNOWN
+    try:
+        return WorkerLocalityClass(raw_value)
+    except ValueError:
+        return WorkerLocalityClass.UNKNOWN
+
+
+def _safe_execution_mode(raw_value: str | None) -> ExecutionModeLabel:
+    if raw_value is None:
+        return ExecutionModeLabel.HOST_NATIVE
+    try:
+        return ExecutionModeLabel(raw_value)
+    except ValueError:
+        return ExecutionModeLabel.HOST_NATIVE
+
+
+def _safe_network_profile(raw_value: str | None) -> NetworkProfile:
+    if raw_value is None:
+        return NetworkProfile.UNKNOWN
+    try:
+        return NetworkProfile(raw_value)
+    except ValueError:
+        return NetworkProfile.UNKNOWN
+
+
+def _safe_auth_state(raw_value: str | None) -> WorkerAuthState:
+    if raw_value is None:
+        return WorkerAuthState.UNKNOWN
+    try:
+        return WorkerAuthState(raw_value)
+    except ValueError:
+        return WorkerAuthState.UNKNOWN
+
+
+def _safe_trust_state(raw_value: str | None) -> WorkerTrustState:
+    if raw_value is None:
+        return WorkerTrustState.UNKNOWN
+    try:
+        return WorkerTrustState(raw_value)
+    except ValueError:
+        return WorkerTrustState.UNKNOWN
+
+
 def _safe_backend_health_state(raw_value: str) -> BackendHealthState:
     try:
         return BackendHealthState(raw_value)
@@ -2626,6 +2710,19 @@ def _registration_state_for_instance_source(
     return WorkerRegistrationState.STATIC
 
 
+def _safe_registration_state(
+    raw_value: str | None,
+    *,
+    fallback_source: BackendInstanceSource,
+) -> WorkerRegistrationState:
+    if raw_value is not None:
+        try:
+            return WorkerRegistrationState(raw_value)
+        except ValueError:
+            pass
+    return _registration_state_for_instance_source(fallback_source)
+
+
 def _device_class_for_backend_type(backend_type: BackendType | None) -> DeviceClass:
     if backend_type is BackendType.MLX_LM or backend_type is BackendType.VLLM_METAL:
         return DeviceClass.APPLE_GPU
@@ -2634,6 +2731,19 @@ def _device_class_for_backend_type(backend_type: BackendType | None) -> DeviceCl
     if backend_type is BackendType.VLLM_CUDA:
         return DeviceClass.NVIDIA_GPU
     return DeviceClass.REMOTE
+
+
+def _safe_device_class(
+    raw_value: str | None,
+    *,
+    backend_type: BackendType | None,
+) -> DeviceClass:
+    if raw_value is not None:
+        try:
+            return DeviceClass(raw_value)
+        except ValueError:
+            pass
+    return _device_class_for_backend_type(backend_type)
 
 
 def _average(values: list[float]) -> float:

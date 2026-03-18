@@ -9,8 +9,11 @@ from switchyard.schemas.backend import (
     BackendInstance,
     BackendNetworkEndpoint,
     BackendType,
+    CloudPlacementMetadata,
     DeploymentProfile,
     DeviceClass,
+    ExecutionModeLabel,
+    WorkerLocalityClass,
 )
 from switchyard.schemas.benchmark import (
     BenchmarkArtifactSchemaVersion,
@@ -289,6 +292,7 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
                     endpoint_id="gateway-local",
                     role="control_plane",
                     address="http://127.0.0.1:8000",
+                    execution_mode=ExecutionModeLabel.HOST_NATIVE,
                 )
             ],
             worker_instance_inventory=[
@@ -297,6 +301,9 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
                     endpoint=BackendNetworkEndpoint(base_url="http://host.docker.internal:8101"),
                     backend_type=BackendType.MLX_LM,
                     device_class=DeviceClass.APPLE_GPU,
+                    locality_class=WorkerLocalityClass.LOCAL_NETWORK,
+                    execution_mode=ExecutionModeLabel.HOST_NATIVE,
+                    placement=CloudPlacementMetadata(provider="local-lab", region="dev"),
                     health=BackendHealth(state=BackendHealthState.HEALTHY),
                 )
             ],
@@ -348,7 +355,15 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
     assert payload["environment"]["deployment_profile"] == "compose"
     assert payload["environment"]["config_profile_name"] == "compose-smoke"
     assert payload["environment"]["deployed_topology"][0]["address"] == "http://127.0.0.1:8000"
+    assert payload["environment"]["deployed_topology"][0]["execution_mode"] == "host_native"
     assert payload["environment"]["worker_instance_inventory"][0]["instance_id"] == "worker-a"
+    assert (
+        payload["environment"]["worker_instance_inventory"][0]["locality_class"]
+        == "local_network"
+    )
+    assert payload["environment"]["worker_instance_inventory"][0]["placement"]["provider"] == (
+        "local-lab"
+    )
     assert (
         payload["environment"]["control_plane_image"]["image_tag"]
         == "switchyard/control-plane:dev"

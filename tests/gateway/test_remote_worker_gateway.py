@@ -13,6 +13,7 @@ from switchyard.config import (
     BackendInstanceConfig,
     GenerationDefaults,
     LocalModelConfig,
+    Phase7ControlPlaneSettings,
     Settings,
     WarmupSettings,
 )
@@ -193,7 +194,12 @@ async def test_admin_runtime_includes_instance_inventory_for_remote_workers() ->
     payload = response.json()
     assert payload["backends"][0]["instances"][0]["instance_id"] == "worker-1"
     assert payload["backends"][0]["instances"][0]["transport"] == "http"
+    assert payload["backends"][0]["instances"][0]["device_class"] == "remote"
+    assert payload["backends"][0]["instances"][0]["registration_state"] == "static"
     assert payload["backends"][0]["instances"][0]["health_state"] == "healthy"
+    assert payload["hybrid_execution"]["remote_capable_backends"] == 1
+    assert payload["hybrid_execution"]["healthy_remote_backends"] == 1
+    assert payload["remote_workers"]["static_instance_count"] == 0
 
 
 @pytest.mark.asyncio
@@ -214,6 +220,23 @@ async def test_admin_deployment_reports_runtime_diagnostics_for_remote_workers(
             env=AppEnvironment.TEST,
             log_level="INFO",
             local_models=(_build_remote_model_config(),),
+            phase7=Phase7ControlPlaneSettings.model_validate(
+                {
+                    "hybrid_execution": {
+                        "enabled": True,
+                        "spillover_enabled": True,
+                        "max_remote_share_percent": 25.0,
+                        "remote_request_budget_per_minute": 60,
+                        "allowed_remote_environments": ["staging"],
+                    },
+                    "remote_workers": {
+                        "secure_registration_required": True,
+                        "dynamic_registration_enabled": True,
+                        "heartbeat_timeout_seconds": 45.0,
+                        "registration_token_name": "SWITCHYARD_WORKER_TOKEN",
+                    },
+                }
+            ),
         ),
     )
     gateway_client = httpx.AsyncClient(
@@ -254,3 +277,8 @@ async def test_admin_deployment_reports_runtime_diagnostics_for_remote_workers(
     assert payload["worker_deployments"][0]["alias"] == "remote-chat"
     assert payload["worker_deployments"][0]["configured_instances"][0]["probe"]["status"] == "ok"
     assert payload["runtime_backends"][0]["backend_name"] == "remote-worker:remote-chat"
+    assert payload["hybrid_execution"]["enabled"] is True
+    assert payload["hybrid_execution"]["remote_capable_backends"] == 1
+    assert payload["hybrid_execution"]["max_remote_share_percent"] == 25.0
+    assert payload["remote_workers"]["secure_registration_required"] is True
+    assert payload["remote_workers"]["registration_token_name"] == "SWITCHYARD_WORKER_TOKEN"

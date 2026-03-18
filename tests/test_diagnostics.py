@@ -141,6 +141,8 @@ async def test_collect_deployment_diagnostics_carries_runtime_backend_inventory(
     runtime_backend = {
         "backend_name": "remote-worker:chat-smoke",
         "backend_type": "mock",
+        "deployment_profile": "compose",
+        "environment": "compose-smoke",
         "health_state": "healthy",
         "load_state": "ready",
         "latency_ms": 1.0,
@@ -154,10 +156,13 @@ async def test_collect_deployment_diagnostics_carries_runtime_backend_inventory(
                 "source_of_truth": "static_config",
                 "endpoint": "http://host.docker.internal:8101",
                 "transport": "http",
+                "device_class": "remote",
+                "locality": "remote",
+                "registration_state": "registered",
                 "health_state": "healthy",
                 "load_state": "ready",
                 "last_seen_at": datetime(2026, 3, 17, tzinfo=UTC),
-                "tags": ["local"],
+                "tags": ["remote"],
             }
         ],
     }
@@ -198,4 +203,6 @@ async def test_collect_deployment_diagnostics_carries_runtime_backend_inventory(
     instance = diagnostics.worker_deployments[0].configured_instances[0]
     assert diagnostics.diagnostics_source == "runtime"
     assert diagnostics.runtime_backends[0].backend_name == "remote-worker:chat-smoke"
+    assert diagnostics.hybrid_execution.remote_capable_backends == 1
+    assert diagnostics.remote_workers.registered_instance_count == 1
     assert instance.runtime_health_state == "healthy"

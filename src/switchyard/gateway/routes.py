@@ -16,6 +16,8 @@ from switchyard.control.admission import AdmissionLease, AdmissionRejectedError
 from switchyard.diagnostics import (
     collect_deployment_diagnostics,
     collect_runtime_backend_summaries,
+    summarize_hybrid_execution,
+    summarize_remote_worker_lifecycle,
 )
 from switchyard.gateway.dependencies import GatewayServices, get_services
 from switchyard.logging import bind_request_context, get_logger
@@ -107,14 +109,23 @@ async def admin_runtime(
 ) -> RuntimeInspectionResponse:
     """Return a lightweight read-only snapshot of runtime control-plane state."""
 
+    runtime_backends = await collect_runtime_backend_summaries(services.registry)
     return RuntimeInspectionResponse(
-        backends=await collect_runtime_backend_summaries(services.registry),
+        backends=runtime_backends,
         admission=await services.admission.inspect_state(),
         circuit_breakers=services.circuit_breaker.inspect_state(),
         canary_routing=services.canary.inspect_state(),
         shadow_routing=services.shadow.inspect_state(),
         policy_rollout=services.policy_rollout.inspect_state(),
         session_affinity=services.session_affinity.inspect_state(),
+        hybrid_execution=summarize_hybrid_execution(
+            settings=services.settings,
+            runtime_backends=runtime_backends,
+        ),
+        remote_workers=summarize_remote_worker_lifecycle(
+            settings=services.settings,
+            runtime_backends=runtime_backends,
+        ),
         routing_features=routing_feature_runtime_summary(),
         prefix_locality=services.prefix_locality.inspect_state(),
     )

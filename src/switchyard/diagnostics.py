@@ -16,8 +16,10 @@ from switchyard.schemas.admin import (
     BackendRuntimeSummary,
     DeploymentDiagnosticsResponse,
     DiagnosticStatus,
+    HybridExecutionRuntimeSummary,
     ProbeKind,
     ProbeResult,
+    RemoteWorkerLifecycleRuntimeSummary,
     SupportingServiceDiagnostic,
     WorkerDeploymentDiagnostic,
     WorkerInstanceDiagnostic,
@@ -28,6 +30,7 @@ from switchyard.schemas.backend import (
     BackendLoadState,
     BackendType,
     DeploymentProfile,
+    DeviceClass,
     WorkerTransportType,
 )
 
@@ -85,6 +88,14 @@ async def collect_deployment_diagnostics(
         control_plane_image=settings.topology.control_plane_image,
         worker_deployments=worker_deployments,
         runtime_backends=runtime_backends,
+        hybrid_execution=summarize_hybrid_execution(
+            settings=settings,
+            runtime_backends=runtime_backends,
+        ),
+        remote_workers=summarize_remote_worker_lifecycle(
+            settings=settings,
+            runtime_backends=runtime_backends,
+        ),
         supporting_services=supporting_services,
         notes=notes,
     )
@@ -98,10 +109,25 @@ async def collect_runtime_backend_summaries(
     summaries: list[BackendRuntimeSummary] = []
     for adapter in registry.list():
         status_snapshot = await adapter.status()
+        deployment = status_snapshot.deployment
+        deployment_profile = (
+            deployment.deployment_profile.value
+            if deployment is not None
+            else DeploymentProfile.HOST_NATIVE.value
+        )
+        environment = deployment.environment if deployment is not None else "local"
         summaries.append(
             BackendRuntimeSummary(
                 backend_name=status_snapshot.name,
                 backend_type=status_snapshot.capabilities.backend_type.value,
+                deployment_profile=deployment_profile,
+                execution_mode=(
+                    deployment.execution_mode.value if deployment is not None else None
+                ),
+                environment=environment,
+                provider=(deployment.placement.provider if deployment is not None else None),
+                region=(deployment.placement.region if deployment is not None else None),
+                zone=(deployment.placement.zone if deployment is not None else None),
                 health_state=status_snapshot.health.state.value,
                 load_state=status_snapshot.health.load_state.value,
                 latency_ms=status_snapshot.health.latency_ms,
@@ -115,6 +141,21 @@ async def collect_runtime_backend_summaries(
                         source_of_truth=instance.source_of_truth.value,
                         endpoint=instance.endpoint.base_url,
                         transport=instance.endpoint.transport.value,
+                        device_class=(
+                            instance.device_class.value
+                            if instance.device_class is not None
+                            else None
+                        ),
+                        locality=instance.locality,
+                        locality_class=instance.locality_class.value,
+                        execution_mode=instance.execution_mode.value,
+                        provider=instance.placement.provider,
+                        region=instance.placement.region,
+                        zone=instance.placement.zone,
+                        network_profile=instance.network_characteristics.profile.value,
+                        auth_state=instance.trust.auth_state.value,
+                        trust_state=instance.trust.trust_state.value,
+                        registration_state=instance.registration.state.value,
                         health_state=(
                             instance.health.state.value
                             if instance.health is not None
@@ -133,6 +174,142 @@ async def collect_runtime_backend_summaries(
             )
         )
     return summaries
+
+
+def summarize_hybrid_execution(
+    *,
+    settings: Settings,
+    runtime_backends: list[BackendRuntimeSummary],
+) -> HybridExecutionRuntimeSummary:
+    """Summarize Phase 7 hybrid execution posture from config and runtime truth."""
+
+    local_capable_backends = 0
+    remote_capable_backends = 0
+    healthy_local_backends = 0
+    healthy_remote_backends = 0
+    degraded_remote_backends = 0
+    unavailable_remote_backends = 0
+    remote_instance_count = 0
+
+    for backend in runtime_backends:
+        has_local = any(not _is_remote_runtime_instance(instance) for instance in backend.instances)
+        has_remote = any(_is_remote_runtime_instance(instance) for instance in backend.instances)
+        if not backend.instances and backend.deployment_profile != DeploymentProfile.REMOTE.value:
+            has_local = True
+        if has_local:
+            local_capable_backends += 1
+            if backend.health_state == BackendHealthState.HEALTHY.value:
+                healthy_local_backends += 1
+        if has_remote:
+            remote_capable_backends += 1
+            remote_instance_count += sum(
+                1 for instance in backend.instances if _is_remote_runtime_instance(instance)
+            )
+            if backend.health_state == BackendHealthState.HEALTHY.value:
+                healthy_remote_backends += 1
+            elif backend.health_state == BackendHealthState.DEGRADED.value:
+                degraded_remote_backends += 1
+            elif backend.health_state == BackendHealthState.UNAVAILABLE.value:
+                unavailable_remote_backends += 1
+
+    notes: list[str] = []
+    if not runtime_backends:
+        notes.append("runtime backend inventory is empty; hybrid counts reflect config only")
+    if (
+        settings.phase7.hybrid_execution.enabled
+        and settings.phase7.hybrid_execution.spillover_enabled
+        and remote_capable_backends == 0
+    ):
+        notes.append(
+            "hybrid spillover is enabled but no remote-capable backends are "
+            "currently registered"
+        )
+
+    return HybridExecutionRuntimeSummary(
+        enabled=settings.phase7.hybrid_execution.enabled,
+        prefer_local=settings.phase7.hybrid_execution.prefer_local,
+        spillover_enabled=settings.phase7.hybrid_execution.spillover_enabled,
+        require_healthy_local_backends=(
+            settings.phase7.hybrid_execution.require_healthy_local_backends
+        ),
+        max_remote_share_percent=settings.phase7.hybrid_execution.max_remote_share_percent,
+        remote_request_budget_per_minute=(
+            settings.phase7.hybrid_execution.remote_request_budget_per_minute
+        ),
+        allowed_remote_environments=list(
+            settings.phase7.hybrid_execution.allowed_remote_environments
+        ),
+        local_capable_backends=local_capable_backends,
+        remote_capable_backends=remote_capable_backends,
+        healthy_local_backends=healthy_local_backends,
+        healthy_remote_backends=healthy_remote_backends,
+        degraded_remote_backends=degraded_remote_backends,
+        unavailable_remote_backends=unavailable_remote_backends,
+        remote_instance_count=remote_instance_count,
+        notes=notes,
+    )
+
+
+def summarize_remote_worker_lifecycle(
+    *,
+    settings: Settings,
+    runtime_backends: list[BackendRuntimeSummary],
+) -> RemoteWorkerLifecycleRuntimeSummary:
+    """Summarize Phase 7 registration posture from config and runtime inventory."""
+
+    static_instance_count = sum(
+        len(model_config.instances)
+        for model_config in settings.local_models
+        for instance in model_config.instances
+        if instance.source_of_truth.value == "static_config"
+    )
+    registered_instance_count = 0
+    discovered_instance_count = 0
+    stale_instance_count = 0
+    for backend in runtime_backends:
+        for instance in backend.instances:
+            if instance.registration_state == "registered":
+                registered_instance_count += 1
+            elif instance.registration_state == "discovered":
+                discovered_instance_count += 1
+            elif instance.registration_state == "stale":
+                stale_instance_count += 1
+
+    notes: list[str] = []
+    if (
+        settings.phase7.remote_workers.secure_registration_required
+        and settings.phase7.remote_workers.registration_token_name is None
+    ):
+        notes.append("secure registration is required but no registration_token_name is configured")
+    if not runtime_backends:
+        notes.append(
+            "runtime backend inventory is empty; registration counts only include "
+            "static config"
+        )
+
+    return RemoteWorkerLifecycleRuntimeSummary(
+        secure_registration_required=settings.phase7.remote_workers.secure_registration_required,
+        dynamic_registration_enabled=settings.phase7.remote_workers.dynamic_registration_enabled,
+        heartbeat_timeout_seconds=settings.phase7.remote_workers.heartbeat_timeout_seconds,
+        registration_token_name=settings.phase7.remote_workers.registration_token_name,
+        allow_static_instances=settings.phase7.remote_workers.allow_static_instances,
+        static_instance_count=static_instance_count,
+        registered_instance_count=registered_instance_count,
+        discovered_instance_count=discovered_instance_count,
+        stale_instance_count=stale_instance_count,
+        notes=notes,
+    )
+
+
+def _is_remote_runtime_instance(instance: BackendInstanceRuntimeSummary) -> bool:
+    return (
+        instance.device_class == DeviceClass.REMOTE.value
+        or instance.device_class == DeviceClass.REMOTE_UNKNOWN.value
+        or instance.locality_class in {"remote_private", "remote_cloud", "external_service"}
+        or instance.execution_mode in {"remote_worker", "external_service"}
+        or instance.locality == "remote"
+        or "remote" in instance.tags
+    )
 
 
 async def _diagnose_worker_deployment(

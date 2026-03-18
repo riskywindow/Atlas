@@ -13,6 +13,11 @@ from switchyard.schemas.backend import (
     BackendImageMetadata,
     BackendInstance,
     DeploymentProfile,
+    ExecutionModeLabel,
+    NetworkProfile,
+    TopologySchemaVersion,
+    WorkerLocalityClass,
+    WorkerTransportType,
 )
 from switchyard.schemas.chat import UsageStats
 from switchyard.schemas.routing import (
@@ -159,6 +164,14 @@ class DeployedTopologyEndpoint(BaseModel):
     endpoint_id: str = Field(min_length=1, max_length=128)
     role: str = Field(min_length=1, max_length=64)
     address: str = Field(min_length=1, max_length=512)
+    topology_schema_version: TopologySchemaVersion = TopologySchemaVersion.V1
+    transport: WorkerTransportType | None = None
+    execution_mode: ExecutionModeLabel = ExecutionModeLabel.HOST_NATIVE
+    locality_class: WorkerLocalityClass = WorkerLocalityClass.UNKNOWN
+    provider: str | None = Field(default=None, min_length=1, max_length=128)
+    region: str | None = Field(default=None, min_length=1, max_length=128)
+    zone: str | None = Field(default=None, min_length=1, max_length=128)
+    network_profile: NetworkProfile = NetworkProfile.UNKNOWN
     metadata: dict[str, str] = Field(default_factory=dict)
 
 

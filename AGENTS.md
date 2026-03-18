@@ -15,20 +15,23 @@ The goal is **not** to build a thin LLM wrapper. The goal is to build a serious 
 ---
 
 ## Current phase
-**Phase 6: explainable routing intelligence and offline policy evaluation**
+**Phase 7: hybrid local/remote execution and cloud-ready worker foundations**
 
-Phase 6 builds on the Phase 5 deployable control plane, explicit worker topology, and
-deployment-aware benchmark artifacts with richer route-decision artifacts, deterministic
-request and workload feature extraction, repeated-prefix and cache/locality-aware
-signals, historical performance summaries, an explainable policy/scorer interface, and
-an offline simulation harness for comparing policies before they touch live traffic.
+Phase 7 builds on the Phase 6 deployable control plane, explicit worker topology,
+explainable routing, deterministic request features, historical summaries, and offline
+simulation. The new work is about making remote workers first-class topology members
+without giving up the Mac-first local path, testability in CI, or backend-agnostic
+control-plane contracts.
 
-Phase 6 is explicitly about making routing smarter without making it opaque. Adaptive
-behavior, shadow scoring, and historical summaries must be typed, testable, replayable,
-portable to future remote GPU workers, and explainable from artifacts and logs.
+Phase 7 introduces secure worker registration and lifecycle posture, hybrid routing and
+spillover guardrails, remote-aware benchmark and replay surfaces, operator-facing
+budgets and remote health views, and deployment/package scaffolding for later Linux and
+NVIDIA-backed workers such as `vllm_cuda`. Real remote GPU rentals are not required yet;
+the design should remain typed, testable, replayable, and explainable with mocks and
+portable worker protocol boundaries.
 
-### Definition of done for Phase 6
-Phase 6 is complete when all of the following are true:
+### Definition of done for Phase 7
+Phase 7 is complete when all of the following are true:
 1. The repo keeps a clean Python workspace with linting, typing, and tests.
 2. There are at least two real backend adapter paths behind the shared contracts:
    - `mlx_lm`
@@ -63,9 +66,17 @@ Phase 6 is complete when all of the following are true:
 14. An offline simulation harness can compare baseline, shadow-scored, and guarded
     adaptive policies against captured or synthetic traces without requiring Apple GPU
     access in CI.
-15. Deployment docs and runbooks cover local host-native backends, containerized control
-   plane operation, and future remote-worker extension points without assuming Apple GPU
-   access in CI.
+15. Remote workers are first-class topology members with typed registration state,
+    heartbeat/lifecycle metadata, and operator-visible remote health summaries.
+16. Hybrid execution guardrails are explicit and inspectable:
+    spillover remains bounded,
+    local-preference behavior stays configurable,
+    and remote budget posture is visible to operators and artifacts.
+17. Benchmark, replay, and reporting surfaces can distinguish local versus remote
+    execution paths and preserve that information in serializable outputs.
+18. Deployment docs and packaging scaffolding cover local host-native backends,
+    portable control-plane images, and later Linux/NVIDIA worker extensions without
+    requiring actual GPU rental in CI.
 
 ---
 
@@ -75,22 +86,22 @@ Phase 6 is complete when all of the following are true:
 - Primary development machine: **Apple Silicon Mac (M4 Pro, 24GB RAM)**.
 - During the Mac-first phase, **real model backends should run host-native on macOS**.
 - Containerized services are fine for infra such as Postgres, Redis, Prometheus, Grafana, and the OpenTelemetry Collector.
-- Do **not** add CUDA-only or Triton-only runtime dependencies in Phase 6.
+- Do **not** add CUDA-only or Triton-only runtime dependencies in Phase 7.
 - Keep the design explicitly portable so later phases can add `vllm_cuda` or other remote GPU workers.
 
 ### Scope constraints
-- Phase 6 should preserve **two real Mac-native backend paths** behind the same adapter boundary:
+- Phase 7 should preserve **two real Mac-native backend paths** behind the same adapter boundary:
   - `mlx_lm`
   - `vllm_metal`
 - A single logical model alias may map to multiple backend implementations. Registration, routing, and benchmarks should preserve that abstraction instead of assuming one alias implies one runtime.
 - A single logical backend deployment may map to multiple explicit worker instances with
   distinct network addresses. Inventory should stay typed and portable to future remote
   workers.
-- Avoid premature multi-service complexity. In Phase 6, a **single Python workspace** is still preferred over many separate packages.
+- Avoid premature multi-service complexity. In Phase 7, a **single Python workspace** is still preferred over many separate packages.
 - Do not build a frontend UI yet.
 - A small `kind` deployment path is in scope, but avoid a production-grade Kubernetes
   platform build-out.
-- Do not introduce Ray into the request path in Phase 6.
+- Do not introduce Ray into the request path in Phase 7.
 
 ### Quality constraints
 - Prefer **small vertical slices** over giant speculative scaffolding.
@@ -127,7 +138,7 @@ Phase 6 is complete when all of the following are true:
 
 ---
 
-## Recommended stack for Phase 6
+## Recommended stack for Phase 7
 - Python 3.12
 - `uv` for environment and dependency management
 - FastAPI

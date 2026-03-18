@@ -118,6 +118,14 @@ class RemoteWorkerAdapter:
             ]
         if capabilities.device_class is DeviceClass.REMOTE:
             capabilities.device_class = instance_config.device_class or DeviceClass.REMOTE
+        capabilities.execution_mode = self.model_config.execution_mode
+        capabilities.placement = self.model_config.placement.model_copy(deep=True)
+        capabilities.cost_profile = self.model_config.cost_profile.model_copy(deep=True)
+        capabilities.readiness_hints = self.model_config.readiness_hints.model_copy(deep=True)
+        capabilities.trust = self.model_config.trust.model_copy(deep=True)
+        capabilities.network_characteristics = self.model_config.network_characteristics.model_copy(
+            deep=True
+        )
         return capabilities
 
     async def status(self) -> BackendStatusSnapshot:
@@ -147,7 +155,11 @@ class RemoteWorkerAdapter:
                 configured_priority=self.model_config.configured_priority,
                 configured_weight=self.model_config.configured_weight,
                 deployment_profile=self.model_config.deployment_profile,
+                execution_mode=self.model_config.execution_mode,
                 environment=self.model_config.environment,
+                placement=self.model_config.placement.model_copy(deep=True),
+                cost_profile=self.model_config.cost_profile.model_copy(deep=True),
+                readiness_hints=self.model_config.readiness_hints.model_copy(deep=True),
                 instances=[status.instance for status in statuses],
             ),
             instance_inventory=[status.instance for status in statuses],
@@ -278,6 +290,7 @@ class RemoteWorkerAdapter:
             backend_type=self.model_config.backend_type,
             engine_type=EngineType.REMOTE_OPENAI,
             device_class=DeviceClass.REMOTE,
+            execution_mode=self.model_config.execution_mode,
             model_ids=[self.model_config.alias, self.model_config.model_identifier],
             serving_targets=[self.model_config.serving_target or self.model_config.alias],
             max_context_tokens=8192,
@@ -293,6 +306,13 @@ class RemoteWorkerAdapter:
                 )
             },
             default_model=self.model_config.serving_target or self.model_config.alias,
+            placement=self.model_config.placement.model_copy(deep=True),
+            cost_profile=self.model_config.cost_profile.model_copy(deep=True),
+            readiness_hints=self.model_config.readiness_hints.model_copy(deep=True),
+            trust=self.model_config.trust.model_copy(deep=True),
+            network_characteristics=self.model_config.network_characteristics.model_copy(
+                deep=True
+            ),
         )
 
     def _build_client(self) -> httpx.AsyncClient:
