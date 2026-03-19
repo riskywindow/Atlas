@@ -7,11 +7,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from switchyard.schemas.admin import (
+    CloudRouteEvidenceRuntimeSummary,
     HybridOperatorRuntimeSummary,
     HybridRouteExample,
     PlacementDistributionRuntimeSummary,
     RemoteTransportErrorRuntimeEntry,
 )
+from switchyard.schemas.benchmark import CloudEvidenceSource
 from switchyard.schemas.routing import RouteDecision, RoutingPolicy
 
 
@@ -56,6 +58,17 @@ class HybridOperatorService:
             or decision.admission_decision.reason_code is None
             else decision.admission_decision.reason_code.value
         )
+        deployment = decision.selected_deployment
+        placement_provider = None if deployment is None else deployment.placement.provider
+        placement_region = None if deployment is None else deployment.placement.region
+        placement_zone = None if deployment is None else deployment.placement.zone
+        placement_evidence_source = _placement_evidence_source(decision=decision)
+        relative_cost_index = (
+            None
+            if deployment is None
+            else deployment.cost_profile.relative_cost_index
+        )
+        cost_evidence_source = _cost_evidence_source(decision=decision)
         self._recent_route_examples.appendleft(
             HybridRouteExample(
                 request_id=decision.request_id,
@@ -78,6 +91,12 @@ class HybridOperatorService:
                 route_reason_codes=route_reason_codes,
                 admission_reason_code=admission_reason_code,
                 remote_candidate_count=remote_candidate_count,
+                placement_provider=placement_provider,
+                placement_region=placement_region,
+                placement_zone=placement_zone,
+                placement_evidence_source=placement_evidence_source,
+                relative_cost_index=relative_cost_index,
+                cost_evidence_source=cost_evidence_source,
                 notes=notes[:5],
             )
         )
@@ -107,6 +126,17 @@ class HybridOperatorService:
         placement_counts = Counter(
             example.execution_path for example in self._recent_route_examples
         )
+        provider_counts = Counter(
+            example.placement_provider
+            for example in self._recent_route_examples
+            if example.execution_path == "remote" and example.placement_provider is not None
+        )
+        estimated_costs = [
+            example.relative_cost_index
+            for example in self._recent_route_examples
+            if example.relative_cost_index is not None
+            and example.cost_evidence_source != CloudEvidenceSource.OBSERVED_RUNTIME.value
+        ]
         notes: list[str] = []
         if self.remote_enabled_override is not None:
             notes.append("remote routing enablement is currently operator-overridden")
@@ -123,6 +153,38 @@ class HybridOperatorService:
                 remote_count=placement_counts.get("remote", 0),
                 remote_blocked_count=placement_counts.get("remote_blocked", 0),
                 unknown_count=placement_counts.get("unknown", 0),
+            ),
+            recent_cloud_evidence=CloudRouteEvidenceRuntimeSummary(
+                sample_size=len(self._recent_route_examples),
+                observed_placement_count=sum(
+                    1
+                    for example in self._recent_route_examples
+                    if example.placement_evidence_source
+                    == CloudEvidenceSource.OBSERVED_RUNTIME.value
+                ),
+                estimated_placement_count=sum(
+                    1
+                    for example in self._recent_route_examples
+                    if example.placement_evidence_source is not None
+                    and example.placement_evidence_source
+                    != CloudEvidenceSource.OBSERVED_RUNTIME.value
+                ),
+                observed_cost_count=sum(
+                    1
+                    for example in self._recent_route_examples
+                    if example.cost_evidence_source == CloudEvidenceSource.OBSERVED_RUNTIME.value
+                ),
+                estimated_cost_count=sum(
+                    1
+                    for example in self._recent_route_examples
+                    if example.cost_evidence_source is not None
+                    and example.cost_evidence_source
+                    != CloudEvidenceSource.OBSERVED_RUNTIME.value
+                ),
+                remote_provider_counts=dict(provider_counts),
+                total_estimated_relative_cost_index=(
+                    None if not estimated_costs else round(sum(estimated_costs), 6)
+                ),
             ),
             recent_remote_transport_errors=list(self._recent_transport_errors),
             notes=notes,
@@ -150,3 +212,38 @@ def _execution_path_for_example(
     if policy in {RoutingPolicy.LOCAL_ONLY, RoutingPolicy.REMOTE_DISABLED}:
         return "local"
     return "local"
+
+
+def _placement_evidence_source(*, decision: RouteDecision) -> str | None:
+    deployment = decision.selected_deployment
+    if deployment is None:
+        return None
+    if (
+        decision.execution_observation is not None
+        and decision.execution_observation.backend_instance_id
+    ):
+        for instance in deployment.instances:
+            if instance.instance_id == decision.execution_observation.backend_instance_id:
+                if (
+                    instance.placement.provider is not None
+                    or instance.placement.region is not None
+                    or instance.placement.zone is not None
+                ):
+                    return CloudEvidenceSource.OBSERVED_RUNTIME.value
+    if (
+        deployment.placement.provider is not None
+        or deployment.placement.region is not None
+        or deployment.placement.zone is not None
+    ):
+        return CloudEvidenceSource.DEPLOYMENT_METADATA_ESTIMATE.value
+    return None
+
+
+def _cost_evidence_source(*, decision: RouteDecision) -> str | None:
+    deployment = decision.selected_deployment
+    if (
+        deployment is None
+        or deployment.cost_profile.relative_cost_index is None
+    ):
+        return None
+    return CloudEvidenceSource.DEPLOYMENT_METADATA_ESTIMATE.value

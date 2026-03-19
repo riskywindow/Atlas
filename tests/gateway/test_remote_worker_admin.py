@@ -396,9 +396,15 @@ async def test_admin_hybrid_endpoints_expose_remote_controls_and_transport_error
     hybrid_payload = hybrid.json()
     assert hybrid_payload["recent_route_example_count"] == 1
     assert hybrid_payload["recent_placement_distribution"]["remote_count"] == 1
+    assert hybrid_payload["recent_cloud_evidence"]["estimated_placement_count"] == 0
+    assert hybrid_payload["recent_cloud_evidence"]["estimated_cost_count"] == 0
+    assert hybrid_payload["recent_cloud_evidence"]["remote_provider_counts"] == {}
     assert hybrid_payload["recent_route_examples"][0]["request_id"] == "req-remote-failure"
     assert hybrid_payload["recent_route_examples"][0]["execution_path"] == "remote"
     assert hybrid_payload["recent_route_examples"][0]["remote_candidate_count"] == 1
+    assert hybrid_payload["recent_route_examples"][0]["placement_provider"] is None
+    assert hybrid_payload["recent_route_examples"][0]["placement_evidence_source"] is None
+    assert hybrid_payload["recent_route_examples"][0]["relative_cost_index"] is None
     assert hybrid_payload["recent_remote_transport_errors"][0]["request_id"] == "req-remote-failure"
     assert hybrid_payload["recent_remote_transport_errors"][0]["cooldown_triggered"] is False
 
@@ -418,6 +424,12 @@ async def test_admin_hybrid_endpoints_expose_remote_controls_and_transport_error
     assert runtime_payload["hybrid_execution"]["enabled"] is False
     assert runtime_payload["hybrid_execution"]["remote_budget_requests_used"] == 0
     assert runtime_payload["hybrid_operator"]["remote_enabled_override"] is False
+    assert (
+        runtime_payload["hybrid_operator"]["recent_cloud_evidence"][
+            "remote_provider_counts"
+        ]
+        == {}
+    )
     assert (
         runtime_payload["hybrid_operator"]["recent_remote_transport_errors"][0][
             "backend_name"

@@ -13,6 +13,7 @@ from switchyard.adapters.registry import AdapterRegistry
 if TYPE_CHECKING:
     from switchyard.adapters.mlx_lm import MLXLMAdapter
     from switchyard.adapters.remote_worker import RemoteWorkerAdapter
+    from switchyard.adapters.vllm_cuda import VLLMCUDAAdapter
     from switchyard.adapters.vllm_metal import VLLMMetalAdapter
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "MockBackendAdapter",
     "MockResponseTemplate",
     "RemoteWorkerAdapter",
+    "VLLMCUDAAdapter",
     "VLLMMetalAdapter",
     "build_registry_from_settings",
 ]
@@ -29,6 +31,7 @@ __all__ = [
 _OPTIONAL_ADAPTER_EXPORTS = {
     "MLXLMAdapter": ("switchyard.adapters.mlx_lm", "MLXLMAdapter"),
     "RemoteWorkerAdapter": ("switchyard.adapters.remote_worker", "RemoteWorkerAdapter"),
+    "VLLMCUDAAdapter": ("switchyard.adapters.vllm_cuda", "VLLMCUDAAdapter"),
     "VLLMMetalAdapter": ("switchyard.adapters.vllm_metal", "VLLMMetalAdapter"),
 }
 

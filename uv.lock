@@ -2150,6 +2150,9 @@ apple-workers = [
 mlx = [
     { name = "mlx-lm" },
 ]
+vllm-cuda = [
+    { name = "vllm" },
+]
 vllm-metal = [
     { name = "vllm" },
 ]
@@ -2189,9 +2192,10 @@ requires-dist = [
     { name = "typer", specifier = ">=0.16.0,<1.0.0" },
     { name = "uvicorn", specifier = ">=0.35.0,<1.0.0" },
     { name = "vllm", marker = "extra == 'apple-workers'", specifier = ">=0.8.0,<1.0.0" },
+    { name = "vllm", marker = "extra == 'vllm-cuda'", specifier = ">=0.8.0,<1.0.0" },
     { name = "vllm", marker = "extra == 'vllm-metal'", specifier = ">=0.8.0,<1.0.0" },
 ]
-provides-extras = ["mlx", "vllm-metal", "apple-workers"]
+provides-extras = ["mlx", "vllm-metal", "vllm-cuda", "apple-workers"]
 
 [package.metadata.requires-dev]
 dev = [

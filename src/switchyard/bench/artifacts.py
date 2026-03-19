@@ -68,6 +68,9 @@ from switchyard.schemas.benchmark import (
     BenchmarkWarmupConfig,
     CacheObservation,
     CapturedTraceRecord,
+    CloudCostEvidence,
+    CloudEvidenceSource,
+    CloudPlacementEvidence,
     ComparisonSourceKind,
     ControlPlaneReportMetadata,
     CounterfactualSimulationArtifact,
@@ -1391,6 +1394,13 @@ def render_run_report_markdown(artifact: BenchmarkRunArtifact) -> str:
                     f"`{hybrid_summary.budget_disabled_count}` disabled"
                 ),
                 (
+                    "- Cloud evidence: "
+                    f"placement observed=`{hybrid_summary.observed_placement_evidence_count}` "
+                    f"estimated=`{hybrid_summary.estimated_placement_evidence_count}` "
+                    f"cost observed=`{hybrid_summary.observed_cost_evidence_count}` "
+                    f"estimated=`{hybrid_summary.estimated_cost_evidence_count}`"
+                ),
+                (
                     "- Network penalty (ms): "
                     f"observed=`{hybrid_summary.avg_observed_network_penalty_ms}` "
                     f"injected=`{hybrid_summary.avg_injected_network_penalty_ms}` "
@@ -2335,6 +2345,10 @@ def _summarize_hybrid_records(
     unsupported_count = 0
     budget_exhausted_count = 0
     budget_disabled_count = 0
+    observed_placement_evidence_count = 0
+    estimated_placement_evidence_count = 0
+    observed_cost_evidence_count = 0
+    estimated_cost_evidence_count = 0
     observed_penalties: list[float] = []
     injected_penalties: list[float] = []
     predicted_penalties: list[float] = []
@@ -2364,6 +2378,16 @@ def _summarize_hybrid_records(
             observed_penalties.append(context.observed_network_penalty_ms)
         if context.observed_modeled_cost is not None:
             modeled_costs.append(context.observed_modeled_cost)
+        if context.observed_placement_evidence is not None:
+            if context.observed_placement_evidence.source is CloudEvidenceSource.OBSERVED_RUNTIME:
+                observed_placement_evidence_count += 1
+            else:
+                estimated_placement_evidence_count += 1
+        if context.observed_cost_evidence is not None:
+            if context.observed_cost_evidence.source is CloudEvidenceSource.OBSERVED_RUNTIME:
+                observed_cost_evidence_count += 1
+            else:
+                estimated_cost_evidence_count += 1
         if context.observed_budget_outcome is RemoteBudgetOutcome.EXHAUSTED:
             budget_exhausted_count += 1
         elif context.observed_budget_outcome is RemoteBudgetOutcome.DISABLED:
@@ -2375,6 +2399,10 @@ def _summarize_hybrid_records(
                 injected_penalties.append(injected.network_penalty_ms)
             if injected.modeled_cost is not None:
                 modeled_costs.append(injected.modeled_cost)
+            if injected.placement_evidence is not None:
+                estimated_placement_evidence_count += 1
+            if injected.cost_evidence is not None:
+                estimated_cost_evidence_count += 1
             if injected.budget_outcome is RemoteBudgetOutcome.EXHAUSTED:
                 budget_exhausted_count += 1
             elif injected.budget_outcome is RemoteBudgetOutcome.DISABLED:
@@ -2388,6 +2416,16 @@ def _summarize_hybrid_records(
                 predicted_penalties.append(predictor.network_penalty_ms)
             if predictor.modeled_cost is not None:
                 modeled_costs.append(predictor.modeled_cost)
+            if predictor.placement_evidence is not None:
+                if predictor.placement_evidence.source is CloudEvidenceSource.OBSERVED_RUNTIME:
+                    observed_placement_evidence_count += 1
+                else:
+                    estimated_placement_evidence_count += 1
+            if predictor.cost_evidence is not None:
+                if predictor.cost_evidence.source is CloudEvidenceSource.OBSERVED_RUNTIME:
+                    observed_cost_evidence_count += 1
+                else:
+                    estimated_cost_evidence_count += 1
             if predictor.confidence in {
                 RecommendationConfidence.LOW,
                 RecommendationConfidence.INSUFFICIENT,
@@ -2415,6 +2453,10 @@ def _summarize_hybrid_records(
         unsupported_count=unsupported_count,
         budget_exhausted_count=budget_exhausted_count,
         budget_disabled_count=budget_disabled_count,
+        observed_placement_evidence_count=observed_placement_evidence_count,
+        estimated_placement_evidence_count=estimated_placement_evidence_count,
+        observed_cost_evidence_count=observed_cost_evidence_count,
+        estimated_cost_evidence_count=estimated_cost_evidence_count,
         avg_observed_network_penalty_ms=(
             None if not observed_penalties else _average(observed_penalties)
         ),
@@ -2723,12 +2765,16 @@ def _hybrid_context_for_record(
     )
     observed_network_penalty_ms = _observed_network_penalty(route_decision)
     observed_cost = _observed_modeled_cost(route_decision)
+    observed_placement_evidence = _observed_placement_evidence(route_decision)
+    observed_cost_evidence = _observed_cost_evidence(route_decision)
     if (
         observed_path is HybridExecutionPath.UNKNOWN
         and observed_temperature is RemoteTemperature.UNKNOWN
         and observed_budget is RemoteBudgetOutcome.UNKNOWN
         and observed_network_penalty_ms is None
         and observed_cost is None
+        and observed_placement_evidence is None
+        and observed_cost_evidence is None
         and injected is None
         and predictor is None
     ):
@@ -2739,6 +2785,8 @@ def _hybrid_context_for_record(
         observed_budget_outcome=observed_budget,
         observed_network_penalty_ms=observed_network_penalty_ms,
         observed_modeled_cost=observed_cost,
+        observed_placement_evidence=observed_placement_evidence,
+        observed_cost_evidence=observed_cost_evidence,
         reason_codes=reason_codes,
         injected_condition=injected,
         predictor_condition=predictor,
@@ -2775,6 +2823,8 @@ def _condition_profile_from_metadata(
     expected_signal = metadata.get("expected_signal")
     if expected_signal is not None:
         notes.append(f"scenario signal={expected_signal}")
+    placement_evidence = _placement_evidence_from_metadata(metadata=metadata, prefix=prefix)
+    cost_evidence = _cost_evidence_from_metadata(metadata=metadata, prefix=prefix)
     return HybridConditionProfile(
         source=source,
         execution_path=path,
@@ -2783,6 +2833,8 @@ def _condition_profile_from_metadata(
         network_penalty_ms=network_penalty,
         cold_start_penalty_ms=cold_start_penalty,
         modeled_cost=modeled_cost,
+        placement_evidence=placement_evidence,
+        cost_evidence=cost_evidence,
         confidence=confidence,
         notes=notes,
     )
@@ -2845,6 +2897,14 @@ def _predictor_condition_from_route_decision(
         network_penalty_ms=network_penalty,
         cold_start_penalty_ms=deployment.readiness_hints.estimated_cold_start_ms,
         modeled_cost=None if modeled_cost is None else float(modeled_cost),
+        placement_evidence=_deployment_placement_evidence(
+            route_decision,
+            source=CloudEvidenceSource.DEPLOYMENT_METADATA_ESTIMATE,
+        ),
+        cost_evidence=_deployment_cost_evidence(
+            route_decision,
+            source=CloudEvidenceSource.DEPLOYMENT_METADATA_ESTIMATE,
+        ),
         confidence=confidence,
         notes=["derived from selected deployment hints"],
     )
@@ -2945,6 +3005,149 @@ def _observed_modeled_cost(route_decision: RouteDecision | None) -> float | None
     ):
         return None
     return float(route_decision.selected_deployment.cost_profile.relative_cost_index)
+
+
+def _observed_placement_evidence(
+    route_decision: RouteDecision | None,
+) -> CloudPlacementEvidence | None:
+    source = _resolved_placement_source(route_decision)
+    if source is None:
+        return None
+    return _deployment_placement_evidence(route_decision, source=source)
+
+
+def _observed_cost_evidence(route_decision: RouteDecision | None) -> CloudCostEvidence | None:
+    source = _resolved_cost_source(route_decision)
+    if source is None:
+        return None
+    return _deployment_cost_evidence(route_decision, source=source)
+
+
+def _deployment_placement_evidence(
+    route_decision: RouteDecision | None,
+    *,
+    source: CloudEvidenceSource,
+) -> CloudPlacementEvidence | None:
+    if route_decision is None or route_decision.selected_deployment is None:
+        return None
+    deployment = route_decision.selected_deployment
+    if (
+        deployment.placement.provider is None
+        and deployment.placement.region is None
+        and deployment.placement.zone is None
+    ):
+        return None
+    return CloudPlacementEvidence(
+        source=source,
+        provider=deployment.placement.provider,
+        region=deployment.placement.region,
+        zone=deployment.placement.zone,
+        notes=["derived from selected deployment metadata"],
+    )
+
+
+def _deployment_cost_evidence(
+    route_decision: RouteDecision | None,
+    *,
+    source: CloudEvidenceSource,
+) -> CloudCostEvidence | None:
+    if route_decision is None or route_decision.selected_deployment is None:
+        return None
+    cost_profile = route_decision.selected_deployment.cost_profile
+    if (
+        cost_profile.relative_cost_index is None
+        and cost_profile.budget_bucket is None
+        and cost_profile.currency is None
+    ):
+        return None
+    return CloudCostEvidence(
+        source=source,
+        relative_cost_index=cost_profile.relative_cost_index,
+        budget_bucket=cost_profile.budget_bucket,
+        currency=cost_profile.currency,
+        notes=["derived from selected deployment metadata"],
+    )
+
+
+def _placement_evidence_from_metadata(
+    *,
+    metadata: Mapping[str, str],
+    prefix: str,
+) -> CloudPlacementEvidence | None:
+    key_prefix = f"{prefix}_"
+    provider = metadata.get(f"{key_prefix}provider")
+    region = metadata.get(f"{key_prefix}region")
+    zone = metadata.get(f"{key_prefix}zone")
+    if provider is None and region is None and zone is None:
+        return None
+    return CloudPlacementEvidence(
+        source=CloudEvidenceSource.INJECTED_MOCK,
+        provider=provider,
+        region=region,
+        zone=zone,
+        notes=["derived from benchmark metadata"],
+    )
+
+
+def _cost_evidence_from_metadata(
+    *,
+    metadata: Mapping[str, str],
+    prefix: str,
+) -> CloudCostEvidence | None:
+    key_prefix = f"{prefix}_"
+    relative_cost_index = _maybe_parse_float(metadata.get(f"{key_prefix}modeled_cost"))
+    budget_bucket = metadata.get(f"{key_prefix}budget_bucket")
+    currency = metadata.get(f"{key_prefix}currency")
+    if relative_cost_index is None and budget_bucket is None and currency is None:
+        return None
+    return CloudCostEvidence(
+        source=CloudEvidenceSource.INJECTED_MOCK,
+        relative_cost_index=relative_cost_index,
+        budget_bucket=budget_bucket,
+        currency=currency,
+        notes=["derived from benchmark metadata"],
+    )
+
+
+def _resolved_placement_source(route_decision: RouteDecision | None) -> CloudEvidenceSource | None:
+    if route_decision is None or route_decision.selected_deployment is None:
+        return None
+    deployment = route_decision.selected_deployment
+    if (
+        route_decision.execution_observation is not None
+        and route_decision.execution_observation.backend_instance_id
+    ):
+        instance_id = route_decision.execution_observation.backend_instance_id
+        for instance in deployment.instances:
+            if (
+                instance.instance_id == instance_id
+                and (
+                    instance.placement.provider is not None
+                    or instance.placement.region is not None
+                    or instance.placement.zone is not None
+                )
+            ):
+                return CloudEvidenceSource.OBSERVED_RUNTIME
+    if (
+        deployment.placement.provider is not None
+        or deployment.placement.region is not None
+        or deployment.placement.zone is not None
+    ):
+        return CloudEvidenceSource.DEPLOYMENT_METADATA_ESTIMATE
+    return None
+
+
+def _resolved_cost_source(route_decision: RouteDecision | None) -> CloudEvidenceSource | None:
+    if route_decision is None or route_decision.selected_deployment is None:
+        return None
+    cost_profile = route_decision.selected_deployment.cost_profile
+    if (
+        cost_profile.relative_cost_index is None
+        and cost_profile.budget_bucket is None
+        and cost_profile.currency is None
+    ):
+        return None
+    return CloudEvidenceSource.DEPLOYMENT_METADATA_ESTIMATE
 
 
 def _maybe_parse_float(raw_value: str | None) -> float | None:
@@ -3462,6 +3665,13 @@ def _runtime_topology_endpoints(
                         "source_of_truth": instance.source_of_truth,
                         "health_state": instance.health_state,
                         "load_state": instance.load_state,
+                        "runtime_label": (
+                            instance.runtime.runtime_label
+                            if instance.runtime is not None
+                            else backend.runtime.runtime_label
+                            if backend.runtime is not None
+                            else "unknown"
+                        ),
                     },
                 )
             )
@@ -3489,6 +3699,14 @@ def _runtime_worker_inventory(
                         instance.device_class,
                         backend_type=backend_type,
                     ),
+                    runtime=(
+                        instance.runtime.model_copy(deep=True)
+                        if instance.runtime is not None
+                        else backend.runtime.model_copy(deep=True)
+                        if backend.runtime is not None
+                        else None
+                    ),
+                    gpu=instance.gpu.model_copy(deep=True) if instance.gpu is not None else None,
                     locality=instance.locality,
                     locality_class=_safe_locality_class(instance.locality_class),
                     execution_mode=_safe_execution_mode(instance.execution_mode),
@@ -3518,6 +3736,11 @@ def _runtime_worker_inventory(
                     health=BackendHealth(
                         state=_safe_backend_health_state(instance.health_state),
                         load_state=_safe_backend_load_state(instance.load_state),
+                    ),
+                    observed_capacity=(
+                        instance.observed_capacity.model_copy(deep=True)
+                        if instance.observed_capacity is not None
+                        else None
                     ),
                     last_seen_at=instance.last_seen_at,
                     metadata={

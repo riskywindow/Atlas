@@ -426,6 +426,7 @@ def test_run_workload_cli_writes_artifact(tmp_path: Path, monkeypatch: MonkeyPat
         config_profile_name: str | None,
         control_plane_image: BackendImageMetadata | None,
         runtime_inspection_path: str | None,
+        settings: Settings,
     ) -> BenchmarkRunArtifact:
         assert scenario.model_alias == "chat-shared"
         assert execution_target.target_type is ExecutionTargetType.PINNED_BACKEND
@@ -436,6 +437,7 @@ def test_run_workload_cli_writes_artifact(tmp_path: Path, monkeypatch: MonkeyPat
         assert control_plane_image is not None
         assert control_plane_image.image_tag == "switchyard/control-plane:dev"
         assert runtime_inspection_path == "/admin/runtime"
+        assert settings is not None
         return BenchmarkRunArtifact(
             run_id="workload-run",
             scenario=BenchmarkScenario.model_validate(manifest.model_dump(mode="python")),
@@ -560,6 +562,7 @@ def test_replay_traces_cli_writes_artifact(tmp_path: Path, monkeypatch: MonkeyPa
         config_profile_name: str | None,
         control_plane_image: BackendImageMetadata | None,
         runtime_inspection_path: str | None,
+        settings: Settings,
     ) -> BenchmarkRunArtifact:
         assert traces[0].record_id == "trace-1"
         assert execution_target.target_type is ExecutionTargetType.ROUTING_POLICY
@@ -573,6 +576,7 @@ def test_replay_traces_cli_writes_artifact(tmp_path: Path, monkeypatch: MonkeyPa
         assert control_plane_image is not None
         assert control_plane_image.image_tag == "switchyard/control-plane:kind-dev"
         assert runtime_inspection_path is None
+        assert settings is not None
         return BenchmarkRunArtifact(
             run_id="trace-replay-run",
             scenario=BenchmarkScenario(

@@ -9,18 +9,22 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from switchyard.schemas.backend import (
     BackendCapabilities,
+    BackendDeployment,
     BackendHealth,
     BackendImageMetadata,
     BackendInstance,
     BackendInstanceSource,
     BackendNetworkEndpoint,
     BackendType,
+    CapacitySnapshot,
     CloudPlacementMetadata,
     CostBudgetProfile,
     DeviceClass,
     ExecutionModeLabel,
+    GPUDeviceMetadata,
     NetworkCharacteristics,
     ReadinessHints,
+    RuntimeIdentity,
     TopologySchemaVersion,
     TrustMetadata,
     WorkerLifecycleState,
@@ -74,6 +78,8 @@ class RemoteWorkerRegistrationRequest(BaseModel):
     endpoint: BackendNetworkEndpoint
     capabilities: BackendCapabilities
     device_class: DeviceClass = DeviceClass.REMOTE
+    runtime: RuntimeIdentity | None = None
+    gpu: GPUDeviceMetadata | None = None
     environment: str = Field(default="remote", min_length=1, max_length=64)
     locality: str = Field(default="remote", min_length=1, max_length=64)
     locality_class: WorkerLocalityClass = WorkerLocalityClass.REMOTE_PRIVATE
@@ -91,6 +97,7 @@ class RemoteWorkerRegistrationRequest(BaseModel):
     ready: bool = False
     active_requests: int = Field(default=0, ge=0)
     queue_depth: int = Field(default=0, ge=0)
+    observed_capacity: CapacitySnapshot | None = None
     health: BackendHealth | None = None
     tags: list[str] = Field(default_factory=list)
     metadata: dict[str, str] = Field(default_factory=dict)
@@ -106,6 +113,7 @@ class RemoteWorkerHeartbeatRequest(BaseModel):
     ready: bool | None = None
     active_requests: int = Field(default=0, ge=0)
     queue_depth: int = Field(default=0, ge=0)
+    observed_capacity: CapacitySnapshot | None = None
     health: BackendHealth | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
 
@@ -172,6 +180,10 @@ class RegisteredRemoteWorkerRecord(BaseModel):
     queue_depth: int = Field(default=0, ge=0)
     heartbeat_count: int = Field(default=0, ge=0)
     capabilities: BackendCapabilities
+    runtime: RuntimeIdentity | None = None
+    gpu: GPUDeviceMetadata | None = None
+    deployment: BackendDeployment | None = None
+    observed_capacity: CapacitySnapshot | None = None
     token_verified: bool = False
     instance: BackendInstance
     metadata: dict[str, str] = Field(default_factory=dict)
@@ -242,6 +254,8 @@ class WorkerProtocolEnvelope(BaseModel):
     protocol_version: WorkerProtocolVersion = WorkerProtocolVersion.V2
     topology_schema_version: TopologySchemaVersion = TopologySchemaVersion.V1
     worker_name: str = Field(min_length=1, max_length=128)
+    runtime: RuntimeIdentity | None = None
+    gpu: GPUDeviceMetadata | None = None
     transport_metadata: WorkerResponseMetadata | None = None
 
 
@@ -257,6 +271,7 @@ class WorkerReadinessResponse(WorkerProtocolEnvelope):
     ready: bool
     active_requests: int = Field(default=0, ge=0)
     queue_depth: int = Field(default=0, ge=0)
+    observed_capacity: CapacitySnapshot | None = None
     health: BackendHealth
 
 
@@ -266,6 +281,7 @@ class WorkerCapabilitiesResponse(WorkerProtocolEnvelope):
     backend_type: BackendType | None = None
     execution_mode: ExecutionModeLabel | None = None
     capabilities: BackendCapabilities
+    deployment: BackendDeployment | None = None
 
 
 class WorkerWarmupRequest(BaseModel):

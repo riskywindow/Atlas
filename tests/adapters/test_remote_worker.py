@@ -27,8 +27,12 @@ from switchyard.schemas.backend import (
     BackendHealthState,
     BackendLoadState,
     BackendType,
+    CapacitySnapshot,
     DeviceClass,
     EngineType,
+    GPUDeviceMetadata,
+    RequestFeatureSupport,
+    RuntimeIdentity,
     WorkerTransportType,
 )
 from switchyard.schemas.chat import (
@@ -128,11 +132,19 @@ def _build_worker_app() -> FastAPI:
         backend_type=BackendType.MOCK,
         engine_type=EngineType.MOCK,
         device_class=DeviceClass.REMOTE,
+        runtime=RuntimeIdentity(runtime_family="mock", runtime_label="fake-remote"),
+        gpu=GPUDeviceMetadata(
+            vendor="nvidia",
+            model="L4",
+            count=1,
+            memory_per_device_gib=24.0,
+        ),
         model_ids=["chat-shared", "mock-chat"],
         serving_targets=["chat-shared"],
         max_context_tokens=8192,
         supports_streaming=True,
         concurrency_limit=4,
+        request_features=RequestFeatureSupport(supports_streaming=True),
     )
 
     @app.get("/healthz")
@@ -143,9 +155,22 @@ def _build_worker_app() -> FastAPI:
     async def ready() -> dict[str, object]:
         return WorkerReadinessResponse(
             worker_name="worker-1",
+            runtime=RuntimeIdentity(runtime_family="mock", runtime_label="fake-remote"),
+            gpu=GPUDeviceMetadata(
+                vendor="nvidia",
+                model="L4",
+                count=1,
+                memory_per_device_gib=24.0,
+            ),
             ready=True,
             active_requests=1,
             queue_depth=0,
+            observed_capacity=CapacitySnapshot(
+                concurrency_limit=4,
+                active_requests=1,
+                queue_depth=0,
+                tokens_per_second=88.0,
+            ),
             health=health,
         ).model_dump(mode="json")
 
@@ -344,8 +369,18 @@ async def test_remote_worker_adapter_round_trips_over_http() -> None:
 
     assert health.state is BackendHealthState.HEALTHY
     assert capabilities.supports_streaming is True
+    assert capabilities.runtime is not None
+    assert capabilities.runtime.runtime_label == "fake-remote"
+    assert capabilities.gpu is not None
+    assert capabilities.gpu.vendor == "nvidia"
     assert status.active_requests == 1
     assert status.metadata["execution_mode"] == "remote_worker"
+    assert status.deployment is not None
+    assert status.deployment.request_features.supports_streaming is True
+    assert status.instance_inventory[0].runtime is not None
+    assert status.instance_inventory[0].runtime.runtime_label == "fake-remote"
+    assert status.instance_inventory[0].observed_capacity is not None
+    assert status.instance_inventory[0].observed_capacity.tokens_per_second == 88.0
     assert response.backend_name == "remote-worker:remote-chat"
     assert response.choices[0].message.content == "hello from remote"
     assert chunks[0].backend_name == "remote-worker:remote-chat"

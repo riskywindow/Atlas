@@ -10,6 +10,14 @@ from switchyard.schemas.backend import BackendHealthState, BackendLoadState, Bac
 from switchyard.schemas.chat import ChatCompletionRequest, FinishReason
 
 
+class UnsupportedRequestError(ValueError):
+    """Raised when a backend runtime cannot honor a request feature."""
+
+    def __init__(self, *, message: str, field_name: str | None = None) -> None:
+        super().__init__(message)
+        self.field_name = field_name
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeSamplingParams:
     """Normalized generation parameters passed to a runtime provider."""

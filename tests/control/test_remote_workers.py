@@ -17,8 +17,12 @@ from switchyard.schemas.backend import (
     BackendLoadState,
     BackendNetworkEndpoint,
     BackendType,
+    CapacitySnapshot,
     DeviceClass,
     EngineType,
+    GPUDeviceMetadata,
+    RequestFeatureSupport,
+    RuntimeIdentity,
     WorkerLifecycleState,
     WorkerTransportType,
 )
@@ -48,17 +52,59 @@ def _registration_request(
         ),
         capabilities=BackendCapabilities(
             backend_type=BackendType.VLLM_CUDA,
-            engine_type=EngineType.VLLM,
+            engine_type=EngineType.VLLM_CUDA,
             device_class=DeviceClass.NVIDIA_GPU,
+            runtime=RuntimeIdentity(
+                runtime_family="vllm_cuda",
+                runtime_label="vllm_cuda",
+                runtime_version="0.6.5",
+                engine_type=EngineType.VLLM_CUDA,
+                backend_type=BackendType.VLLM_CUDA,
+            ),
+            gpu=GPUDeviceMetadata(
+                accelerator_type="gpu",
+                vendor="nvidia",
+                model="L4",
+                count=1,
+                memory_per_device_gib=24.0,
+                cuda_version="12.4",
+            ),
             model_ids=["meta-llama/Llama-3.1-8B-Instruct"],
             serving_targets=["chat-shared"],
             max_context_tokens=8192,
             supports_streaming=True,
             concurrency_limit=8,
+            request_features=RequestFeatureSupport(
+                supports_streaming=True,
+                supports_response_format_json=True,
+                limitations=["no multimodal inputs"],
+            ),
         ),
         device_class=DeviceClass.NVIDIA_GPU,
+        runtime=RuntimeIdentity(
+            runtime_family="vllm_cuda",
+            runtime_label="vllm_cuda",
+            runtime_version="0.6.5",
+            engine_type=EngineType.VLLM_CUDA,
+            backend_type=BackendType.VLLM_CUDA,
+        ),
+        gpu=GPUDeviceMetadata(
+            accelerator_type="gpu",
+            vendor="nvidia",
+            model="L4",
+            count=1,
+            memory_per_device_gib=24.0,
+            cuda_version="12.4",
+        ),
         ready=ready,
         lifecycle_state=lifecycle_state,
+        observed_capacity=CapacitySnapshot(
+            concurrency_limit=8,
+            active_requests=0,
+            queue_depth=0,
+            tokens_per_second=120.0,
+            gpu_utilization_percent=65.0,
+        ),
     )
 
 
@@ -122,6 +168,12 @@ def test_remote_worker_registry_tracks_lifecycle_and_ready_state() -> None:
     assert snapshot.workers[0].heartbeat_count == 3
     assert snapshot.workers[0].lifecycle_state is WorkerLifecycleState.READY
     assert snapshot.workers[0].instance.registration.lifecycle_state is WorkerLifecycleState.READY
+    assert snapshot.workers[0].runtime is not None
+    assert snapshot.workers[0].runtime.runtime_label == "vllm_cuda"
+    assert snapshot.workers[0].gpu is not None
+    assert snapshot.workers[0].gpu.vendor == "nvidia"
+    assert snapshot.workers[0].observed_capacity is not None
+    assert snapshot.workers[0].observed_capacity.tokens_per_second == 120.0
 
 
 def test_remote_worker_registry_marks_lost_and_evicts_stale_workers() -> None:

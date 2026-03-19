@@ -165,6 +165,15 @@ class HybridConditionSource(StrEnum):
     PREDICTOR_ESTIMATE = "predictor_estimate"
 
 
+class CloudEvidenceSource(StrEnum):
+    """Evidence provenance for cloud placement or spend-like metadata."""
+
+    OBSERVED_RUNTIME = "observed_runtime"
+    DEPLOYMENT_METADATA_ESTIMATE = "deployment_metadata_estimate"
+    INJECTED_MOCK = "injected_mock"
+    UNKNOWN = "unknown"
+
+
 class HybridComparisonOutcome(StrEnum):
     """Human-facing interpretation of a hybrid comparison delta."""
 
@@ -172,6 +181,30 @@ class HybridComparisonOutcome(StrEnum):
     HARMFUL = "harmful"
     INCONCLUSIVE = "inconclusive"
     UNSUPPORTED = "unsupported"
+
+
+class CloudPlacementEvidence(BaseModel):
+    """Placement evidence attached to an observed or estimated execution path."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: CloudEvidenceSource = CloudEvidenceSource.UNKNOWN
+    provider: str | None = Field(default=None, min_length=1, max_length=128)
+    region: str | None = Field(default=None, min_length=1, max_length=128)
+    zone: str | None = Field(default=None, min_length=1, max_length=128)
+    notes: list[str] = Field(default_factory=list)
+
+
+class CloudCostEvidence(BaseModel):
+    """Cost evidence attached to an observed or estimated execution path."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: CloudEvidenceSource = CloudEvidenceSource.UNKNOWN
+    relative_cost_index: float | None = Field(default=None, ge=0.0)
+    budget_bucket: str | None = Field(default=None, min_length=1, max_length=128)
+    currency: str | None = Field(default=None, min_length=1, max_length=16)
+    notes: list[str] = Field(default_factory=list)
 
 
 class HybridConditionProfile(BaseModel):
@@ -186,6 +219,8 @@ class HybridConditionProfile(BaseModel):
     network_penalty_ms: float | None = Field(default=None, ge=0.0)
     cold_start_penalty_ms: float | None = Field(default=None, ge=0.0)
     modeled_cost: float | None = Field(default=None, ge=0.0)
+    placement_evidence: CloudPlacementEvidence | None = None
+    cost_evidence: CloudCostEvidence | None = None
     confidence: RecommendationConfidence | None = None
     notes: list[str] = Field(default_factory=list)
 
@@ -200,6 +235,8 @@ class HybridExecutionContext(BaseModel):
     observed_budget_outcome: RemoteBudgetOutcome = RemoteBudgetOutcome.UNKNOWN
     observed_network_penalty_ms: float | None = Field(default=None, ge=0.0)
     observed_modeled_cost: float | None = Field(default=None, ge=0.0)
+    observed_placement_evidence: CloudPlacementEvidence | None = None
+    observed_cost_evidence: CloudCostEvidence | None = None
     reason_codes: list[str] = Field(default_factory=list)
     injected_condition: HybridConditionProfile | None = None
     predictor_condition: HybridConditionProfile | None = None
@@ -223,6 +260,10 @@ class HybridBenchmarkSummary(BaseModel):
     unsupported_count: int = Field(default=0, ge=0)
     budget_exhausted_count: int = Field(default=0, ge=0)
     budget_disabled_count: int = Field(default=0, ge=0)
+    observed_placement_evidence_count: int = Field(default=0, ge=0)
+    estimated_placement_evidence_count: int = Field(default=0, ge=0)
+    observed_cost_evidence_count: int = Field(default=0, ge=0)
+    estimated_cost_evidence_count: int = Field(default=0, ge=0)
     avg_observed_network_penalty_ms: float | None = Field(default=None, ge=0.0)
     avg_injected_network_penalty_ms: float | None = Field(default=None, ge=0.0)
     avg_predicted_network_penalty_ms: float | None = Field(default=None, ge=0.0)

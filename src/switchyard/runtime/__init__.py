@@ -11,6 +11,7 @@ from switchyard.runtime.base import (
     RuntimeHealthSnapshot,
     RuntimeSamplingParams,
     RuntimeStreamChunk,
+    UnsupportedRequestError,
 )
 
 if TYPE_CHECKING:
@@ -20,6 +21,14 @@ if TYPE_CHECKING:
         MLXLMConfigurationError,
         MLXLMDependencyError,
         MLXLMRuntimeError,
+    )
+    from switchyard.runtime.vllm_cuda import (
+        ImportedVLLMCUDAProvider,
+        VLLMCUDAChatRuntime,
+        VLLMCUDAConfigurationError,
+        VLLMCUDADependencyError,
+        VLLMCUDARuntimeCapabilities,
+        VLLMCUDARuntimeError,
     )
     from switchyard.runtime.vllm_metal import (
         ImportedVLLMMetalProvider,
@@ -41,6 +50,13 @@ __all__ = [
     "RuntimeHealthSnapshot",
     "RuntimeSamplingParams",
     "RuntimeStreamChunk",
+    "UnsupportedRequestError",
+    "ImportedVLLMCUDAProvider",
+    "VLLMCUDAChatRuntime",
+    "VLLMCUDARuntimeCapabilities",
+    "VLLMCUDAConfigurationError",
+    "VLLMCUDADependencyError",
+    "VLLMCUDARuntimeError",
     "ImportedVLLMMetalProvider",
     "VLLMMetalChatRuntime",
     "VLLMMetalRuntimeCapabilities",
@@ -50,6 +66,18 @@ __all__ = [
 ]
 
 _OPTIONAL_RUNTIME_EXPORTS = {
+    "ImportedVLLMCUDAProvider": ("switchyard.runtime.vllm_cuda", "ImportedVLLMCUDAProvider"),
+    "VLLMCUDAChatRuntime": ("switchyard.runtime.vllm_cuda", "VLLMCUDAChatRuntime"),
+    "VLLMCUDARuntimeCapabilities": (
+        "switchyard.runtime.vllm_cuda",
+        "VLLMCUDARuntimeCapabilities",
+    ),
+    "VLLMCUDAConfigurationError": (
+        "switchyard.runtime.vllm_cuda",
+        "VLLMCUDAConfigurationError",
+    ),
+    "VLLMCUDADependencyError": ("switchyard.runtime.vllm_cuda", "VLLMCUDADependencyError"),
+    "VLLMCUDARuntimeError": ("switchyard.runtime.vllm_cuda", "VLLMCUDARuntimeError"),
     "ImportedMLXLMProvider": ("switchyard.runtime.mlx_lm", "ImportedMLXLMProvider"),
     "MLXLMChatRuntime": ("switchyard.runtime.mlx_lm", "MLXLMChatRuntime"),
     "MLXLMConfigurationError": ("switchyard.runtime.mlx_lm", "MLXLMConfigurationError"),

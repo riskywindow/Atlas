@@ -15,68 +15,77 @@ The goal is **not** to build a thin LLM wrapper. The goal is to build a serious 
 ---
 
 ## Current phase
-**Phase 7: hybrid local/remote execution and cloud-ready worker foundations**
+**Phase 8: first real cloud-backed execution and Linux/NVIDIA worker bring-up**
 
-Phase 7 builds on the Phase 6 deployable control plane, explicit worker topology,
-explainable routing, deterministic request features, historical summaries, and offline
-simulation. The new work is about making remote workers first-class topology members
-without giving up the Mac-first local path, testability in CI, or backend-agnostic
-control-plane contracts.
+Phase 8 builds on the Phase 7 hybrid local/remote control plane, typed worker topology,
+registration and lifecycle posture, explainable routing, deterministic request
+features, historical summaries, and offline simulation. The new work is about turning
+the cloud-ready boundary into the first real cloud-backed execution path without giving
+up the Mac-first developer workflow, CI portability, or backend-agnostic control-plane
+contracts.
 
-Phase 7 introduces secure worker registration and lifecycle posture, hybrid routing and
-spillover guardrails, remote-aware benchmark and replay surfaces, operator-facing
-budgets and remote health views, and deployment/package scaffolding for later Linux and
-NVIDIA-backed workers such as `vllm_cuda`. Real remote GPU rentals are not required yet;
-the design should remain typed, testable, replayable, and explainable with mocks and
-portable worker protocol boundaries.
+Phase 8 introduces the first real Linux/NVIDIA worker path behind the generic worker
+contract, a concrete `vllm_cuda`-style remote backend, honest cloud-backed benchmark
+and reporting semantics, operator-visible placement/spend/health posture, and bounded,
+canaryable, reversible rollout controls. Observed cloud/runtime evidence must remain
+explicitly distinct from estimates, mock injections, and offline predictors.
 
-### Definition of done for Phase 7
-Phase 7 is complete when all of the following are true:
+### Definition of done for Phase 8
+Phase 8 is complete when all of the following are true:
 1. The repo keeps a clean Python workspace with linting, typing, and tests.
 2. There are at least two real backend adapter paths behind the shared contracts:
    - `mlx_lm`
    - `vllm_metal`
-3. The FastAPI gateway still serves `GET /healthz`, `GET /readyz`, and
+3. There is a first real Linux/NVIDIA remote worker path behind the shared worker
+   contract:
+   - `vllm_cuda` or an equivalent `vllm_cuda`-style remote backend deployment.
+4. The FastAPI gateway still serves `GET /healthz`, `GET /readyz`, and
    `POST /v1/chat/completions`, now with health-aware fallback across routed candidates.
-4. Router policy modes, overload admission, backend protection, and progressive-delivery
+5. Router policy modes, overload admission, backend protection, and progressive-delivery
    decisions remain outside the HTTP layer and are benchmarkable without spinning up the
    API.
-5. Structured logging and telemetry include route-level decision, overload, fallback,
+6. Structured logging and telemetry include route-level decision, overload, fallback,
    circuit-breaker, and degradation signals.
-6. Session affinity can keep multi-turn chat on a stable serving path without coupling
+7. Session affinity can keep multi-turn chat on a stable serving path without coupling
    the control plane to hardware-specific logic.
-7. Shadow traffic and canary routing stay explicit, bounded, and safe by default for
+8. Shadow traffic and canary routing stay explicit, bounded, and safe by default for
    local and CI workflows.
    Shadow traffic must never change the primary user-visible response path.
-8. Typed backend inventory can describe multiple backend instances per deployment,
+9. Typed backend inventory can describe multiple backend instances per deployment,
    including explicit network endpoints for future remote or containerized workers.
-9. Apple-specific imports stay lazy and optional so CI-friendly tests do not require
+10. Apple-specific imports stay lazy and optional so CI-friendly tests do not require
    Apple GPU hardware and portable control-plane images do not pull those dependencies in
    by default.
-10. The control plane has a containerized local deployment path, a Docker Compose stack,
+11. The control plane has a containerized local deployment path, a Docker Compose stack,
    and a documented `kind` path that preserve the single-workspace developer model.
-11. Benchmark and replay tooling can compare aliases, policies, pinned backends,
+12. Benchmark and replay tooling can compare aliases, policies, pinned backends,
    deployment variants, and progressive-delivery variants with machine-readable
    artifacts and readable markdown reports.
-12. Route decisions and benchmark/replay artifacts carry deterministic request and
+13. Route decisions and benchmark/replay artifacts carry deterministic request and
     workload features, including repeated-prefix and locality signals, without exposing
     opaque hardware-specific routing logic.
-13. Historical performance summaries and policy/scorer explanations are serializable,
+14. Historical performance summaries and policy/scorer explanations are serializable,
     diffable, and usable by offline policy-comparison workflows.
-14. An offline simulation harness can compare baseline, shadow-scored, and guarded
+15. An offline simulation harness can compare baseline, shadow-scored, and guarded
     adaptive policies against captured or synthetic traces without requiring Apple GPU
     access in CI.
-15. Remote workers are first-class topology members with typed registration state,
+16. Remote workers are first-class topology members with typed registration state,
     heartbeat/lifecycle metadata, and operator-visible remote health summaries.
-16. Hybrid execution guardrails are explicit and inspectable:
+17. Hybrid execution guardrails are explicit and inspectable:
     spillover remains bounded,
     local-preference behavior stays configurable,
     and remote budget posture is visible to operators and artifacts.
-17. Benchmark, replay, and reporting surfaces can distinguish local versus remote
+18. Benchmark, replay, and reporting surfaces can distinguish local versus remote
     execution paths and preserve that information in serializable outputs.
-18. Deployment docs and packaging scaffolding cover local host-native backends,
-    portable control-plane images, and later Linux/NVIDIA worker extensions without
-    requiring actual GPU rental in CI.
+19. Observed cloud/runtime evidence is kept distinct from estimates, predictor outputs,
+    and mock results in typed schemas, operator surfaces, and benchmark/report artifacts.
+20. The first real cloud path is canaryable, bounded, and reversible:
+    canaries stay explicit,
+    budget and kill-switch posture are operator-visible,
+    and rollback does not require a control-plane refactor.
+21. Deployment docs and runbooks cover local host-native backends, portable
+    control-plane images, and the first rented-GPU bring-up path without requiring
+    actual GPU rental in CI.
 
 ---
 
@@ -84,24 +93,35 @@ Phase 7 is complete when all of the following are true:
 
 ### Platform constraints
 - Primary development machine: **Apple Silicon Mac (M4 Pro, 24GB RAM)**.
-- During the Mac-first phase, **real model backends should run host-native on macOS**.
+- Mac-first local development remains the default.
+- During the Mac-first phase, **real local model backends should run host-native on macOS**.
 - Containerized services are fine for infra such as Postgres, Redis, Prometheus, Grafana, and the OpenTelemetry Collector.
-- Do **not** add CUDA-only or Triton-only runtime dependencies in Phase 7.
-- Keep the design explicitly portable so later phases can add `vllm_cuda` or other remote GPU workers.
+- Do **not** require CUDA-only or Triton-only runtime dependencies in the default
+  control-plane workspace for Phase 8.
+- Linux/NVIDIA worker dependencies should stay isolated to explicit worker extras,
+  images, or packaging boundaries.
+- Keep the design explicitly portable so later phases can add more remote GPU workers
+  beyond the first real `vllm_cuda` path.
 
 ### Scope constraints
-- Phase 7 should preserve **two real Mac-native backend paths** behind the same adapter boundary:
+- Phase 8 should preserve **two real Mac-native backend paths** behind the same adapter boundary:
   - `mlx_lm`
   - `vllm_metal`
+- Phase 8 should add the first real Linux/NVIDIA remote worker path behind the generic
+  worker contract without making the control plane hardware-aware.
 - A single logical model alias may map to multiple backend implementations. Registration, routing, and benchmarks should preserve that abstraction instead of assuming one alias implies one runtime.
 - A single logical backend deployment may map to multiple explicit worker instances with
   distinct network addresses. Inventory should stay typed and portable to future remote
   workers.
-- Avoid premature multi-service complexity. In Phase 7, a **single Python workspace** is still preferred over many separate packages.
+- Observed cloud/runtime evidence must remain explicitly distinct from estimates,
+  predictors, and mock results in typed outputs.
+- Avoid premature multi-service complexity. In Phase 8, a **single Python workspace** is still preferred over many separate packages.
 - Do not build a frontend UI yet.
 - A small `kind` deployment path is in scope, but avoid a production-grade Kubernetes
   platform build-out.
-- Do not introduce Ray into the request path in Phase 7.
+- Do not introduce Ray into the request path in Phase 8.
+- Prepare for later Forge Stage A by preserving typed evidence, config, and replay
+  surfaces, but do not implement Forge Stage A in Phase 8.
 
 ### Quality constraints
 - Prefer **small vertical slices** over giant speculative scaffolding.
@@ -138,7 +158,7 @@ Phase 7 is complete when all of the following are true:
 
 ---
 
-## Recommended stack for Phase 7
+## Recommended stack for Phase 8
 - Python 3.12
 - `uv` for environment and dependency management
 - FastAPI
@@ -448,6 +468,16 @@ When choosing between multiple valid next steps, prefer this order:
 5. Keep Apple-specific runtime dependencies isolated from the portable control-plane packaging
 6. Preserve adapter portability for future `vllm_cuda`, cloud, and remote workers
 7. Update deployment docs, routing docs, and local dev ergonomics
+
+## Phase 8 implementation priorities
+When choosing between multiple valid next steps, prefer this order:
+1. Keep the shared contracts, routing core, and Phase 7 test baseline clean
+2. Add the first real Linux/NVIDIA worker path behind the existing worker protocol
+3. Preserve cross-backend alias compatibility across local Apple and remote cloud paths
+4. Make observed cloud/runtime evidence explicit and keep it distinct from estimates or mock results
+5. Keep the first real cloud path canaryable, budget-bounded, and operator-reversible
+6. Preserve the Mac-first local developer workflow and portable control-plane packaging
+7. Extend docs, runbooks, and benchmark/report semantics before expanding cloud automation
 
 ---
 

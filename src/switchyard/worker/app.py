@@ -21,10 +21,12 @@ from switchyard.logging import (
     configure_logging,
     get_logger,
 )
+from switchyard.runtime.base import UnsupportedRequestError
 from switchyard.schemas.backend import (
     BackendHealth,
     BackendHealthState,
     BackendLoadState,
+    CapacitySnapshot,
 )
 from switchyard.schemas.chat import (
     ChatCompletionRequest,
@@ -59,6 +61,9 @@ class WorkerServiceState:
     active_requests: int = 0
     last_warmup_error: str | None = None
     warmup_in_progress: bool = False
+    draining: bool = False
+    drain_reason: str | None = None
+    drain_timeout_seconds: float = 15.0
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     async def initialize(self) -> None:
@@ -75,11 +80,25 @@ class WorkerServiceState:
         """Return the typed capabilities envelope."""
 
         capabilities = await self.adapter.capabilities()
+        deployment = None
+        status = getattr(self.adapter, "status", None)
+        if callable(status):
+            try:
+                status_snapshot = await status()
+            except Exception:
+                status_snapshot = None
+            if status_snapshot is not None:
+                deployment = status_snapshot.deployment
         return WorkerCapabilitiesResponse(
             worker_name=self.worker_name,
+            runtime=capabilities.runtime.model_copy(deep=True)
+            if capabilities.runtime is not None
+            else None,
+            gpu=capabilities.gpu.model_copy(deep=True) if capabilities.gpu is not None else None,
             backend_type=capabilities.backend_type,
             execution_mode=capabilities.execution_mode,
             capabilities=capabilities,
+            deployment=deployment,
         )
 
     async def health_response(self) -> WorkerHealthResponse:
@@ -93,9 +112,14 @@ class WorkerServiceState:
     async def readiness_response(self) -> WorkerReadinessResponse:
         """Return the typed readiness envelope."""
 
+        capabilities = await self.adapter.capabilities()
         health = await self.current_health()
         return WorkerReadinessResponse(
             worker_name=self.worker_name,
+            runtime=capabilities.runtime.model_copy(deep=True)
+            if capabilities.runtime is not None
+            else None,
+            gpu=capabilities.gpu.model_copy(deep=True) if capabilities.gpu is not None else None,
             ready=(
                 health.state is not BackendHealthState.UNAVAILABLE
                 and health.load_state is BackendLoadState.READY
@@ -103,6 +127,11 @@ class WorkerServiceState:
             ),
             active_requests=self.active_requests,
             queue_depth=0,
+            observed_capacity=CapacitySnapshot(
+                concurrency_limit=capabilities.concurrency_limit,
+                active_requests=self.active_requests,
+                queue_depth=0,
+            ),
             health=health,
         )
 
@@ -132,6 +161,16 @@ class WorkerServiceState:
         """Return health with local warmup state applied."""
 
         health = (await self.adapter.health()).model_copy(deep=True)
+        if self.draining:
+            health.state = BackendHealthState.DEGRADED
+            if self.drain_reason:
+                health.detail = (
+                    self.drain_reason
+                    if "drain" in self.drain_reason.lower()
+                    else f"worker draining: {self.drain_reason}"
+                )
+            else:
+                health.detail = "worker draining"
         if self.warmup_in_progress:
             health.load_state = BackendLoadState.WARMING
             if health.detail is None:
@@ -155,6 +194,20 @@ class WorkerServiceState:
             async with self._lock:
                 self.active_requests -= 1
 
+    async def begin_drain(self, *, reason: str) -> None:
+        """Stop accepting new work and advertise a draining posture."""
+
+        async with self._lock:
+            self.draining = True
+            self.drain_reason = reason
+
+    async def wait_for_drain(self) -> None:
+        """Wait for in-flight requests to complete during shutdown."""
+
+        deadline = asyncio.get_running_loop().time() + self.drain_timeout_seconds
+        while self.active_requests > 0 and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.01)
+
 
 def create_worker_app(
     adapter: BackendAdapter,
@@ -163,6 +216,7 @@ def create_worker_app(
     warmup_on_start: bool = False,
     warmup_model_id: str | None = None,
     log_level: str = "INFO",
+    drain_timeout_seconds: float = 15.0,
 ) -> FastAPI:
     """Create a worker-serving FastAPI app around a single adapter."""
 
@@ -172,12 +226,17 @@ def create_worker_app(
         worker_name=worker_name or adapter.name,
         warmup_on_start=warmup_on_start,
         warmup_model_id=warmup_model_id,
+        drain_timeout_seconds=drain_timeout_seconds,
     )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await state.initialize()
-        yield
+        try:
+            yield
+        finally:
+            await state.begin_drain(reason="worker shutdown in progress")
+            await state.wait_for_drain()
 
     app = FastAPI(title=f"Switchyard Worker: {state.worker_name}", lifespan=lifespan)
     app.state.worker = state
@@ -223,6 +282,16 @@ def create_worker_app(
     ) -> JSONResponse:
         if isinstance(exc, HTTPException):
             raise exc
+        if isinstance(exc, UnsupportedRequestError):
+            payload = ErrorResponse(
+                code="unsupported_request",
+                message=str(exc),
+                request_id=getattr(request.state, "request_id", None),
+            )
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content=payload.model_dump(mode="json"),
+            )
         logger.exception(
             "worker_request_failed",
             worker_name=state.worker_name,
@@ -247,6 +316,8 @@ def create_worker_app(
     @app.get("/internal/worker/ready", response_model=WorkerReadinessResponse)
     async def readiness(request: Request) -> WorkerReadinessResponse:
         response = await state.readiness_response()
+        if state.draining:
+            response.ready = False
         response.transport_metadata = _response_metadata(request)
         return response
 
@@ -274,6 +345,7 @@ def create_worker_app(
         _apply_request_metadata(request, payload.transport_metadata)
         if payload.transport_metadata is None:
             _apply_context_metadata(request, payload.context)
+        _raise_if_draining(state)
         async with state.track_request():
             response = await adapter.generate(payload.request, payload.context)
         return WorkerGenerateResponse(
@@ -290,6 +362,7 @@ def create_worker_app(
         _apply_request_metadata(request, payload.transport_metadata)
         if payload.transport_metadata is None:
             _apply_context_metadata(request, payload.context)
+        _raise_if_draining(state)
         return StreamingResponse(
             _stream_worker_chunks(
                 state=state,
@@ -305,6 +378,7 @@ def create_worker_app(
         payload: ChatCompletionRequest,
         request: Request,
     ) -> ChatCompletionResponse | StreamingResponse:
+        _raise_if_draining(state)
         context = RequestContext(
             request_id=request.state.request_id,
             policy=RoutingPolicy.LOCAL_ONLY,
@@ -389,3 +463,12 @@ def _parse_timeout_ms(raw_value: str | None) -> int | None:
     except ValueError:
         return None
     return parsed if parsed > 0 else None
+
+
+def _raise_if_draining(state: WorkerServiceState) -> None:
+    if not state.draining:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail=state.drain_reason or "worker draining",
+    )

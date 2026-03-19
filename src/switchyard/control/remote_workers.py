@@ -13,10 +13,13 @@ from datetime import UTC, datetime, timedelta
 
 from switchyard.config import RemoteWorkerLifecycleSettings
 from switchyard.schemas.backend import (
+    BackendDeployment,
     BackendHealth,
     BackendHealthState,
     BackendInstance,
     BackendRegistrationMetadata,
+    CapacitySnapshot,
+    DeploymentProfile,
     WorkerLifecycleState,
     WorkerRegistrationState,
 )
@@ -50,6 +53,7 @@ class _RegisteredWorkerState:
     active_requests: int
     queue_depth: int
     heartbeat_count: int
+    observed_capacity: CapacitySnapshot | None
     health: BackendHealth | None
     metadata: dict[str, str]
     operator_tags: set[str]
@@ -99,6 +103,11 @@ class RemoteWorkerRegistryService:
             active_requests=request.active_requests,
             queue_depth=request.queue_depth,
             heartbeat_count=1,
+            observed_capacity=(
+                request.observed_capacity.model_copy(deep=True)
+                if request.observed_capacity is not None
+                else None
+            ),
             health=request.health.model_copy(deep=True) if request.health is not None else None,
             metadata=dict(request.metadata),
             operator_tags=set(),
@@ -136,6 +145,11 @@ class RemoteWorkerRegistryService:
         state.active_requests = request.active_requests
         state.queue_depth = request.queue_depth
         state.heartbeat_count += 1
+        state.observed_capacity = (
+            request.observed_capacity.model_copy(deep=True)
+            if request.observed_capacity is not None
+            else state.observed_capacity
+        )
         state.health = request.health.model_copy(deep=True) if request.health is not None else None
         state.metadata = {**state.metadata, **dict(request.metadata)}
         if request.ready is not None:
@@ -396,6 +410,8 @@ class RemoteWorkerRegistryService:
             backend_type=request.backend_type,
             device_class=request.device_class,
             model_identifier=request.model_identifier,
+            runtime=request.runtime.model_copy(deep=True) if request.runtime is not None else None,
+            gpu=request.gpu.model_copy(deep=True) if request.gpu is not None else None,
             locality=request.locality,
             locality_class=request.locality_class,
             execution_mode=request.execution_mode,
@@ -420,6 +436,11 @@ class RemoteWorkerRegistryService:
                 source="dynamic_registration",
             ),
             health=health,
+            observed_capacity=(
+                state.observed_capacity.model_copy(deep=True)
+                if state.observed_capacity is not None
+                else None
+            ),
             last_seen_at=state.last_heartbeat_at if live else None,
             image_metadata=request.image_metadata.model_copy(deep=True)
             if request.image_metadata is not None
@@ -452,6 +473,14 @@ class RemoteWorkerRegistryService:
             queue_depth=state.queue_depth,
             heartbeat_count=state.heartbeat_count,
             capabilities=request.capabilities.model_copy(deep=True),
+            runtime=request.runtime.model_copy(deep=True) if request.runtime is not None else None,
+            gpu=request.gpu.model_copy(deep=True) if request.gpu is not None else None,
+            deployment=instance_to_deployment(request, instance),
+            observed_capacity=(
+                state.observed_capacity.model_copy(deep=True)
+                if state.observed_capacity is not None
+                else None
+            ),
             token_verified=state.enrollment_verified,
             instance=instance,
             metadata={
@@ -489,7 +518,6 @@ class RemoteWorkerRegistryService:
             token_verified=state.enrollment_verified,
             lease_token=state.lease_token if include_lease_token else None,
         )
-
     def _require_worker(self, worker_id: str) -> _RegisteredWorkerState:
         state = self._workers.get(worker_id)
         if state is None:
@@ -620,6 +648,41 @@ class RemoteWorkerRegistryService:
                 metadata=metadata or {},
             )
         )
+
+
+def instance_to_deployment(
+    request: RemoteWorkerRegistrationRequest,
+    instance: BackendInstance,
+) -> BackendDeployment:
+    """Build a deployment snapshot for one registered remote worker."""
+
+    return BackendDeployment(
+        name=f"remote-worker:{request.worker_name}",
+        backend_type=request.backend_type,
+        engine_type=request.capabilities.engine_type,
+        model_identifier=request.model_identifier,
+        runtime=request.runtime.model_copy(deep=True) if request.runtime is not None else None,
+        gpu=request.gpu.model_copy(deep=True) if request.gpu is not None else None,
+        serving_targets=list(request.serving_targets),
+        deployment_profile=DeploymentProfile.REMOTE,
+        execution_mode=request.execution_mode,
+        environment=request.environment,
+        placement=request.placement.model_copy(deep=True),
+        cost_profile=request.cost_profile.model_copy(deep=True),
+        readiness_hints=request.readiness_hints.model_copy(deep=True),
+        request_features=request.capabilities.request_features.model_copy(deep=True),
+        observed_capacity=(
+            instance.observed_capacity.model_copy(deep=True)
+            if instance.observed_capacity is not None
+            else None
+        ),
+        build_metadata=(
+            request.image_metadata.model_copy(deep=True)
+            if request.image_metadata is not None
+            else None
+        ),
+        instances=[instance],
+    )
 
 
 def build_signed_enrollment_token(

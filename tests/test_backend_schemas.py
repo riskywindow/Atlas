@@ -14,6 +14,7 @@ from switchyard.schemas.backend import (
     BackendStatusSnapshot,
     BackendType,
     CacheCapabilityFlags,
+    CapacitySnapshot,
     CloudPlacementMetadata,
     CostBudgetProfile,
     CostProfileClass,
@@ -21,11 +22,14 @@ from switchyard.schemas.backend import (
     DeviceClass,
     EngineType,
     ExecutionModeLabel,
+    GPUDeviceMetadata,
     LogicalModelTarget,
     NetworkProfile,
     PerformanceHint,
     QualityHint,
     ReadinessHints,
+    RequestFeatureSupport,
+    RuntimeIdentity,
     TopologySchemaVersion,
     TrustMetadata,
     WorkerAuthState,
@@ -43,6 +47,7 @@ def test_backend_snapshot_serializes() -> None:
             backend_type=BackendType.MOCK,
             engine_type=EngineType.MOCK,
             device_class=DeviceClass.CPU,
+            runtime=RuntimeIdentity(runtime_family="mock", runtime_label="mock"),
             model_ids=["mock-chat"],
             serving_targets=["chat-default"],
             max_context_tokens=8192,
@@ -53,16 +58,23 @@ def test_backend_snapshot_serializes() -> None:
             model_aliases={"chat-default": "mock-chat"},
             default_model="mock-chat",
             cache_capabilities=CacheCapabilityFlags(supports_prefix_cache=True),
+            request_features=RequestFeatureSupport(
+                supports_streaming=False,
+                supports_response_format_json=True,
+                unsupported_request_fields=["logprobs"],
+            ),
         ),
         deployment=BackendDeployment(
             name="mock-a",
             backend_type=BackendType.MOCK,
             engine_type=EngineType.MOCK,
             model_identifier="mock-chat",
+            runtime=RuntimeIdentity(runtime_family="mock", runtime_label="mock"),
             serving_targets=["chat-default"],
             configured_priority=50,
             configured_weight=2.0,
             execution_mode=ExecutionModeLabel.HOST_NATIVE,
+            request_features=RequestFeatureSupport(supports_response_format_json=True),
             instances=[
                 BackendInstance(
                     instance_id="mock-a-1",
@@ -74,6 +86,7 @@ def test_backend_snapshot_serializes() -> None:
                     backend_type=BackendType.MOCK,
                     device_class=DeviceClass.CPU,
                     model_identifier="mock-chat",
+                    runtime=RuntimeIdentity(runtime_family="mock", runtime_label="mock"),
                     locality_class=WorkerLocalityClass.LOCAL_NETWORK,
                     execution_mode=ExecutionModeLabel.HOST_NATIVE,
                     placement=CloudPlacementMetadata(provider="local-lab", region="dev"),
@@ -90,6 +103,11 @@ def test_backend_snapshot_serializes() -> None:
                     health=BackendHealth(
                         state=BackendHealthState.HEALTHY,
                         load_state=BackendLoadState.READY,
+                    ),
+                    observed_capacity=CapacitySnapshot(
+                        concurrency_limit=2,
+                        active_requests=1,
+                        queue_depth=0,
                     ),
                     image_metadata=BackendImageMetadata(image_tag="switchyard/mock:dev"),
                 )
@@ -117,6 +135,9 @@ def test_backend_snapshot_serializes() -> None:
     assert payload["capabilities"]["backend_type"] == "mock"
     assert payload["capabilities"]["topology_schema_version"] == TopologySchemaVersion.V1.value
     assert payload["capabilities"]["engine_type"] == "mock"
+    assert payload["capabilities"]["runtime"]["runtime_label"] == "mock"
+    assert payload["capabilities"]["request_features"]["supports_streaming"] is False
+    assert payload["capabilities"]["request_features"]["supports_response_format_json"] is True
     assert payload["capabilities"]["readiness_hints"]["cold_start_likely"] is False
     assert payload["capabilities"]["serving_targets"] == ["chat-default"]
     assert payload["health"]["state"] == "healthy"
@@ -125,6 +146,7 @@ def test_backend_snapshot_serializes() -> None:
     assert payload["deployment"]["configured_priority"] == 50
     assert payload["deployment"]["deployment_profile"] == "compose"
     assert payload["deployment"]["execution_mode"] == "host_native"
+    assert payload["deployment"]["runtime"]["runtime_family"] == "mock"
     assert payload["deployment"]["placement"]["provider"] == "local-lab"
     assert payload["deployment"]["environment"] == "dev"
     assert payload["deployment"]["instances"][0]["endpoint"]["base_url"] == "http://127.0.0.1:8101"
@@ -132,6 +154,8 @@ def test_backend_snapshot_serializes() -> None:
     assert payload["deployment"]["instances"][0]["source_of_truth"] == "registered"
     assert payload["deployment"]["instances"][0]["locality_class"] == "local_network"
     assert payload["deployment"]["instances"][0]["execution_mode"] == "host_native"
+    assert payload["deployment"]["instances"][0]["runtime"]["runtime_label"] == "mock"
+    assert payload["deployment"]["instances"][0]["observed_capacity"]["available_slots"] == 1
     assert payload["deployment"]["instances"][0]["placement"]["provider"] == "local-lab"
     assert payload["deployment"]["instances"][0]["cost_profile"]["profile"] == "local"
     assert payload["deployment"]["instances"][0]["trust"]["auth_state"] == "static_token"
@@ -202,6 +226,34 @@ def test_backend_capabilities_support_logical_serving_targets() -> None:
     assert capabilities.supports_model_target("chat-default") is True
     assert capabilities.supports_model_target("mlx-community/Qwen") is True
     assert capabilities.supports_model_target("missing-model") is False
+
+
+def test_backend_capabilities_infer_runtime_identity_and_request_feature_defaults() -> None:
+    capabilities = BackendCapabilities(
+        backend_type=BackendType.VLLM_CUDA,
+        engine_type=EngineType.VLLM_CUDA,
+        device_class=DeviceClass.NVIDIA_GPU,
+        gpu=GPUDeviceMetadata(
+            accelerator_type="gpu",
+            vendor="nvidia",
+            model="L4",
+            count=2,
+            memory_per_device_gib=24.0,
+            cuda_version="12.4",
+        ),
+        model_ids=["meta-llama/Llama-3.1-8B-Instruct"],
+        max_context_tokens=32768,
+        supports_streaming=True,
+        supports_tools=True,
+    )
+
+    assert capabilities.runtime is not None
+    assert capabilities.runtime.runtime_family == "vllm_cuda"
+    assert capabilities.runtime.runtime_label == "vllm_cuda"
+    assert capabilities.request_features.supports_streaming is True
+    assert capabilities.request_features.supports_tools is True
+    assert capabilities.gpu is not None
+    assert capabilities.gpu.total_memory_gib == 48.0
 
 
 def test_backend_network_endpoint_rejects_relative_paths() -> None:

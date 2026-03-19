@@ -527,6 +527,10 @@ class RemoteWorkerAdapter:
         if capabilities.device_class is DeviceClass.REMOTE:
             capabilities.device_class = instance_config.device_class or DeviceClass.REMOTE
         capabilities.execution_mode = self.model_config.execution_mode
+        if capabilities.runtime is None and self.model_config.runtime is not None:
+            capabilities.runtime = self.model_config.runtime.model_copy(deep=True)
+        if capabilities.gpu is None and self.model_config.gpu is not None:
+            capabilities.gpu = self.model_config.gpu.model_copy(deep=True)
         capabilities.placement = self.model_config.placement.model_copy(deep=True)
         capabilities.cost_profile = self.model_config.cost_profile.model_copy(deep=True)
         capabilities.readiness_hints = self.model_config.readiness_hints.model_copy(deep=True)
@@ -568,6 +572,27 @@ class RemoteWorkerAdapter:
                 placement=self.model_config.placement.model_copy(deep=True),
                 cost_profile=self.model_config.cost_profile.model_copy(deep=True),
                 readiness_hints=self.model_config.readiness_hints.model_copy(deep=True),
+                runtime=(
+                    capabilities.runtime.model_copy(deep=True)
+                    if capabilities.runtime is not None
+                    else self.model_config.runtime.model_copy(deep=True)
+                    if self.model_config.runtime is not None
+                    else None
+                ),
+                gpu=(
+                    capabilities.gpu.model_copy(deep=True)
+                    if capabilities.gpu is not None
+                    else self.model_config.gpu.model_copy(deep=True)
+                    if self.model_config.gpu is not None
+                    else None
+                ),
+                request_features=capabilities.request_features.model_copy(deep=True),
+                observed_capacity=(
+                    preferred_instance.instance.observed_capacity.model_copy(deep=True)
+                    if preferred_instance is not None
+                    and preferred_instance.instance.observed_capacity is not None
+                    else None
+                ),
                 instances=[status.instance for status in statuses],
             ),
             instance_inventory=[status.instance for status in statuses],
@@ -691,6 +716,12 @@ class RemoteWorkerAdapter:
             network_characteristics=self.model_config.network_characteristics.model_copy(
                 deep=True
             ),
+            runtime=self.model_config.runtime.model_copy(deep=True)
+            if self.model_config.runtime is not None
+            else None,
+            gpu=self.model_config.gpu.model_copy(deep=True)
+            if self.model_config.gpu is not None
+            else None,
         )
 
     async def _select_instance_config(self) -> BackendInstanceConfig:
@@ -712,6 +743,7 @@ class RemoteWorkerAdapter:
         statuses: list[RemoteWorkerInstanceStatus] = []
         for instance_config in self._instance_configs:
             health = await self._health_for_instance(instance_config)
+            readiness: WorkerReadinessResponse | None = None
             ready = False
             active_requests = 0
             queue_depth = 0
@@ -736,6 +768,13 @@ class RemoteWorkerAdapter:
                 model_identifier=self.model_config.model_identifier,
             )
             instance.health = health.model_copy(deep=True)
+            if readiness is not None:
+                if readiness.runtime is not None:
+                    instance.runtime = readiness.runtime.model_copy(deep=True)
+                if readiness.gpu is not None:
+                    instance.gpu = readiness.gpu.model_copy(deep=True)
+                if readiness.observed_capacity is not None:
+                    instance.observed_capacity = readiness.observed_capacity.model_copy(deep=True)
             instance.last_seen_at = (
                 health.checked_at if health.state is not BackendHealthState.UNAVAILABLE else None
             )

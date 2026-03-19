@@ -61,6 +61,9 @@ from switchyard.schemas.benchmark import (
     BenchmarkWarmupConfig,
     CacheObservation,
     CapturedTraceRecord,
+    CloudCostEvidence,
+    CloudEvidenceSource,
+    CloudPlacementEvidence,
     ComparisonSourceKind,
     CounterfactualObjective,
     CounterfactualSimulationComparisonArtifact,
@@ -797,6 +800,17 @@ def test_summarize_records_captures_hybrid_evidence_honestly() -> None:
             hybrid_context=HybridExecutionContext(
                 observed_execution_path=HybridExecutionPath.HYBRID_SPILLOVER,
                 observed_remote_temperature=RemoteTemperature.WARM,
+                observed_placement_evidence=CloudPlacementEvidence(
+                    source=CloudEvidenceSource.DEPLOYMENT_METADATA_ESTIMATE,
+                    provider="aws",
+                    region="us-east-1",
+                    zone="us-east-1a",
+                ),
+                observed_cost_evidence=CloudCostEvidence(
+                    source=CloudEvidenceSource.DEPLOYMENT_METADATA_ESTIMATE,
+                    relative_cost_index=0.05,
+                    budget_bucket="gpu-dev",
+                ),
                 injected_condition=HybridConditionProfile(
                     source=HybridConditionSource.INJECTED_MOCK,
                     execution_path=HybridExecutionPath.HYBRID_SPILLOVER,
@@ -825,6 +839,8 @@ def test_summarize_records_captures_hybrid_evidence_honestly() -> None:
     assert summary.hybrid_summary.hybrid_spillover_count == 1
     assert summary.hybrid_summary.injected_condition_count == 1
     assert summary.hybrid_summary.unsupported_count == 1
+    assert summary.hybrid_summary.estimated_placement_evidence_count == 1
+    assert summary.hybrid_summary.estimated_cost_evidence_count == 1
     assert summary.hybrid_summary.total_modeled_cost == 0.05
 
 

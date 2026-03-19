@@ -1,6 +1,6 @@
 # Switchyard
 
-Switchyard is a Mac-first, backend-agnostic inference fabric. In Phase 7 it can expose
+Switchyard is a Mac-first, backend-agnostic inference fabric. In Phase 8 it can expose
 one logical model alias through either MLX-LM, vLLM-Metal, or both, route requests
 across explicit network-addressable worker instances, and emit typed route decisions
 that are benchmarkable, replayable, and explainable. The current routing slice carries
@@ -10,19 +10,19 @@ session-affinity reuse, records canary/shadow decisions in runtime inspection an
 benchmark artifacts, and preserves deterministic request-feature extraction for
 cache/locality-aware scorers and offline policy simulation.
 
-Phase 7 adds a hybrid control-plane layer on top of that baseline:
+Phase 8 adds the first real cloud-backed execution path on top of that baseline:
 
 - remote workers are first-class topology members rather than special cases,
 - hybrid local/remote routing stays explainable and bounded by explicit spillover and
   budget guardrails,
 - remote lifecycle and health posture are visible through admin/runtime surfaces,
 - benchmark and replay artifacts preserve remote-versus-local execution truth,
-- control-plane packaging stays portable while later Linux/NVIDIA workers remain a clean
-  extension path,
+- the first Linux/NVIDIA worker path fits the same generic worker contract,
+- control-plane packaging stays portable while cloud worker dependencies remain isolated,
 - optimization-ready config surfaces and config fingerprints prepare the repo for later
   Forge Stage A work without starting autotuning yet.
 
-More specifically, Phase 7 includes:
+More specifically, the current repo includes:
 - deterministic request and workload feature extraction,
 - repeated-prefix and locality-aware signals without storing raw prompt text,
 - historical performance summaries and transparent predictor inputs,
@@ -35,8 +35,10 @@ More specifically, Phase 7 includes:
 - operator-visible remote spillover budgets and remote-health summaries,
 - remote worker lifecycle posture for later secure registration and cloud-ready workers,
 - optimization-ready config and export surfaces for later Forge Stage A work.
+- explicit separation between observed cloud/runtime evidence and estimated or mock
+  evidence in typed operator and benchmark surfaces.
 
-Phase 7 is Mac-first, not Mac-locked:
+Phase 8 is Mac-first, not Mac-locked:
 - real local backends are currently Apple Silicon focused,
 - the gateway, router, schemas, and artifacts stay backend-agnostic,
 - Apple-specific imports stay behind adapter and runtime boundaries,
@@ -44,7 +46,7 @@ Phase 7 is Mac-first, not Mac-locked:
 - the same control plane is intended to grow into future `vllm_cuda` and remote worker
   backends.
 
-## Phase 7 Setup
+## Phase 8 Setup
 
 ### Prerequisites
 
@@ -119,9 +121,9 @@ Notes:
 - Portable control-plane packaging should continue to work without either Apple-worker
   extra installed.
 
-## Mac-First Phase 7 Workflow
+## Mac-First Phase 8 Workflow
 
-Phase 7 is built around one explicit split:
+Phase 8 is built around one explicit split:
 
 - Apple-Silicon model workers stay host-native on macOS by default.
 - The control plane can run locally, in Docker Compose, or in kind without Apple-specific runtime dependencies.
@@ -190,7 +192,7 @@ curl -sS http://127.0.0.1:8000/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{
     "model": "chat-shared",
-    "messages": [{"role": "user", "content": "Explain the Phase 7 topology in one sentence."}],
+    "messages": [{"role": "user", "content": "Explain the Phase 8 topology in one sentence."}],
     "max_output_tokens": 64
   }' | python -m json.tool
 ```
@@ -298,6 +300,7 @@ Use the longer guides together:
 - [benchmarking.md](/Users/rishivinodkumar/Atlas/docs/benchmarking.md)
 - [phase6.md](/Users/rishivinodkumar/Atlas/docs/phase6.md)
 - [phase7.md](/Users/rishivinodkumar/Atlas/docs/phase7.md)
+- [phase8.md](/Users/rishivinodkumar/Atlas/docs/phase8.md)
 - [intelligent-routing.md](/Users/rishivinodkumar/Atlas/docs/intelligent-routing.md)
 - [architecture.md](/Users/rishivinodkumar/Atlas/docs/architecture.md)
 
@@ -961,6 +964,7 @@ uv run pytest
 - [docs/phase3.md](/Users/rishivinodkumar/Atlas/docs/phase3.md)
 - [docs/phase4.md](/Users/rishivinodkumar/Atlas/docs/phase4.md)
 - [docs/phase7.md](/Users/rishivinodkumar/Atlas/docs/phase7.md)
+- [docs/phase8.md](/Users/rishivinodkumar/Atlas/docs/phase8.md)
 - [docs/infra.md](/Users/rishivinodkumar/Atlas/docs/infra.md)
 - [docs/adr/0001-single-python-workspace.md](/Users/rishivinodkumar/Atlas/docs/adr/0001-single-python-workspace.md)
 - [docs/adr/0002-optional-mlx-runtime-boundary.md](/Users/rishivinodkumar/Atlas/docs/adr/0002-optional-mlx-runtime-boundary.md)

@@ -7,7 +7,14 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from switchyard.schemas.backend import BackendImageMetadata, DeploymentProfile
+from switchyard.schemas.backend import (
+    BackendImageMetadata,
+    CapacitySnapshot,
+    DeploymentProfile,
+    GPUDeviceMetadata,
+    RequestFeatureSupport,
+    RuntimeIdentity,
+)
 from switchyard.schemas.routing import (
     CanaryPolicy,
     CircuitBreakerState,
@@ -32,6 +39,8 @@ class BackendRuntimeSummary(BaseModel):
     deployment_profile: str = Field(min_length=1, max_length=64)
     execution_mode: str | None = Field(default=None, min_length=1, max_length=64)
     environment: str = Field(min_length=1, max_length=64)
+    runtime: RuntimeIdentity | None = None
+    gpu: GPUDeviceMetadata | None = None
     provider: str | None = Field(default=None, min_length=1, max_length=128)
     region: str | None = Field(default=None, min_length=1, max_length=128)
     zone: str | None = Field(default=None, min_length=1, max_length=128)
@@ -40,6 +49,8 @@ class BackendRuntimeSummary(BaseModel):
     latency_ms: float | None = Field(default=None, ge=0.0)
     active_requests: int = Field(default=0, ge=0)
     queue_depth: int = Field(default=0, ge=0)
+    request_features: RequestFeatureSupport = Field(default_factory=RequestFeatureSupport)
+    observed_capacity: CapacitySnapshot | None = None
     circuit_open: bool = False
     circuit_reason: str | None = Field(default=None, min_length=1, max_length=256)
     instances: list[BackendInstanceRuntimeSummary] = Field(default_factory=list)
@@ -55,6 +66,8 @@ class BackendInstanceRuntimeSummary(BaseModel):
     endpoint: str = Field(min_length=1, max_length=512)
     transport: str = Field(min_length=1, max_length=64)
     device_class: str | None = Field(default=None, min_length=1, max_length=64)
+    runtime: RuntimeIdentity | None = None
+    gpu: GPUDeviceMetadata | None = None
     locality: str = Field(default="local", min_length=1, max_length=64)
     locality_class: str | None = Field(default=None, min_length=1, max_length=64)
     execution_mode: str | None = Field(default=None, min_length=1, max_length=64)
@@ -67,6 +80,7 @@ class BackendInstanceRuntimeSummary(BaseModel):
     registration_state: str | None = Field(default=None, min_length=1, max_length=64)
     health_state: str = Field(min_length=1, max_length=64)
     load_state: str = Field(min_length=1, max_length=64)
+    observed_capacity: CapacitySnapshot | None = None
     last_seen_at: datetime | None = None
     tags: list[str] = Field(default_factory=list)
 
@@ -143,6 +157,12 @@ class HybridRouteExample(BaseModel):
     route_reason_codes: list[str] = Field(default_factory=list)
     admission_reason_code: str | None = Field(default=None, min_length=1, max_length=128)
     remote_candidate_count: int = Field(default=0, ge=0)
+    placement_provider: str | None = Field(default=None, min_length=1, max_length=128)
+    placement_region: str | None = Field(default=None, min_length=1, max_length=128)
+    placement_zone: str | None = Field(default=None, min_length=1, max_length=128)
+    placement_evidence_source: str | None = Field(default=None, min_length=1, max_length=64)
+    relative_cost_index: float | None = Field(default=None, ge=0.0)
+    cost_evidence_source: str | None = Field(default=None, min_length=1, max_length=64)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -170,6 +190,20 @@ class RemoteTransportErrorRuntimeEntry(BaseModel):
     cooldown_triggered: bool = False
 
 
+class CloudRouteEvidenceRuntimeSummary(BaseModel):
+    """Recent operator-facing summary of cloud placement and spend evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sample_size: int = Field(default=0, ge=0)
+    observed_placement_count: int = Field(default=0, ge=0)
+    estimated_placement_count: int = Field(default=0, ge=0)
+    observed_cost_count: int = Field(default=0, ge=0)
+    estimated_cost_count: int = Field(default=0, ge=0)
+    remote_provider_counts: dict[str, int] = Field(default_factory=dict)
+    total_estimated_relative_cost_index: float | None = Field(default=None, ge=0.0)
+
+
 class HybridOperatorRuntimeSummary(BaseModel):
     """Operator-facing recent hybrid-routing decisions and controls."""
 
@@ -181,6 +215,9 @@ class HybridOperatorRuntimeSummary(BaseModel):
     recent_route_example_count: int = Field(default=0, ge=0)
     recent_placement_distribution: PlacementDistributionRuntimeSummary = Field(
         default_factory=PlacementDistributionRuntimeSummary
+    )
+    recent_cloud_evidence: CloudRouteEvidenceRuntimeSummary = Field(
+        default_factory=CloudRouteEvidenceRuntimeSummary
     )
     recent_remote_transport_errors: list[RemoteTransportErrorRuntimeEntry] = Field(
         default_factory=list

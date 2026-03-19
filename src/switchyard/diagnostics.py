@@ -128,6 +128,20 @@ async def collect_runtime_backend_summaries(
                     deployment.execution_mode.value if deployment is not None else None
                 ),
                 environment=environment,
+                runtime=(
+                    deployment.runtime.model_copy(deep=True)
+                    if deployment is not None and deployment.runtime is not None
+                    else status_snapshot.capabilities.runtime.model_copy(deep=True)
+                    if status_snapshot.capabilities.runtime is not None
+                    else None
+                ),
+                gpu=(
+                    deployment.gpu.model_copy(deep=True)
+                    if deployment is not None and deployment.gpu is not None
+                    else status_snapshot.capabilities.gpu.model_copy(deep=True)
+                    if status_snapshot.capabilities.gpu is not None
+                    else None
+                ),
                 provider=(deployment.placement.provider if deployment is not None else None),
                 region=(deployment.placement.region if deployment is not None else None),
                 zone=(deployment.placement.zone if deployment is not None else None),
@@ -136,6 +150,14 @@ async def collect_runtime_backend_summaries(
                 latency_ms=status_snapshot.health.latency_ms,
                 active_requests=status_snapshot.active_requests,
                 queue_depth=status_snapshot.queue_depth,
+                request_features=status_snapshot.capabilities.request_features.model_copy(
+                    deep=True
+                ),
+                observed_capacity=(
+                    deployment.observed_capacity.model_copy(deep=True)
+                    if deployment is not None and deployment.observed_capacity is not None
+                    else None
+                ),
                 circuit_open=status_snapshot.health.circuit_open,
                 circuit_reason=status_snapshot.health.circuit_reason,
                 instances=[
@@ -147,6 +169,16 @@ async def collect_runtime_backend_summaries(
                         device_class=(
                             instance.device_class.value
                             if instance.device_class is not None
+                            else None
+                        ),
+                        runtime=(
+                            instance.runtime.model_copy(deep=True)
+                            if instance.runtime is not None
+                            else None
+                        ),
+                        gpu=(
+                            instance.gpu.model_copy(deep=True)
+                            if instance.gpu is not None
                             else None
                         ),
                         locality=instance.locality,
@@ -168,6 +200,11 @@ async def collect_runtime_backend_summaries(
                             instance.health.load_state.value
                             if instance.health is not None
                             else BackendLoadState.COLD.value
+                        ),
+                        observed_capacity=(
+                            instance.observed_capacity.model_copy(deep=True)
+                            if instance.observed_capacity is not None
+                            else None
                         ),
                         last_seen_at=instance.last_seen_at,
                         tags=list(instance.tags),

@@ -37,6 +37,9 @@ from switchyard.schemas.benchmark import (
     CacheObservation,
     CandidateRouteEstimateContext,
     CapturedTraceRecord,
+    CloudCostEvidence,
+    CloudEvidenceSource,
+    CloudPlacementEvidence,
     ComparisonRunSummary,
     ComparisonSourceKind,
     ControlPlaneReportMetadata,
@@ -51,6 +54,7 @@ from switchyard.schemas.benchmark import (
     HistoricalRouteEstimate,
     HistoricalSummaryKey,
     HistoricalSummaryQuery,
+    HybridExecutionContext,
     PerformanceBucketSummary,
     Phase4SchemaCompatibility,
     ReplayMode,
@@ -231,6 +235,20 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
             status_code=200,
             final_outcome="succeeded",
         ),
+        hybrid_context=HybridExecutionContext(
+            observed_placement_evidence=CloudPlacementEvidence(
+                source=CloudEvidenceSource.DEPLOYMENT_METADATA_ESTIMATE,
+                provider="aws",
+                region="us-east-1",
+                zone="us-east-1a",
+            ),
+            observed_cost_evidence=CloudCostEvidence(
+                source=CloudEvidenceSource.DEPLOYMENT_METADATA_ESTIMATE,
+                relative_cost_index=0.42,
+                budget_bucket="gpu-dev",
+                currency="usd",
+            ),
+        ),
         cache_observation=CacheObservation(supports_prefix_cache=True),
         success=True,
         status_code=200,
@@ -349,6 +367,12 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
         is True
     )
     assert payload["records"][0]["execution_observation"]["queue_delay_ms"] == 5.0
+    assert payload["records"][0]["hybrid_context"]["observed_placement_evidence"]["source"] == (
+        "deployment_metadata_estimate"
+    )
+    assert payload["records"][0]["hybrid_context"]["observed_cost_evidence"][
+        "relative_cost_index"
+    ] == 0.42
     assert payload["records"][0]["topology_reference"]["topology_snapshot_id"] == (
         "topology-run-1"
     )

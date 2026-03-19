@@ -26,6 +26,9 @@ mlx = [
 vllm-metal = [
   "vllm>=0.8.0,<1.0.0",
 ]
+vllm-cuda = [
+  "vllm>=0.8.0,<1.0.0",
+]
 apple-workers = [
   "mlx-lm>=0.26.0,<1.0.0",
   "vllm>=0.8.0,<1.0.0",
@@ -35,6 +38,7 @@ apple-workers = [
 switchyard-control-plane = "switchyard.control_plane.cli:main"
 switchyard-worker = "switchyard.worker.cli:main"
 switchyard-fake-remote-worker = "switchyard.worker.fake_cli:main"
+switchyard-vllm-cuda-worker = "switchyard.worker.vllm_cuda_cli:main"
 
 [dependency-groups]
 test = [

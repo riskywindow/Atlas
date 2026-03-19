@@ -39,6 +39,7 @@ class EngineType(StrEnum):
     MOCK = "mock"
     MLX = "mlx"
     VLLM = "vllm"
+    VLLM_CUDA = "vllm_cuda"
     REMOTE_OPENAI = "remote_openai"
 
 
@@ -163,6 +164,94 @@ class CacheCapabilityFlags(BaseModel):
     supports_prompt_cache_read: bool = False
     supports_prompt_cache_write: bool = False
     supports_kv_cache_reuse: bool = False
+
+
+class RuntimeIdentity(BaseModel):
+    """Stable runtime identity for a deployment or worker instance."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    runtime_family: str = Field(min_length=1, max_length=128)
+    runtime_label: str = Field(min_length=1, max_length=128)
+    runtime_version: str | None = Field(default=None, min_length=1, max_length=128)
+    engine_type: EngineType | None = None
+    backend_type: BackendType | None = None
+    api_compatibility: str | None = Field(default=None, min_length=1, max_length=128)
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class GPUDeviceMetadata(BaseModel):
+    """Typed GPU inventory metadata for remote or local accelerator-backed workers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    accelerator_type: str | None = Field(default=None, min_length=1, max_length=128)
+    vendor: str | None = Field(default=None, min_length=1, max_length=128)
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+    count: int = Field(default=0, ge=0, le=4096)
+    memory_per_device_gib: float | None = Field(default=None, ge=0.0)
+    total_memory_gib: float | None = Field(default=None, ge=0.0)
+    compute_capability: str | None = Field(default=None, min_length=1, max_length=64)
+    interconnect: str | None = Field(default=None, min_length=1, max_length=64)
+    driver_version: str | None = Field(default=None, min_length=1, max_length=128)
+    cuda_version: str | None = Field(default=None, min_length=1, max_length=64)
+    notes: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_memory_totals(self) -> GPUDeviceMetadata:
+        if (
+            self.total_memory_gib is None
+            and self.memory_per_device_gib is not None
+            and self.count > 0
+        ):
+            self.total_memory_gib = round(self.memory_per_device_gib * self.count, 6)
+        return self
+
+
+class RequestFeatureSupport(BaseModel):
+    """Supported request features and known runtime limitations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    supports_streaming: bool = False
+    supports_native_streaming: bool = False
+    supports_tools: bool = False
+    supports_system_messages: bool = True
+    supports_response_format_json: bool = False
+    supports_parallel_tool_calls: bool = False
+    supports_frequency_penalty: bool = False
+    supports_presence_penalty: bool = False
+    supports_logprobs: bool = False
+    supports_n_choices: bool = False
+    supports_vision_inputs: bool = False
+    max_stop_sequences: int | None = Field(default=None, ge=0, le=128)
+    max_tool_count: int | None = Field(default=None, ge=0, le=1024)
+    unsupported_request_fields: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+
+
+class CapacitySnapshot(BaseModel):
+    """Observed runtime capacity and load signals for a worker or deployment."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recorded_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    concurrency_limit: int | None = Field(default=None, ge=1)
+    active_requests: int = Field(default=0, ge=0)
+    queue_depth: int = Field(default=0, ge=0)
+    available_slots: int | None = Field(default=None, ge=0)
+    queue_capacity: int | None = Field(default=None, ge=0)
+    tokens_per_second: float | None = Field(default=None, ge=0.0)
+    gpu_memory_used_gib: float | None = Field(default=None, ge=0.0)
+    gpu_memory_free_gib: float | None = Field(default=None, ge=0.0)
+    gpu_utilization_percent: float | None = Field(default=None, ge=0.0, le=100.0)
+    detail: str | None = Field(default=None, max_length=256)
+
+    @model_validator(mode="after")
+    def derive_available_slots(self) -> CapacitySnapshot:
+        if self.available_slots is None and self.concurrency_limit is not None:
+            self.available_slots = max(self.concurrency_limit - self.active_requests, 0)
+        return self
 
 
 class CloudPlacementMetadata(BaseModel):
@@ -353,6 +442,8 @@ class BackendInstance(BaseModel):
     backend_type: BackendType | None = None
     device_class: DeviceClass
     model_identifier: str | None = Field(default=None, min_length=1, max_length=512)
+    runtime: RuntimeIdentity | None = None
+    gpu: GPUDeviceMetadata | None = None
     locality: str = Field(default="local", min_length=1, max_length=64)
     locality_class: WorkerLocalityClass = WorkerLocalityClass.UNKNOWN
     execution_mode: ExecutionModeLabel = ExecutionModeLabel.HOST_NATIVE
@@ -368,12 +459,24 @@ class BackendInstance(BaseModel):
         default_factory=BackendRegistrationMetadata
     )
     health: BackendHealth | None = None
+    observed_capacity: CapacitySnapshot | None = None
     last_seen_at: datetime | None = None
     image_metadata: BackendImageMetadata | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def infer_topology_defaults(self) -> BackendInstance:
+        if self.runtime is None:
+            runtime_label = (
+                self.backend_type.value
+                if self.backend_type is not None
+                else self.device_class.value
+            )
+            self.runtime = RuntimeIdentity(
+                runtime_family=runtime_label,
+                runtime_label=runtime_label,
+                backend_type=self.backend_type,
+            )
         if self.locality_class is WorkerLocalityClass.UNKNOWN:
             if self.execution_mode is ExecutionModeLabel.EXTERNAL_SERVICE:
                 self.locality_class = WorkerLocalityClass.EXTERNAL_SERVICE
@@ -433,6 +536,8 @@ class BackendDeployment(BaseModel):
     backend_type: BackendType
     engine_type: EngineType
     model_identifier: str = Field(min_length=1, max_length=512)
+    runtime: RuntimeIdentity | None = None
+    gpu: GPUDeviceMetadata | None = None
     serving_targets: list[str] = Field(min_length=1)
     configured_priority: int = Field(default=100, ge=0, le=1000)
     configured_weight: float = Field(default=1.0, gt=0.0, le=1000.0)
@@ -443,10 +548,19 @@ class BackendDeployment(BaseModel):
     cost_profile: CostBudgetProfile = Field(default_factory=CostBudgetProfile)
     readiness_hints: ReadinessHints = Field(default_factory=ReadinessHints)
     build_metadata: BackendImageMetadata | None = None
+    request_features: RequestFeatureSupport = Field(default_factory=RequestFeatureSupport)
+    observed_capacity: CapacitySnapshot | None = None
     instances: list[BackendInstance] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def infer_execution_mode(self) -> BackendDeployment:
+        if self.runtime is None:
+            self.runtime = RuntimeIdentity(
+                runtime_family=self.engine_type.value,
+                runtime_label=self.backend_type.value,
+                engine_type=self.engine_type,
+                backend_type=self.backend_type,
+            )
         if self.execution_mode is ExecutionModeLabel.HOST_NATIVE:
             if self.backend_type is BackendType.REMOTE_OPENAI_LIKE:
                 self.execution_mode = ExecutionModeLabel.EXTERNAL_SERVICE
@@ -470,6 +584,8 @@ class BackendCapabilities(BaseModel):
     engine_type: EngineType = EngineType.MOCK
     device_class: DeviceClass
     execution_mode: ExecutionModeLabel = ExecutionModeLabel.HOST_NATIVE
+    runtime: RuntimeIdentity | None = None
+    gpu: GPUDeviceMetadata | None = None
     model_ids: list[str] = Field(min_length=1)
     serving_targets: list[str] = Field(default_factory=list)
     max_context_tokens: int = Field(ge=1)
@@ -485,6 +601,7 @@ class BackendCapabilities(BaseModel):
     supports_tools: bool = False
     warmup_required: bool = False
     cache_capabilities: CacheCapabilityFlags = Field(default_factory=CacheCapabilityFlags)
+    request_features: RequestFeatureSupport = Field(default_factory=RequestFeatureSupport)
     placement: CloudPlacementMetadata = Field(default_factory=CloudPlacementMetadata)
     cost_profile: CostBudgetProfile = Field(default_factory=CostBudgetProfile)
     readiness_hints: ReadinessHints = Field(default_factory=ReadinessHints)
@@ -510,6 +627,19 @@ class BackendCapabilities(BaseModel):
                 self.execution_mode = ExecutionModeLabel.EXTERNAL_SERVICE
             elif self.device_class in {DeviceClass.REMOTE, DeviceClass.REMOTE_UNKNOWN}:
                 self.execution_mode = ExecutionModeLabel.REMOTE_WORKER
+        self.request_features.supports_streaming = self.supports_streaming
+        if self.supports_tools:
+            self.request_features.supports_tools = True
+        if self.runtime is None:
+            runtime_label = (
+                self.backend_type.value if self.backend_type is not None else self.engine_type.value
+            )
+            self.runtime = RuntimeIdentity(
+                runtime_family=self.engine_type.value,
+                runtime_label=runtime_label,
+                engine_type=self.engine_type,
+                backend_type=self.backend_type,
+            )
         return self
 
     def supports_model_target(self, target: str) -> bool:

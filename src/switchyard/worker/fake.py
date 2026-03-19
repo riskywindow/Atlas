@@ -14,7 +14,10 @@ from switchyard.schemas.backend import (
     DeviceClass,
     EngineType,
     ExecutionModeLabel,
+    GPUDeviceMetadata,
     QualityHint,
+    RequestFeatureSupport,
+    RuntimeIdentity,
 )
 from switchyard.worker.app import create_worker_app
 
@@ -30,6 +33,8 @@ class FakeRemoteWorkerConfig:
     device_class: DeviceClass = DeviceClass.REMOTE
     engine_type: EngineType = EngineType.MOCK
     execution_mode: ExecutionModeLabel = ExecutionModeLabel.REMOTE_WORKER
+    runtime: RuntimeIdentity | None = None
+    gpu: GPUDeviceMetadata | None = None
     simulated_latency_ms: float = 0.0
     health_state: BackendHealthState = BackendHealthState.HEALTHY
     supports_streaming: bool = True
@@ -38,6 +43,7 @@ class FakeRemoteWorkerConfig:
     stream_chunk_size: int = 3
     simulated_active_requests: int = 0
     simulated_queue_depth: int = 0
+    request_features: RequestFeatureSupport | None = None
 
 
 def create_fake_remote_worker_app(
@@ -55,12 +61,23 @@ def create_fake_remote_worker_app(
             engine_type=resolved.engine_type,
             device_class=resolved.device_class,
             execution_mode=resolved.execution_mode,
+            runtime=(
+                resolved.runtime.model_copy(deep=True)
+                if resolved.runtime is not None
+                else None
+            ),
+            gpu=resolved.gpu.model_copy(deep=True) if resolved.gpu is not None else None,
             model_ids=[resolved.serving_target, resolved.model_identifier],
             serving_targets=[resolved.serving_target],
             max_context_tokens=8192,
             supports_streaming=resolved.supports_streaming,
             concurrency_limit=resolved.concurrency_limit,
             quality_hint=QualityHint.BALANCED,
+            request_features=(
+                resolved.request_features.model_copy(deep=True)
+                if resolved.request_features is not None
+                else RequestFeatureSupport(supports_streaming=resolved.supports_streaming)
+            ),
         ),
         response_template=MockResponseTemplate(content=resolved.response_template),
         stream_chunk_size=resolved.stream_chunk_size,

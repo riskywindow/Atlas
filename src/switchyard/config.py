@@ -15,13 +15,16 @@ from switchyard.schemas.backend import (
     BackendNetworkEndpoint,
     BackendRegistrationMetadata,
     BackendType,
+    CapacitySnapshot,
     CloudPlacementMetadata,
     CostBudgetProfile,
     DeploymentProfile,
     DeviceClass,
     ExecutionModeLabel,
+    GPUDeviceMetadata,
     NetworkCharacteristics,
     ReadinessHints,
+    RuntimeIdentity,
     TrustMetadata,
     WorkerLocalityClass,
     WorkerTransportType,
@@ -104,6 +107,8 @@ class BackendInstanceConfig(BaseModel):
     connect_timeout_seconds: float = Field(default=5.0, gt=0.0, le=3600.0)
     request_timeout_seconds: float = Field(default=30.0, gt=0.0, le=3600.0)
     device_class: DeviceClass | None = None
+    runtime: RuntimeIdentity | None = None
+    gpu: GPUDeviceMetadata | None = None
     locality: str = Field(default="local", min_length=1, max_length=64)
     locality_class: WorkerLocalityClass = WorkerLocalityClass.UNKNOWN
     execution_mode: ExecutionModeLabel = ExecutionModeLabel.HOST_NATIVE
@@ -120,6 +125,7 @@ class BackendInstanceConfig(BaseModel):
         default_factory=BackendRegistrationMetadata
     )
     image_metadata: BackendImageMetadata | None = None
+    observed_capacity: CapacitySnapshot | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -163,6 +169,8 @@ class BackendInstanceConfig(BaseModel):
             backend_type=backend_type,
             device_class=self.device_class or default_device_class,
             model_identifier=model_identifier,
+            runtime=self.runtime.model_copy(deep=True) if self.runtime is not None else None,
+            gpu=self.gpu.model_copy(deep=True) if self.gpu is not None else None,
             locality=self.locality,
             locality_class=self.locality_class,
             execution_mode=self.execution_mode,
@@ -173,6 +181,11 @@ class BackendInstanceConfig(BaseModel):
             network_characteristics=self.network_characteristics.model_copy(deep=True),
             tags=list(self.tags),
             registration=self.registration.model_copy(deep=True),
+            observed_capacity=(
+                self.observed_capacity.model_copy(deep=True)
+                if self.observed_capacity is not None
+                else None
+            ),
             image_metadata=self.image_metadata.model_copy(deep=True)
             if self.image_metadata is not None
             else None,
@@ -228,6 +241,8 @@ class LocalModelConfig(BaseModel):
     deployment_profile: DeploymentProfile = DeploymentProfile.HOST_NATIVE
     model_identifier: str = Field(min_length=1, max_length=512)
     backend_type: BackendType
+    runtime: RuntimeIdentity | None = None
+    gpu: GPUDeviceMetadata | None = None
     configured_priority: int = Field(default=100, ge=0, le=1000)
     configured_weight: float = Field(default=1.0, gt=0.0, le=1000.0)
     worker_transport: WorkerTransportType = WorkerTransportType.IN_PROCESS
