@@ -1,5 +1,8 @@
 # Remote Worker Packaging And Discovery
 
+For the broader Phase 7 hybrid operator/developer guide, start with
+[hybrid-workers.md](/Users/rishivinodkumar/Atlas/docs/hybrid-workers.md).
+
 This document defines the Phase 7 packaging and integration boundary for later
 Linux/NVIDIA workers without requiring CUDA or rented GPUs today.
 

@@ -10,7 +10,19 @@ session-affinity reuse, records canary/shadow decisions in runtime inspection an
 benchmark artifacts, and preserves deterministic request-feature extraction for
 cache/locality-aware scorers and offline policy simulation.
 
-Phase 7 adds:
+Phase 7 adds a hybrid control-plane layer on top of that baseline:
+
+- remote workers are first-class topology members rather than special cases,
+- hybrid local/remote routing stays explainable and bounded by explicit spillover and
+  budget guardrails,
+- remote lifecycle and health posture are visible through admin/runtime surfaces,
+- benchmark and replay artifacts preserve remote-versus-local execution truth,
+- control-plane packaging stays portable while later Linux/NVIDIA workers remain a clean
+  extension path,
+- optimization-ready config surfaces and config fingerprints prepare the repo for later
+  Forge Stage A work without starting autotuning yet.
+
+More specifically, Phase 7 includes:
 - deterministic request and workload feature extraction,
 - repeated-prefix and locality-aware signals without storing raw prompt text,
 - historical performance summaries and transparent predictor inputs,
@@ -32,7 +44,7 @@ Phase 7 is Mac-first, not Mac-locked:
 - the same control plane is intended to grow into future `vllm_cuda` and remote worker
   backends.
 
-## Phase 6 Setup
+## Phase 7 Setup
 
 ### Prerequisites
 
@@ -107,9 +119,9 @@ Notes:
 - Portable control-plane packaging should continue to work without either Apple-worker
   extra installed.
 
-## Mac-First Phase 6 Workflow
+## Mac-First Phase 7 Workflow
 
-Phase 6 is built around one explicit split:
+Phase 7 is built around one explicit split:
 
 - Apple-Silicon model workers stay host-native on macOS by default.
 - The control plane can run locally, in Docker Compose, or in kind without Apple-specific runtime dependencies.
@@ -178,7 +190,7 @@ curl -sS http://127.0.0.1:8000/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{
     "model": "chat-shared",
-    "messages": [{"role": "user", "content": "Explain the Phase 6 topology in one sentence."}],
+    "messages": [{"role": "user", "content": "Explain the Phase 7 topology in one sentence."}],
     "max_output_tokens": 64
   }' | python -m json.tool
 ```
@@ -281,9 +293,11 @@ curl -s http://127.0.0.1:8000/admin/policy-rollout/export | python -m json.tool
 Use the longer guides together:
 
 - [deployment.md](/Users/rishivinodkumar/Atlas/docs/deployment.md)
+- [hybrid-workers.md](/Users/rishivinodkumar/Atlas/docs/hybrid-workers.md)
 - [control-plane.md](/Users/rishivinodkumar/Atlas/docs/control-plane.md)
 - [benchmarking.md](/Users/rishivinodkumar/Atlas/docs/benchmarking.md)
 - [phase6.md](/Users/rishivinodkumar/Atlas/docs/phase6.md)
+- [phase7.md](/Users/rishivinodkumar/Atlas/docs/phase7.md)
 - [intelligent-routing.md](/Users/rishivinodkumar/Atlas/docs/intelligent-routing.md)
 - [architecture.md](/Users/rishivinodkumar/Atlas/docs/architecture.md)
 
@@ -938,6 +952,7 @@ uv run pytest
 
 - [README.md](/Users/rishivinodkumar/Atlas/README.md)
 - [docs/architecture.md](/Users/rishivinodkumar/Atlas/docs/architecture.md)
+- [docs/hybrid-workers.md](/Users/rishivinodkumar/Atlas/docs/hybrid-workers.md)
 - [docs/control-plane.md](/Users/rishivinodkumar/Atlas/docs/control-plane.md)
 - [docs/benchmarking.md](/Users/rishivinodkumar/Atlas/docs/benchmarking.md)
 - [docs/phase0.md](/Users/rishivinodkumar/Atlas/docs/phase0.md)
@@ -945,9 +960,12 @@ uv run pytest
 - [docs/phase2.md](/Users/rishivinodkumar/Atlas/docs/phase2.md)
 - [docs/phase3.md](/Users/rishivinodkumar/Atlas/docs/phase3.md)
 - [docs/phase4.md](/Users/rishivinodkumar/Atlas/docs/phase4.md)
+- [docs/phase7.md](/Users/rishivinodkumar/Atlas/docs/phase7.md)
 - [docs/infra.md](/Users/rishivinodkumar/Atlas/docs/infra.md)
 - [docs/adr/0001-single-python-workspace.md](/Users/rishivinodkumar/Atlas/docs/adr/0001-single-python-workspace.md)
 - [docs/adr/0002-optional-mlx-runtime-boundary.md](/Users/rishivinodkumar/Atlas/docs/adr/0002-optional-mlx-runtime-boundary.md)
 - [docs/adr/0003-logical-alias-to-multiple-backend-deployments.md](/Users/rishivinodkumar/Atlas/docs/adr/0003-logical-alias-to-multiple-backend-deployments.md)
 - [docs/adr/0004-artifact-source-of-truth-for-phase3-reporting.md](/Users/rishivinodkumar/Atlas/docs/adr/0004-artifact-source-of-truth-for-phase3-reporting.md)
 - [docs/adr/0005-deterministic-canary-bucketing.md](/Users/rishivinodkumar/Atlas/docs/adr/0005-deterministic-canary-bucketing.md)
+- [docs/adr/0008-phase7-optimization-ready-knob-surface.md](/Users/rishivinodkumar/Atlas/docs/adr/0008-phase7-optimization-ready-knob-surface.md)
+- [docs/adr/0009-phase7-remote-workers-as-first-class-topology-members.md](/Users/rishivinodkumar/Atlas/docs/adr/0009-phase7-remote-workers-as-first-class-topology-members.md)

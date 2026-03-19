@@ -101,14 +101,15 @@ failing over across multiple concrete implementations.
 
 ## Control-Plane To Worker Boundary
 
-Phase 5 makes the execution boundary explicit instead of treating model execution as an
-incidental implementation detail.
+Phase 7 keeps the Phase 5 execution boundary and extends it with remote worker
+lifecycle, hybrid placement controls, and operator inspection.
 
 ```text
 client
   -> FastAPI gateway
-       -> request context, admission, routing, affinity, rollout, telemetry
+       -> request context, admission, routing, affinity, rollout, spillover, telemetry
        -> adapter registry and backend-instance inventory
+       -> remote worker registry and hybrid budget state
        -> local adapter call OR HTTP worker protocol
   -> worker process
        -> health / readiness / capabilities / warmup / generate / stream
@@ -121,6 +122,8 @@ Rules at this boundary:
   GPU implementation details,
 - host-native Apple workers are still first-class, but they are now explicitly
   addressable worker processes,
+- remote workers are first-class topology members with the same inventory and artifact
+  contracts,
 - the same boundary is what later enables remote CUDA or cloud GPU workers.
 
 The current internal worker protocol surface is intentionally small:
@@ -163,6 +166,26 @@ Phase 5 keeps the request path layered rather than burying policy in route handl
   Runtime state is exposed through a read-only admin endpoint, while benchmark/replay
   artifacts remain the historical source of truth for deployed topology and routing
   behavior.
+
+## Phase 7 Hybrid Control Path
+
+Phase 7 adds three explicit layers on top of the earlier local-first control plane:
+
+- remote worker lifecycle
+  Dynamic registration, heartbeat, draining, quarantine, and stale-worker cleanup stay
+  outside the router and are visible through admin surfaces.
+- hybrid spillover guardrails
+  Remote enablement, budget, concurrency, cooldown, and tenant restrictions are enforced
+  by a dedicated spillover service.
+- operator runtime insight
+  Recent hybrid route examples, remote transport failures, and effective remote posture
+  are retained separately from benchmark artifacts for day-to-day operations.
+
+This keeps the system explainable:
+
+- routing still selects candidates from typed topology,
+- lifecycle state is explicit rather than hidden in transport failures,
+- operator overrides do not rewrite artifact truth.
 
 ## Benchmark, Trace, And Report Placement
 
@@ -240,6 +263,27 @@ This keeps later optimization work reviewable and reproducible:
    actually served the request.
 10. If a shadow policy matches, a best-effort background shadow copy may be launched.
 11. The gateway records route and execution telemetry, then returns the response or stream.
+
+## Phase 7 Remote Placement Decision Path
+
+Remote placement is still a normal routing decision, but it now passes through explicit
+guardrails:
+
+1. The registry resolves local and remote candidate workers for the logical alias.
+2. Lifecycle state, health, and readiness determine whether a remote worker is even
+   eligible.
+3. The router scores candidates without embedding hardware-specific logic.
+4. `RemoteSpilloverControlService` evaluates remote budget, concurrency, cooldown,
+   allowed environments, and tenant restrictions.
+5. The gateway either executes the chosen remote worker through the standard worker
+   protocol or keeps the request local if a guardrail blocks remote execution.
+6. Operator-facing hybrid summaries and benchmark artifacts both record the outcome.
+
+The important rule is that remote execution remains attributable:
+
+- if remote execution was chosen, the route decision can explain why,
+- if it was blocked, the reason code is serializable,
+- if a remote worker failed in transport, the operator surface retains that event.
 
 ## Phase 6 Route-Decision Path
 
@@ -394,6 +438,8 @@ The local-friendly default is still enough for development:
 - structured JSON logs,
 - `/metrics`,
 - `/admin/runtime`,
+- `/admin/hybrid`,
+- `/admin/remote-workers`,
 - JSON benchmark artifacts,
 - optional markdown reports derived from those artifacts.
 

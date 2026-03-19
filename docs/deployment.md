@@ -258,6 +258,13 @@ kind smoke benchmark example:
 ```bash
 uv run python -m switchyard.bench.cli run-workload \
   --manifest-path docs/examples/phase5_kind_smoke_workload.json \
+  --gateway-base-url http://127.0.0.1:8000 \
+  --deployment-target kind \
+  --deployment-profile kind \
+  --config-profile-name phase5-kind-smoke \
+  --control-plane-image-tag localhost:5001/switchyard/control-plane:dev \
+  --markdown-report
+```
 
 ## 8. Phase 7 Remote Worker Packaging
 
@@ -274,6 +281,8 @@ The repo now includes:
   for control-plane static discovery,
 - [phase7_remote_worker_stub_worker.env](/Users/rishivinodkumar/Atlas/docs/examples/phase7_remote_worker_stub_worker.env)
   for the CI-safe worker stub,
+- [hybrid-workers.md](/Users/rishivinodkumar/Atlas/docs/hybrid-workers.md)
+  for the full hybrid operator/developer guide,
 - [remote-workers.md](/Users/rishivinodkumar/Atlas/docs/remote-workers.md)
   for the discovery and authentication contract.
 
@@ -283,13 +292,6 @@ This path is intentionally split cleanly:
 - the remote worker image can stay generic today,
 - later `vllm_cuda` runtime dependencies can be added to a derived Linux worker image
   without changing the control-plane contract or forcing CUDA into CI.
-  --gateway-base-url http://127.0.0.1:8000 \
-  --deployment-target kind \
-  --deployment-profile kind \
-  --config-profile-name phase5-kind-smoke \
-  --control-plane-image-tag localhost:5001/switchyard/control-plane:dev \
-  --markdown-report
-```
 
 Replay against a deployed topology:
 

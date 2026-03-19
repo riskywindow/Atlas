@@ -349,7 +349,9 @@ class RemoteWorkerRegistryService:
                 if worker.lifecycle_state is WorkerLifecycleState.RETIRED
             ),
             workers=workers,
-            recent_events=list(self._events),
+            # Keep operator-facing lifecycle events in reverse chronological order so the
+            # latest registration, heartbeat, or cleanup action is visible first.
+            recent_events=list(reversed(self._events)),
         )
 
     def _to_record(

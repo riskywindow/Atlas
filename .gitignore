@@ -5,3 +5,5 @@ __pycache__/
 .ruff_cache/
 .coverage
 phase6_codex_prompts.md
+phase7_codex_prompts.md
+phase8_codex_prompts.md

@@ -246,7 +246,8 @@ def test_remote_worker_admin_endpoints_track_lifecycle_and_cleanup(
     assert payload["workers"][0]["heartbeat_count"] == 3
     assert payload["workers"][0]["lifecycle_state"] == "ready"
     assert payload["workers"][0]["metadata"]["gpu_type"] == "l4"
-    assert payload["recent_events"][0]["event_type"] == "registered"
+    assert payload["recent_events"][0]["event_type"] == "heartbeat"
+    assert payload["recent_events"][-1]["event_type"] == "registered"
 
     FrozenDateTime.current = now + timedelta(seconds=31)
     stale = client.get("/admin/remote-workers").json()

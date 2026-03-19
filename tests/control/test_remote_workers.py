@@ -188,6 +188,33 @@ def test_remote_worker_registry_supports_graceful_drain_and_retire() -> None:
     assert retired.live is False
 
 
+def test_remote_worker_registry_snapshot_orders_recent_events_newest_first() -> None:
+    service = RemoteWorkerRegistryService(
+        RemoteWorkerLifecycleSettings(dynamic_registration_enabled=True)
+    )
+    registered = service.register(_registration_request(), token=None)
+    assert registered.lease_token is not None
+
+    service.heartbeat(
+        RemoteWorkerHeartbeatRequest(
+            worker_id="worker-1",
+            ready=True,
+            active_requests=0,
+            queue_depth=0,
+            health=BackendHealth(
+                state=BackendHealthState.HEALTHY,
+                load_state=BackendLoadState.READY,
+            ),
+        ),
+        lease_token=registered.lease_token,
+    )
+
+    snapshot = service.snapshot()
+    event_types = [event.event_type.value for event in snapshot.recent_events]
+    assert event_types[0] == "heartbeat"
+    assert event_types[-1] == "registered"
+
+
 def test_remote_worker_registry_supports_operator_quarantine_and_canary_only() -> None:
     service = RemoteWorkerRegistryService(
         RemoteWorkerLifecycleSettings(dynamic_registration_enabled=True)
