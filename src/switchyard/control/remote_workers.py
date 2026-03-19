@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 import secrets
 from collections import deque
 from collections.abc import Callable
@@ -13,13 +14,17 @@ from datetime import UTC, datetime, timedelta
 
 from switchyard.config import RemoteWorkerLifecycleSettings
 from switchyard.schemas.backend import (
+    BackendCapabilities,
     BackendDeployment,
     BackendHealth,
     BackendHealthState,
     BackendInstance,
     BackendRegistrationMetadata,
+    BackendType,
     CapacitySnapshot,
     DeploymentProfile,
+    DeviceClass,
+    EngineType,
     WorkerLifecycleState,
     WorkerRegistrationState,
 )
@@ -58,11 +63,15 @@ class _RegisteredWorkerState:
     metadata: dict[str, str]
     operator_tags: set[str]
     enrollment_verified: bool
+    contract_quarantine_reasons: list[str]
+    operator_quarantine_reason: str | None
     lease_token: str
 
 
 class RemoteWorkerRegistryService:
-    """Tracks explicit remote worker lifecycle state for Phase 7."""
+    """Tracks explicit remote worker lifecycle state for first cloud-worker bring-up."""
+
+    _MIN_VLLM_CUDA_VERSION = (0, 6, 0)
 
     def __init__(
         self,
@@ -85,46 +94,70 @@ class RemoteWorkerRegistryService:
     ) -> RemoteWorkerRegistrationResponse:
         self._validate_registration_enabled()
         enrollment_verified = self._validate_enrollment_token(request=request, token=token)
+        self._validate_worker_id_available(request.worker_id)
+        normalized_request, contract_quarantine_reasons = self._validate_registration_request(
+            request
+        )
         now = self._now()
         lifecycle_state = self._normalize_lifecycle_state(
-            request.lifecycle_state,
-            ready=request.ready,
-            health=request.health,
+            normalized_request.lifecycle_state,
+            ready=normalized_request.ready,
+            health=normalized_request.health,
+            quarantined=bool(contract_quarantine_reasons),
         )
         lease_token = secrets.token_urlsafe(24)
+        operator_tags = set()
+        if contract_quarantine_reasons:
+            operator_tags.add("quarantined")
         state = _RegisteredWorkerState(
-            request=request.model_copy(deep=True),
+            request=normalized_request,
             registered_at=now,
             last_heartbeat_at=now,
             expires_at=now + timedelta(seconds=self._settings.heartbeat_timeout_seconds),
             deregistered_at=None,
             lifecycle_state=lifecycle_state,
-            ready=request.ready,
-            active_requests=request.active_requests,
-            queue_depth=request.queue_depth,
+            ready=normalized_request.ready,
+            active_requests=normalized_request.active_requests,
+            queue_depth=normalized_request.queue_depth,
             heartbeat_count=1,
             observed_capacity=(
-                request.observed_capacity.model_copy(deep=True)
-                if request.observed_capacity is not None
+                normalized_request.observed_capacity.model_copy(deep=True)
+                if normalized_request.observed_capacity is not None
                 else None
             ),
-            health=request.health.model_copy(deep=True) if request.health is not None else None,
-            metadata=dict(request.metadata),
-            operator_tags=set(),
+            health=(
+                normalized_request.health.model_copy(deep=True)
+                if normalized_request.health is not None
+                else None
+            ),
+            metadata=dict(normalized_request.metadata),
+            operator_tags=operator_tags,
             enrollment_verified=enrollment_verified,
+            contract_quarantine_reasons=list(contract_quarantine_reasons),
+            operator_quarantine_reason=None,
             lease_token=lease_token,
         )
-        self._workers[request.worker_id] = state
+        self._workers[normalized_request.worker_id] = state
         self._record_event(
             RemoteWorkerLifecycleEventType.REGISTERED,
-            worker_id=request.worker_id,
+            worker_id=normalized_request.worker_id,
             lifecycle_state=lifecycle_state,
-            detail=f"worker '{request.worker_name}' registered",
+            detail=f"worker '{normalized_request.worker_name}' registered",
             metadata={
-                "environment": request.environment,
-                "transport": request.endpoint.transport.value,
+                "environment": normalized_request.environment,
+                "transport": normalized_request.endpoint.transport.value,
             },
         )
+        if contract_quarantine_reasons:
+            self._record_event(
+                RemoteWorkerLifecycleEventType.QUARANTINED,
+                worker_id=normalized_request.worker_id,
+                lifecycle_state=lifecycle_state,
+                detail="worker quarantined during registration contract validation",
+                metadata={
+                    "reasons": " | ".join(contract_quarantine_reasons),
+                },
+            )
         return self._response_for(state, include_lease_token=True)
 
     def heartbeat(
@@ -154,11 +187,14 @@ class RemoteWorkerRegistryService:
         state.metadata = {**state.metadata, **dict(request.metadata)}
         if request.ready is not None:
             state.ready = request.ready
+        if self._is_quarantined(state):
+            state.ready = False
         if request.lifecycle_state is not None:
             state.lifecycle_state = self._normalize_lifecycle_state(
                 request.lifecycle_state,
                 ready=state.ready,
                 health=state.health,
+                quarantined=self._is_quarantined(state),
             )
         elif state.lifecycle_state not in {
             WorkerLifecycleState.DRAINING,
@@ -168,6 +204,7 @@ class RemoteWorkerRegistryService:
                 state.lifecycle_state,
                 ready=state.ready,
                 health=state.health,
+                quarantined=self._is_quarantined(state),
             )
         if state.lifecycle_state is not previous_state:
             self._record_event(
@@ -273,15 +310,22 @@ class RemoteWorkerRegistryService:
         state = self._require_worker(worker_id)
         if enabled:
             state.operator_tags.add("quarantined")
+            state.operator_quarantine_reason = reason or "operator quarantined worker"
             state.lifecycle_state = WorkerLifecycleState.UNHEALTHY
             state.ready = False
         else:
-            state.operator_tags.discard("quarantined")
-            if state.lifecycle_state is WorkerLifecycleState.UNHEALTHY:
+            state.operator_quarantine_reason = None
+            if not state.contract_quarantine_reasons:
+                state.operator_tags.discard("quarantined")
+            if (
+                state.lifecycle_state is WorkerLifecycleState.UNHEALTHY
+                and not self._is_quarantined(state)
+            ):
                 state.lifecycle_state = self._normalize_lifecycle_state(
                     WorkerLifecycleState.WARMING,
                     ready=state.ready,
                     health=state.health,
+                    quarantined=False,
                 )
         self._record_event(
             RemoteWorkerLifecycleEventType.STATE_CHANGED,
@@ -343,6 +387,7 @@ class RemoteWorkerRegistryService:
             worker_count=len(workers),
             stale_worker_count=sum(1 for worker in workers if worker.stale),
             ready_worker_count=sum(1 for worker in workers if worker.ready),
+            usable_worker_count=sum(1 for worker in workers if worker.usable),
             live_worker_count=sum(1 for worker in workers if worker.live),
             draining_worker_count=sum(
                 1
@@ -354,6 +399,7 @@ class RemoteWorkerRegistryService:
                 for worker in workers
                 if worker.lifecycle_state is WorkerLifecycleState.UNHEALTHY
             ),
+            quarantined_worker_count=sum(1 for worker in workers if worker.quarantined),
             lost_worker_count=sum(
                 1 for worker in workers if worker.lifecycle_state is WorkerLifecycleState.LOST
             ),
@@ -386,13 +432,21 @@ class RemoteWorkerRegistryService:
             lifecycle_state = WorkerLifecycleState.LOST
 
         ready = state.ready and live and lifecycle_state is WorkerLifecycleState.READY
+        eligibility_reasons = self._eligibility_reasons_for_state(state)
+        quarantined = self._is_quarantined(state)
+        if quarantined:
+            ready = False
         health = state.health.model_copy(deep=True) if state.health is not None else None
         if health is None:
             health = BackendHealth(
                 state=BackendHealthState.DEGRADED,
                 detail="heartbeat not reported yet",
             )
-        if lifecycle_state is WorkerLifecycleState.UNHEALTHY:
+        if quarantined:
+            health.state = BackendHealthState.DEGRADED
+            if eligibility_reasons:
+                health.detail = "; ".join(eligibility_reasons)
+        elif lifecycle_state is WorkerLifecycleState.UNHEALTHY:
             health.state = BackendHealthState.DEGRADED
         elif lifecycle_state in {WorkerLifecycleState.LOST, WorkerLifecycleState.RETIRED}:
             health.state = BackendHealthState.UNAVAILABLE
@@ -434,6 +488,7 @@ class RemoteWorkerRegistryService:
                 deregistered_at=state.deregistered_at,
                 heartbeat_count=state.heartbeat_count,
                 source="dynamic_registration",
+                detail=None if not eligibility_reasons else "; ".join(eligibility_reasons),
             ),
             health=health,
             observed_capacity=(
@@ -452,7 +507,18 @@ class RemoteWorkerRegistryService:
                 "ready": str(ready).lower(),
             },
         )
-        instance.tags = sorted(set(instance.tags) | state.operator_tags)
+        instance.tags = sorted(
+            set(instance.tags)
+            | state.operator_tags
+            | set(_derived_worker_tags(request=request, metadata=state.metadata))
+        )
+        usable = (
+            live
+            and ready
+            and not quarantined
+            and lifecycle_state is WorkerLifecycleState.READY
+            and health.state is not BackendHealthState.UNAVAILABLE
+        )
         return RegisteredRemoteWorkerRecord(
             worker_id=worker_id,
             worker_name=request.worker_name,
@@ -469,6 +535,9 @@ class RemoteWorkerRegistryService:
             stale=lifecycle_state is WorkerLifecycleState.LOST,
             live=live,
             ready=ready,
+            usable=usable,
+            quarantined=quarantined,
+            eligibility_reasons=eligibility_reasons,
             active_requests=state.active_requests,
             queue_depth=state.queue_depth,
             heartbeat_count=state.heartbeat_count,
@@ -483,6 +552,7 @@ class RemoteWorkerRegistryService:
             ),
             token_verified=state.enrollment_verified,
             instance=instance,
+            tags=list(instance.tags),
             metadata={
                 **request.metadata,
                 **state.metadata,
@@ -516,14 +586,33 @@ class RemoteWorkerRegistryService:
                 else RemoteWorkerAuthMode.NONE
             ),
             token_verified=state.enrollment_verified,
+            usable=record.usable,
+            quarantined=record.quarantined,
+            eligibility_reasons=list(record.eligibility_reasons),
+            detail=record.instance.registration.detail,
+            tags=list(record.tags),
             lease_token=state.lease_token if include_lease_token else None,
         )
+
     def _require_worker(self, worker_id: str) -> _RegisteredWorkerState:
         state = self._workers.get(worker_id)
         if state is None:
             msg = f"worker '{worker_id}' is not registered"
             raise RemoteWorkerRegistrationError(msg)
         return state
+
+    def _validate_worker_id_available(self, worker_id: str) -> None:
+        existing = self._workers.get(worker_id)
+        if existing is None:
+            return
+        if existing.deregistered_at is None and self._now() <= existing.expires_at:
+            msg = f"worker '{worker_id}' is already registered and still live"
+            self._record_event(
+                RemoteWorkerLifecycleEventType.REGISTRATION_REJECTED,
+                worker_id=worker_id,
+                detail=msg,
+            )
+            raise RemoteWorkerRegistrationError(msg)
 
     def _validate_registration_enabled(self) -> None:
         if not self._settings.dynamic_registration_enabled:
@@ -613,13 +702,205 @@ class RemoteWorkerRegistryService:
             raise RemoteWorkerRegistrationError("signed enrollment token is invalid")
         return True
 
+    def _validate_registration_request(
+        self,
+        request: RemoteWorkerRegistrationRequest,
+    ) -> tuple[RemoteWorkerRegistrationRequest, list[str]]:
+        normalized_request = request.model_copy(deep=True)
+        if (
+            normalized_request.runtime is None
+            and normalized_request.capabilities.runtime is not None
+        ):
+            normalized_request.runtime = normalized_request.capabilities.runtime.model_copy(
+                deep=True
+            )
+        if (
+            normalized_request.capabilities.runtime is None
+            and normalized_request.runtime is not None
+        ):
+            normalized_request.capabilities.runtime = normalized_request.runtime.model_copy(
+                deep=True
+            )
+        if normalized_request.gpu is None and normalized_request.capabilities.gpu is not None:
+            normalized_request.gpu = normalized_request.capabilities.gpu.model_copy(deep=True)
+        if normalized_request.capabilities.gpu is None and normalized_request.gpu is not None:
+            normalized_request.capabilities.gpu = normalized_request.gpu.model_copy(deep=True)
+        if normalized_request.device_class in {
+            DeviceClass.REMOTE,
+            DeviceClass.REMOTE_UNKNOWN,
+        }:
+            normalized_request.device_class = normalized_request.capabilities.device_class
+
+        rejection_reasons: list[str] = []
+        quarantine_reasons: list[str] = []
+        capabilities = normalized_request.capabilities
+
+        if normalized_request.endpoint.transport.value == "in_process":
+            rejection_reasons.append(
+                "remote worker registration requires a network-addressable endpoint transport"
+            )
+        if normalized_request.backend_type is not capabilities.backend_type:
+            rejection_reasons.append(
+                "registration backend_type does not match the advertised capability backend_type"
+            )
+        if normalized_request.device_class is not capabilities.device_class:
+            rejection_reasons.append(
+                "registration device_class does not match the advertised capability device_class"
+            )
+        if normalized_request.lifecycle_state in {
+            WorkerLifecycleState.LOST,
+            WorkerLifecycleState.RETIRED,
+        }:
+            rejection_reasons.append(
+                "workers may not register directly into lost or retired lifecycle states"
+            )
+        if not self._models_include_identifier(
+            model_identifier=normalized_request.model_identifier,
+            capabilities=capabilities,
+        ):
+            rejection_reasons.append(
+                "registration model_identifier is not present in the "
+                "advertised capability inventory"
+            )
+        missing_targets = [
+            target
+            for target in normalized_request.serving_targets
+            if not capabilities.supports_model_target(target)
+        ]
+        if missing_targets:
+            rejection_reasons.append(
+                "registration serving_targets are missing from the advertised "
+                "capability inventory: "
+                + ", ".join(sorted(missing_targets))
+            )
+        runtime = normalized_request.runtime
+        if runtime is not None:
+            if (
+                runtime.backend_type is not None
+                and runtime.backend_type is not normalized_request.backend_type
+            ):
+                rejection_reasons.append(
+                    "runtime identity backend_type does not match the registration backend_type"
+                )
+            if (
+                runtime.engine_type is not None
+                and normalized_request.backend_type is not BackendType.VLLM_CUDA
+                and runtime.engine_type is not capabilities.engine_type
+            ):
+                rejection_reasons.append(
+                    "runtime identity engine_type does not match the advertised "
+                    "capability engine_type"
+                )
+
+        if normalized_request.backend_type is BackendType.VLLM_CUDA:
+            self._validate_vllm_cuda_registration(
+                request=normalized_request,
+                rejection_reasons=rejection_reasons,
+                quarantine_reasons=quarantine_reasons,
+            )
+
+        if rejection_reasons:
+            detail = "; ".join(rejection_reasons)
+            self._record_event(
+                RemoteWorkerLifecycleEventType.REGISTRATION_REJECTED,
+                worker_id=normalized_request.worker_id,
+                detail=detail,
+                metadata={
+                    "worker_name": normalized_request.worker_name,
+                    "backend_type": normalized_request.backend_type.value,
+                },
+            )
+            raise RemoteWorkerRegistrationError(detail)
+
+        return normalized_request, quarantine_reasons
+
+    def _validate_vllm_cuda_registration(
+        self,
+        *,
+        request: RemoteWorkerRegistrationRequest,
+        rejection_reasons: list[str],
+        quarantine_reasons: list[str],
+    ) -> None:
+        capabilities = request.capabilities
+        if request.device_class is not DeviceClass.NVIDIA_GPU:
+            rejection_reasons.append(
+                "vllm_cuda workers must register with device_class='nvidia_gpu'"
+            )
+        if capabilities.device_class is not DeviceClass.NVIDIA_GPU:
+            rejection_reasons.append(
+                "vllm_cuda capability inventory must advertise device_class='nvidia_gpu'"
+            )
+        if capabilities.engine_type not in {EngineType.VLLM, EngineType.VLLM_CUDA}:
+            rejection_reasons.append(
+                "vllm_cuda workers must advertise engine_type='vllm' or 'vllm_cuda'"
+            )
+
+        runtime = request.runtime
+        if runtime is None:
+            rejection_reasons.append(
+                "vllm_cuda workers must report a runtime identity during registration"
+            )
+        else:
+            if runtime.runtime_family != "vllm_cuda":
+                rejection_reasons.append(
+                    "vllm_cuda workers must report runtime_family='vllm_cuda'"
+                )
+            if runtime.engine_type not in {None, EngineType.VLLM, EngineType.VLLM_CUDA}:
+                rejection_reasons.append(
+                    "vllm_cuda workers must report runtime engine_type='vllm' or 'vllm_cuda'"
+                )
+            if runtime.runtime_version is None:
+                quarantine_reasons.append(
+                    "worker did not report a vllm_cuda runtime_version"
+                )
+            else:
+                parsed_version = _parse_runtime_version_prefix(runtime.runtime_version)
+                if parsed_version is None:
+                    quarantine_reasons.append(
+                        "worker reported an unparseable vllm_cuda runtime_version: "
+                        f"{runtime.runtime_version}"
+                    )
+                elif parsed_version < self._MIN_VLLM_CUDA_VERSION:
+                    quarantine_reasons.append(
+                        "worker reported unsupported vllm_cuda runtime_version "
+                        f"{runtime.runtime_version}; minimum supported is 0.6.0"
+                    )
+
+        gpu = request.gpu
+        if gpu is None:
+            quarantine_reasons.append(
+                "worker did not report NVIDIA GPU metadata during registration"
+            )
+        else:
+            if gpu.vendor is None or gpu.vendor.lower() != "nvidia":
+                quarantine_reasons.append(
+                    "worker did not report vendor='nvidia' in GPU metadata"
+                )
+            if gpu.count <= 0:
+                quarantine_reasons.append(
+                    "worker reported no attached NVIDIA GPUs in GPU metadata"
+                )
+
+    def _models_include_identifier(
+        self,
+        *,
+        model_identifier: str,
+        capabilities: BackendCapabilities,
+    ) -> bool:
+        if model_identifier in capabilities.model_ids:
+            return True
+        return model_identifier in capabilities.model_aliases.values()
+
     def _normalize_lifecycle_state(
         self,
         lifecycle_state: WorkerLifecycleState,
         *,
         ready: bool,
         health: BackendHealth | None,
+        quarantined: bool = False,
     ) -> WorkerLifecycleState:
+        if quarantined:
+            return WorkerLifecycleState.UNHEALTHY
         if lifecycle_state in {WorkerLifecycleState.DRAINING, WorkerLifecycleState.RETIRED}:
             return lifecycle_state
         if health is not None and health.state is BackendHealthState.UNAVAILABLE:
@@ -648,6 +929,21 @@ class RemoteWorkerRegistryService:
                 metadata=metadata or {},
             )
         )
+
+    def _is_quarantined(self, state: _RegisteredWorkerState) -> bool:
+        return (
+            bool(state.contract_quarantine_reasons)
+            or state.operator_quarantine_reason is not None
+        )
+
+    def _eligibility_reasons_for_state(
+        self,
+        state: _RegisteredWorkerState,
+    ) -> list[str]:
+        reasons = list(state.contract_quarantine_reasons)
+        if state.operator_quarantine_reason is not None:
+            reasons.append(state.operator_quarantine_reason)
+        return reasons
 
 
 def instance_to_deployment(
@@ -700,3 +996,31 @@ def build_signed_enrollment_token(
     ).encode()
     signature = hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
     return f"v1.{expiry}.{signature}"
+
+
+def _parse_runtime_version_prefix(version: str) -> tuple[int, int, int] | None:
+    match = re.match(r"^\s*(\d+)\.(\d+)\.(\d+)", version)
+    if match is None:
+        return None
+    major, minor, patch = match.groups()
+    return int(major), int(minor), int(patch)
+
+
+def _derived_worker_tags(
+    *,
+    request: RemoteWorkerRegistrationRequest,
+    metadata: dict[str, str],
+) -> list[str]:
+    tags: list[str] = []
+    if request.placement.provider is not None:
+        tags.append(f"provider:{request.placement.provider}")
+    if request.placement.region is not None:
+        tags.append(f"region:{request.placement.region}")
+    if request.placement.zone is not None:
+        tags.append(f"zone:{request.placement.zone}")
+    if request.cost_profile.profile.value != "unknown":
+        tags.append(f"cost-class:{request.cost_profile.profile.value}")
+    instance_type = metadata.get("instance_type") or metadata.get("provider_instance_type")
+    if instance_type is not None:
+        tags.append(f"instance-type:{instance_type}")
+    return tags

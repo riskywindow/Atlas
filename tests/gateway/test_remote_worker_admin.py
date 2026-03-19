@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, tzinfo
+from typing import Any
 
 import httpx
 import pytest
@@ -31,6 +32,8 @@ from switchyard.schemas.backend import (
     BackendType,
     DeviceClass,
     EngineType,
+    GPUDeviceMetadata,
+    RuntimeIdentity,
     WorkerLifecycleState,
     WorkerTransportType,
 )
@@ -52,7 +55,7 @@ def _app(
     return TestClient(app)
 
 
-def _registration_payload() -> dict[str, object]:
+def _registration_payload() -> dict[str, Any]:
     return {
         "worker_id": "worker-1",
         "worker_name": "remote-a",
@@ -67,6 +70,21 @@ def _registration_payload() -> dict[str, object]:
             "backend_type": "vllm_cuda",
             "engine_type": "vllm",
             "device_class": "nvidia_gpu",
+            "runtime": {
+                "runtime_family": "vllm_cuda",
+                "runtime_label": "vllm_cuda",
+                "runtime_version": "0.6.5",
+                "engine_type": "vllm_cuda",
+                "backend_type": "vllm_cuda",
+            },
+            "gpu": {
+                "accelerator_type": "cuda",
+                "vendor": "nvidia",
+                "model": "L4",
+                "count": 1,
+                "memory_per_device_gib": 24.0,
+                "cuda_version": "12.4",
+            },
             "model_ids": ["meta-llama/Llama-3.1-8B-Instruct"],
             "serving_targets": ["chat-shared"],
             "max_context_tokens": 8192,
@@ -74,11 +92,28 @@ def _registration_payload() -> dict[str, object]:
             "concurrency_limit": 8,
         },
         "device_class": "nvidia_gpu",
+        "runtime": {
+            "runtime_family": "vllm_cuda",
+            "runtime_label": "vllm_cuda",
+            "runtime_version": "0.6.5",
+            "engine_type": "vllm_cuda",
+            "backend_type": "vllm_cuda",
+        },
+        "gpu": {
+            "accelerator_type": "cuda",
+            "vendor": "nvidia",
+            "model": "L4",
+            "count": 1,
+            "memory_per_device_gib": 24.0,
+            "cuda_version": "12.4",
+        },
         "environment": "staging",
         "placement": {"provider": "aws", "region": "us-east-1"},
+        "cost_profile": {"profile": "premium", "budget_bucket": "gpu-staging"},
         "lifecycle_state": "registering",
         "ready": False,
         "tags": ["remote", "gpu"],
+        "metadata": {"instance_type": "g6e.xlarge"},
     }
 
 
@@ -243,8 +278,15 @@ def test_remote_worker_admin_endpoints_track_lifecycle_and_cleanup(
     payload = snapshot.json()
     assert payload["worker_count"] == 1
     assert payload["ready_worker_count"] == 1
+    assert payload["usable_worker_count"] == 1
     assert payload["workers"][0]["heartbeat_count"] == 3
     assert payload["workers"][0]["lifecycle_state"] == "ready"
+    assert payload["workers"][0]["usable"] is True
+    assert payload["workers"][0]["quarantined"] is False
+    assert payload["workers"][0]["runtime"]["runtime_version"] == "0.6.5"
+    assert payload["workers"][0]["gpu"]["model"] == "L4"
+    assert "provider:aws" in payload["workers"][0]["tags"]
+    assert "instance-type:g6e.xlarge" in payload["workers"][0]["tags"]
     assert payload["workers"][0]["metadata"]["gpu_type"] == "l4"
     assert payload["recent_events"][0]["event_type"] == "heartbeat"
     assert payload["recent_events"][-1]["event_type"] == "registered"
@@ -461,6 +503,67 @@ def test_remote_worker_registration_returns_400_for_invalid_token(
     assert response.json()["code"] == "remote_worker_registration_error"
 
 
+def test_remote_worker_registration_quarantines_incompatible_runtime_version() -> None:
+    client = _app(
+        remote_worker_settings=RemoteWorkerLifecycleSettings(
+            dynamic_registration_enabled=True,
+        )
+    )
+    payload = _registration_payload()
+    runtime = dict(payload["runtime"])
+    runtime["runtime_version"] = "0.5.9"
+    payload["runtime"] = runtime
+    capabilities = dict(payload["capabilities"])
+    capabilities_runtime = dict(capabilities["runtime"])
+    capabilities_runtime["runtime_version"] = "0.5.9"
+    capabilities["runtime"] = capabilities_runtime
+    payload["capabilities"] = capabilities
+
+    response = client.post(
+        "/internal/control-plane/remote-workers/register",
+        json=payload,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["lifecycle_state"] == "unhealthy"
+    assert response.json()["quarantined"] is True
+    assert response.json()["usable"] is False
+    assert "minimum supported is 0.6.0" in (response.json()["detail"] or "")
+
+    snapshot = client.get("/admin/remote-workers").json()
+    assert snapshot["quarantined_worker_count"] == 1
+    assert snapshot["usable_worker_count"] == 0
+    assert snapshot["workers"][0]["quarantined"] is True
+    assert snapshot["workers"][0]["eligibility_reasons"] == [
+        "worker reported unsupported vllm_cuda runtime_version 0.5.9; minimum supported is 0.6.0"
+    ]
+    assert snapshot["recent_events"][0]["event_type"] == "quarantined"
+
+
+def test_remote_worker_registration_rejects_bad_capability_inventory() -> None:
+    client = _app(
+        remote_worker_settings=RemoteWorkerLifecycleSettings(
+            dynamic_registration_enabled=True,
+        )
+    )
+    payload = _registration_payload()
+    capabilities = dict(payload["capabilities"])
+    capabilities["model_ids"] = ["different-model"]
+    payload["capabilities"] = capabilities
+
+    response = client.post(
+        "/internal/control-plane/remote-workers/register",
+        json=payload,
+    )
+
+    assert response.status_code == 400
+    assert "model_identifier is not present" in response.json()["message"]
+
+    snapshot = client.get("/admin/remote-workers").json()
+    assert snapshot["worker_count"] == 0
+    assert snapshot["recent_events"][0]["event_type"] == "registration_rejected"
+
+
 def test_remote_worker_registration_accepts_signed_enrollment_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -487,6 +590,21 @@ def test_remote_worker_registration_accepts_signed_enrollment_token(
             backend_type=BackendType.VLLM_CUDA,
             engine_type=EngineType.VLLM,
             device_class=DeviceClass.NVIDIA_GPU,
+            runtime=RuntimeIdentity(
+                runtime_family="vllm_cuda",
+                runtime_label="vllm_cuda",
+                runtime_version="0.6.5",
+                engine_type=EngineType.VLLM_CUDA,
+                backend_type=BackendType.VLLM_CUDA,
+            ),
+            gpu=GPUDeviceMetadata(
+                accelerator_type="cuda",
+                vendor="nvidia",
+                model="L4",
+                count=1,
+                memory_per_device_gib=24.0,
+                cuda_version="12.4",
+            ),
             model_ids=["meta-llama/Llama-3.1-8B-Instruct"],
             serving_targets=["chat-shared"],
             max_context_tokens=8192,
@@ -494,6 +612,21 @@ def test_remote_worker_registration_accepts_signed_enrollment_token(
             concurrency_limit=8,
         ),
         device_class=DeviceClass.NVIDIA_GPU,
+        runtime=RuntimeIdentity(
+            runtime_family="vllm_cuda",
+            runtime_label="vllm_cuda",
+            runtime_version="0.6.5",
+            engine_type=EngineType.VLLM_CUDA,
+            backend_type=BackendType.VLLM_CUDA,
+        ),
+        gpu=GPUDeviceMetadata(
+            accelerator_type="cuda",
+            vendor="nvidia",
+            model="L4",
+            count=1,
+            memory_per_device_gib=24.0,
+            cuda_version="12.4",
+        ),
         lifecycle_state=WorkerLifecycleState.REGISTERING,
     )
     token = build_signed_enrollment_token(

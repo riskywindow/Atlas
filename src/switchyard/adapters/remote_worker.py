@@ -640,7 +640,29 @@ class RemoteWorkerAdapter:
         request: ChatCompletionRequest,
         context: RequestContext,
     ) -> ChatCompletionResponse:
+        response, _ = await self.generate_with_instance(request, context)
+        return response
+
+    async def generate_with_instance(
+        self,
+        request: ChatCompletionRequest,
+        context: RequestContext,
+    ) -> tuple[ChatCompletionResponse, str]:
         instance_config = await self._select_instance_config()
+        response = await self._generate_from_instance(
+            instance_config,
+            request=request,
+            context=context,
+        )
+        return response, instance_config.instance_id
+
+    async def _generate_from_instance(
+        self,
+        instance_config: BackendInstanceConfig,
+        *,
+        request: ChatCompletionRequest,
+        context: RequestContext,
+    ) -> ChatCompletionResponse:
         parsed = await self._transport.generate(
             instance_config,
             request=request,
@@ -660,7 +682,29 @@ class RemoteWorkerAdapter:
         request: ChatCompletionRequest,
         context: RequestContext,
     ) -> AsyncIterator[ChatCompletionChunk]:
+        _, chunk_stream = await self.stream_generate_with_instance(request, context)
+        async for chunk in chunk_stream:
+            yield chunk
+
+    async def stream_generate_with_instance(
+        self,
+        request: ChatCompletionRequest,
+        context: RequestContext,
+    ) -> tuple[str, AsyncIterator[ChatCompletionChunk]]:
         instance_config = await self._select_instance_config()
+        return instance_config.instance_id, self._stream_generate_from_instance(
+            instance_config,
+            request=request,
+            context=context,
+        )
+
+    async def _stream_generate_from_instance(
+        self,
+        instance_config: BackendInstanceConfig,
+        *,
+        request: ChatCompletionRequest,
+        context: RequestContext,
+    ) -> AsyncIterator[ChatCompletionChunk]:
         async for parsed in self._transport.stream_generate(
             instance_config,
             request=request,

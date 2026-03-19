@@ -346,8 +346,10 @@ def summarize_remote_worker_lifecycle(
     discovered_instance_count = 0
     stale_instance_count = 0
     ready_instance_count = 0
+    usable_instance_count = 0
     draining_instance_count = 0
     unhealthy_instance_count = 0
+    quarantined_instance_count = 0
     lost_instance_count = 0
     retired_instance_count = 0
     for backend in runtime_backends:
@@ -362,8 +364,10 @@ def summarize_remote_worker_lifecycle(
         registered_instance_count = remote_worker_registry.worker_count
         stale_instance_count = remote_worker_registry.stale_worker_count
         ready_instance_count = remote_worker_registry.ready_worker_count
+        usable_instance_count = remote_worker_registry.usable_worker_count
         draining_instance_count = remote_worker_registry.draining_worker_count
         unhealthy_instance_count = remote_worker_registry.unhealthy_worker_count
+        quarantined_instance_count = remote_worker_registry.quarantined_worker_count
         lost_instance_count = remote_worker_registry.lost_worker_count
         retired_instance_count = remote_worker_registry.retired_worker_count
 
@@ -396,8 +400,10 @@ def summarize_remote_worker_lifecycle(
         discovered_instance_count=discovered_instance_count,
         stale_instance_count=stale_instance_count,
         ready_instance_count=ready_instance_count,
+        usable_instance_count=usable_instance_count,
         draining_instance_count=draining_instance_count,
         unhealthy_instance_count=unhealthy_instance_count,
+        quarantined_instance_count=quarantined_instance_count,
         lost_instance_count=lost_instance_count,
         retired_instance_count=retired_instance_count,
         notes=notes,

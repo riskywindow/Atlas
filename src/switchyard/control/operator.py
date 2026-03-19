@@ -13,6 +13,7 @@ from switchyard.schemas.admin import (
     PlacementDistributionRuntimeSummary,
     RemoteTransportErrorRuntimeEntry,
 )
+from switchyard.schemas.backend import BackendInstance
 from switchyard.schemas.benchmark import CloudEvidenceSource
 from switchyard.schemas.routing import RouteDecision, RoutingPolicy
 
@@ -59,15 +60,37 @@ class HybridOperatorService:
             else decision.admission_decision.reason_code.value
         )
         deployment = decision.selected_deployment
-        placement_provider = None if deployment is None else deployment.placement.provider
-        placement_region = None if deployment is None else deployment.placement.region
-        placement_zone = None if deployment is None else deployment.placement.zone
+        observed_instance = _observed_instance(decision=decision)
+        placement_provider = (
+            None
+            if observed_instance is None or observed_instance.placement.provider is None
+            else observed_instance.placement.provider
+        )
+        placement_region = (
+            None
+            if observed_instance is None or observed_instance.placement.region is None
+            else observed_instance.placement.region
+        )
+        placement_zone = (
+            None
+            if observed_instance is None or observed_instance.placement.zone is None
+            else observed_instance.placement.zone
+        )
+        if deployment is not None:
+            if placement_provider is None:
+                placement_provider = deployment.placement.provider
+            if placement_region is None:
+                placement_region = deployment.placement.region
+            if placement_zone is None:
+                placement_zone = deployment.placement.zone
         placement_evidence_source = _placement_evidence_source(decision=decision)
         relative_cost_index = (
             None
-            if deployment is None
-            else deployment.cost_profile.relative_cost_index
+            if observed_instance is None
+            else observed_instance.cost_profile.relative_cost_index
         )
+        if relative_cost_index is None and deployment is not None:
+            relative_cost_index = deployment.cost_profile.relative_cost_index
         cost_evidence_source = _cost_evidence_source(decision=decision)
         self._recent_route_examples.appendleft(
             HybridRouteExample(
@@ -214,22 +237,34 @@ def _execution_path_for_example(
     return "local"
 
 
+def _observed_instance(*, decision: RouteDecision) -> BackendInstance | None:
+    deployment = decision.selected_deployment
+    if (
+        deployment is None
+        or decision.execution_observation is None
+        or decision.execution_observation.backend_instance_id is None
+    ):
+        return None
+    for instance in deployment.instances:
+        if instance.instance_id == decision.execution_observation.backend_instance_id:
+            return instance
+    return None
+
+
 def _placement_evidence_source(*, decision: RouteDecision) -> str | None:
+    observed_instance = _observed_instance(decision=decision)
+    if (
+        observed_instance is not None
+        and (
+            observed_instance.placement.provider is not None
+            or observed_instance.placement.region is not None
+            or observed_instance.placement.zone is not None
+        )
+    ):
+        return CloudEvidenceSource.OBSERVED_RUNTIME.value
     deployment = decision.selected_deployment
     if deployment is None:
         return None
-    if (
-        decision.execution_observation is not None
-        and decision.execution_observation.backend_instance_id
-    ):
-        for instance in deployment.instances:
-            if instance.instance_id == decision.execution_observation.backend_instance_id:
-                if (
-                    instance.placement.provider is not None
-                    or instance.placement.region is not None
-                    or instance.placement.zone is not None
-                ):
-                    return CloudEvidenceSource.OBSERVED_RUNTIME.value
     if (
         deployment.placement.provider is not None
         or deployment.placement.region is not None
@@ -240,6 +275,16 @@ def _placement_evidence_source(*, decision: RouteDecision) -> str | None:
 
 
 def _cost_evidence_source(*, decision: RouteDecision) -> str | None:
+    observed_instance = _observed_instance(decision=decision)
+    if (
+        observed_instance is not None
+        and (
+            observed_instance.cost_profile.relative_cost_index is not None
+            or observed_instance.cost_profile.budget_bucket is not None
+            or observed_instance.cost_profile.currency is not None
+        )
+    ):
+        return CloudEvidenceSource.OBSERVED_RUNTIME.value
     deployment = decision.selected_deployment
     if (
         deployment is None

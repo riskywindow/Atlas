@@ -3030,6 +3030,23 @@ def _deployment_placement_evidence(
 ) -> CloudPlacementEvidence | None:
     if route_decision is None or route_decision.selected_deployment is None:
         return None
+    if source is CloudEvidenceSource.OBSERVED_RUNTIME:
+        instance = _observed_backend_instance(route_decision)
+        if (
+            instance is not None
+            and (
+                instance.placement.provider is not None
+                or instance.placement.region is not None
+                or instance.placement.zone is not None
+            )
+        ):
+            return CloudPlacementEvidence(
+                source=source,
+                provider=instance.placement.provider,
+                region=instance.placement.region,
+                zone=instance.placement.zone,
+                notes=["derived from observed backend instance metadata"],
+            )
     deployment = route_decision.selected_deployment
     if (
         deployment.placement.provider is None
@@ -3053,6 +3070,23 @@ def _deployment_cost_evidence(
 ) -> CloudCostEvidence | None:
     if route_decision is None or route_decision.selected_deployment is None:
         return None
+    if source is CloudEvidenceSource.OBSERVED_RUNTIME:
+        instance = _observed_backend_instance(route_decision)
+        if (
+            instance is not None
+            and (
+                instance.cost_profile.relative_cost_index is not None
+                or instance.cost_profile.budget_bucket is not None
+                or instance.cost_profile.currency is not None
+            )
+        ):
+            return CloudCostEvidence(
+                source=source,
+                relative_cost_index=instance.cost_profile.relative_cost_index,
+                budget_bucket=instance.cost_profile.budget_bucket,
+                currency=instance.cost_profile.currency,
+                notes=["derived from observed backend instance metadata"],
+            )
     cost_profile = route_decision.selected_deployment.cost_profile
     if (
         cost_profile.relative_cost_index is None
@@ -3140,6 +3174,16 @@ def _resolved_placement_source(route_decision: RouteDecision | None) -> CloudEvi
 def _resolved_cost_source(route_decision: RouteDecision | None) -> CloudEvidenceSource | None:
     if route_decision is None or route_decision.selected_deployment is None:
         return None
+    observed_instance = _observed_backend_instance(route_decision)
+    if (
+        observed_instance is not None
+        and (
+            observed_instance.cost_profile.relative_cost_index is not None
+            or observed_instance.cost_profile.budget_bucket is not None
+            or observed_instance.cost_profile.currency is not None
+        )
+    ):
+        return CloudEvidenceSource.OBSERVED_RUNTIME
     cost_profile = route_decision.selected_deployment.cost_profile
     if (
         cost_profile.relative_cost_index is None
@@ -3148,6 +3192,23 @@ def _resolved_cost_source(route_decision: RouteDecision | None) -> CloudEvidence
     ):
         return None
     return CloudEvidenceSource.DEPLOYMENT_METADATA_ESTIMATE
+
+
+def _observed_backend_instance(
+    route_decision: RouteDecision | None,
+) -> BackendInstance | None:
+    if (
+        route_decision is None
+        or route_decision.selected_deployment is None
+        or route_decision.execution_observation is None
+        or route_decision.execution_observation.backend_instance_id is None
+    ):
+        return None
+    instance_id = route_decision.execution_observation.backend_instance_id
+    for instance in route_decision.selected_deployment.instances:
+        if instance.instance_id == instance_id:
+            return instance
+    return None
 
 
 def _maybe_parse_float(raw_value: str | None) -> float | None:

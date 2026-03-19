@@ -62,6 +62,8 @@ class RemoteWorkerLifecycleEventType(StrEnum):
     DEREGISTERED = "deregistered"
     EVICTED = "evicted"
     AUTH_REJECTED = "auth_rejected"
+    REGISTRATION_REJECTED = "registration_rejected"
+    QUARANTINED = "quarantined"
     STATE_CHANGED = "state_changed"
 
 
@@ -153,6 +155,11 @@ class RemoteWorkerRegistrationResponse(BaseModel):
     secure_registration_required: bool = False
     auth_mode: RemoteWorkerAuthMode = RemoteWorkerAuthMode.NONE
     token_verified: bool = False
+    usable: bool = False
+    quarantined: bool = False
+    eligibility_reasons: list[str] = Field(default_factory=list)
+    detail: str | None = Field(default=None, min_length=1, max_length=512)
+    tags: list[str] = Field(default_factory=list)
     lease_token: str | None = Field(default=None, min_length=1, max_length=256)
 
 
@@ -176,6 +183,9 @@ class RegisteredRemoteWorkerRecord(BaseModel):
     stale: bool = False
     live: bool = True
     ready: bool = False
+    usable: bool = False
+    quarantined: bool = False
+    eligibility_reasons: list[str] = Field(default_factory=list)
     active_requests: int = Field(default=0, ge=0)
     queue_depth: int = Field(default=0, ge=0)
     heartbeat_count: int = Field(default=0, ge=0)
@@ -186,6 +196,7 @@ class RegisteredRemoteWorkerRecord(BaseModel):
     observed_capacity: CapacitySnapshot | None = None
     token_verified: bool = False
     instance: BackendInstance
+    tags: list[str] = Field(default_factory=list)
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
@@ -217,9 +228,11 @@ class RegisteredRemoteWorkerSnapshot(BaseModel):
     worker_count: int = Field(default=0, ge=0)
     stale_worker_count: int = Field(default=0, ge=0)
     ready_worker_count: int = Field(default=0, ge=0)
+    usable_worker_count: int = Field(default=0, ge=0)
     live_worker_count: int = Field(default=0, ge=0)
     draining_worker_count: int = Field(default=0, ge=0)
     unhealthy_worker_count: int = Field(default=0, ge=0)
+    quarantined_worker_count: int = Field(default=0, ge=0)
     lost_worker_count: int = Field(default=0, ge=0)
     retired_worker_count: int = Field(default=0, ge=0)
     workers: list[RegisteredRemoteWorkerRecord] = Field(default_factory=list)

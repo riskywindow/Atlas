@@ -7,6 +7,7 @@ import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from time import perf_counter
+from typing import Protocol, cast
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request, Response, status
 from fastapi.responses import StreamingResponse
@@ -85,6 +86,22 @@ class BackendExecutionExhaustedError(RuntimeError):
 
 
 _FALLBACK_RETRY_BUDGET = 1
+
+
+class _ObservedInstanceGeneratingAdapter(Protocol):
+    async def generate_with_instance(
+        self,
+        request: ChatCompletionRequest,
+        context: RequestContext,
+    ) -> tuple[ChatCompletionResponse, str | None]: ...
+
+
+class _ObservedInstanceStreamingAdapter(Protocol):
+    async def stream_generate_with_instance(
+        self,
+        request: ChatCompletionRequest,
+        context: RequestContext,
+    ) -> tuple[str | None, AsyncIterator[ChatCompletionChunk]]: ...
 
 
 @router.get("/healthz")
@@ -642,6 +659,7 @@ async def _stream_chat_completion(
     remote_permit: RemotePermit | None = None
 
     try:
+        last_backend_instance_id: str | None = None
         for attempt_number, backend_name in enumerate(route_backends, start=1):
             adapter = services.registry.get(backend_name)
             (
@@ -714,6 +732,7 @@ async def _stream_chat_completion(
             output_fragments: list[str] = []
             response_id: str | None = None
             emitted_chunk = False
+            backend_instance_id: str | None = None
             try:
                 remote_permit = await _maybe_acquire_remote_permit(
                     services=services,
@@ -722,7 +741,13 @@ async def _stream_chat_completion(
                     backend_name=backend_name,
                     permit=remote_permit,
                 )
-                async for chunk in adapter.stream_generate(chat_request, context):
+                backend_instance_id, chunk_stream = await _stream_backend_response(
+                    adapter=adapter,
+                    chat_request=chat_request,
+                    context=context,
+                )
+                last_backend_instance_id = backend_instance_id
+                async for chunk in chunk_stream:
                     emitted_chunk = True
                     response_id = chunk.id
                     if ttft_ms is None and _chunk_has_visible_tokens(chunk):
@@ -764,6 +789,7 @@ async def _stream_chat_completion(
                         services,
                         decision,
                         executed_backend=backend_name,
+                        backend_instance_id=backend_instance_id,
                         latency_ms=failed_latency_ms,
                         ttft_ms=ttft_ms,
                         output_tokens=failed_output_tokens,
@@ -858,6 +884,7 @@ async def _stream_chat_completion(
                 services,
                 decision,
                 executed_backend=backend_name,
+                backend_instance_id=backend_instance_id,
                 latency_ms=execution.total_latency_ms,
                 ttft_ms=execution.ttft_ms,
                 output_tokens=execution.output_tokens,
@@ -916,6 +943,7 @@ async def _stream_chat_completion(
             services,
             decision,
             executed_backend=None,
+            backend_instance_id=last_backend_instance_id,
             latency_ms=(perf_counter() - stream_started) * 1000,
             ttft_ms=None,
             output_tokens=None,
@@ -965,6 +993,7 @@ async def _generate_with_fallback(
     decision_policy = decision.policy.value
     execution_errors: list[str] = []
     remote_permit: RemotePermit | None = None
+    last_backend_instance_id: str | None = None
 
     try:
         for attempt_number, backend_name in enumerate(
@@ -1037,6 +1066,7 @@ async def _generate_with_fallback(
 
             logger.info("backend_execution_started", backend_name=backend_name, streaming=False)
             execution_start = perf_counter()
+            backend_instance_id: str | None = None
             try:
                 remote_permit = await _maybe_acquire_remote_permit(
                     services=services,
@@ -1045,7 +1075,12 @@ async def _generate_with_fallback(
                     backend_name=backend_name,
                     permit=remote_permit,
                 )
-                chat_response = await adapter.generate(chat_request, context)
+                chat_response, backend_instance_id = await _generate_backend_response(
+                    adapter=adapter,
+                    chat_request=chat_request,
+                    context=context,
+                )
+                last_backend_instance_id = backend_instance_id
             except Exception as exc:
                 execution_errors.append(f"{backend_name}: {exc}")
                 _append_execution_event(
@@ -1116,6 +1151,7 @@ async def _generate_with_fallback(
                 services,
                 decision,
                 executed_backend=backend_name,
+                backend_instance_id=backend_instance_id,
                 latency_ms=execution.total_latency_ms,
                 ttft_ms=execution.ttft_ms,
                 output_tokens=execution.output_tokens,
@@ -1149,6 +1185,7 @@ async def _generate_with_fallback(
         services,
         decision,
         executed_backend=None,
+        backend_instance_id=last_backend_instance_id,
         latency_ms=None,
         ttft_ms=None,
         output_tokens=None,
@@ -1162,6 +1199,36 @@ async def _generate_with_fallback(
 def _format_sse_event(chunk: ChatCompletionChunk) -> str:
     payload = json.dumps(chunk.model_dump(mode="json"), separators=(",", ":"))
     return f"data: {payload}\n\n"
+
+
+async def _generate_backend_response(
+    *,
+    adapter: BackendAdapter,
+    chat_request: ChatCompletionRequest,
+    context: RequestContext,
+) -> tuple[ChatCompletionResponse, str | None]:
+    generate_with_instance = getattr(adapter, "generate_with_instance", None)
+    if callable(generate_with_instance):
+        return await cast(
+            _ObservedInstanceGeneratingAdapter,
+            adapter,
+        ).generate_with_instance(chat_request, context)
+    return await adapter.generate(chat_request, context), None
+
+
+async def _stream_backend_response(
+    *,
+    adapter: BackendAdapter,
+    chat_request: ChatCompletionRequest,
+    context: RequestContext,
+) -> tuple[str | None, AsyncIterator[ChatCompletionChunk]]:
+    stream_generate_with_instance = getattr(adapter, "stream_generate_with_instance", None)
+    if callable(stream_generate_with_instance):
+        return await cast(
+            _ObservedInstanceStreamingAdapter,
+            adapter,
+        ).stream_generate_with_instance(chat_request, context)
+    return None, adapter.stream_generate(chat_request, context)
 
 
 async def _resolve_backend_labels(
@@ -1235,6 +1302,7 @@ def _record_execution_observation(
     decision: RouteDecision,
     *,
     executed_backend: str | None,
+    backend_instance_id: str | None = None,
     latency_ms: float | None,
     ttft_ms: float | None,
     output_tokens: int | None,
@@ -1249,7 +1317,7 @@ def _record_execution_observation(
     )
     decision.execution_observation = RouteExecutionObservation(
         executed_backend=executed_backend,
-        backend_instance_id=None,
+        backend_instance_id=backend_instance_id,
         queue_delay_ms=queue_delay_ms,
         ttft_ms=ttft_ms,
         latency_ms=latency_ms,

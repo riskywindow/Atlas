@@ -14,6 +14,7 @@ from switchyard.adapters.mock import MockBackendAdapter
 from switchyard.adapters.registry import AdapterRegistry
 from switchyard.bench.artifacts import (
     _build_request_for_scenario,
+    _hybrid_context_for_record,
     build_gateway_scenario,
     build_replay_plan,
     build_run_id,
@@ -45,7 +46,21 @@ from switchyard.bench.workloads import build_workload_manifest
 from switchyard.config import AppEnvironment, Settings
 from switchyard.gateway import create_app
 from switchyard.optimization import build_benchmark_config_snapshot
-from switchyard.schemas.backend import BackendCapabilities, BackendType, DeviceClass
+from switchyard.schemas.backend import (
+    BackendCapabilities,
+    BackendDeployment,
+    BackendInstance,
+    BackendNetworkEndpoint,
+    BackendType,
+    CloudPlacementMetadata,
+    CostBudgetProfile,
+    CostProfileClass,
+    DeploymentProfile,
+    DeviceClass,
+    EngineType,
+    ExecutionModeLabel,
+    WorkerTransportType,
+)
 from switchyard.schemas.benchmark import (
     BenchmarkArtifactSchemaVersion,
     BenchmarkComparisonDeltaSummary,
@@ -100,6 +115,7 @@ from switchyard.schemas.routing import (
     RolloutDisposition,
     RouteAnnotations,
     RouteDecision,
+    RouteExecutionObservation,
     RoutingPolicy,
     ShadowDisposition,
     ShadowPolicy,
@@ -140,6 +156,79 @@ async def test_run_synthetic_benchmark_builds_artifact() -> None:
     assert artifact.run_config.immutable_config is not None
     assert artifact.run_config.config_fingerprint is not None
     assert artifact.run_config.immutable_config.knobs[0].knob_id == "benchmark.concurrency"
+
+
+def test_hybrid_context_uses_observed_instance_cloud_evidence() -> None:
+    route_decision = RouteDecision(
+        backend_name="remote-worker:cuda-a",
+        serving_target="chat-shared",
+        policy=RoutingPolicy.BURST_TO_REMOTE,
+        request_id="req-cloud-observed",
+        workload_shape=WorkloadShape.INTERACTIVE,
+        rationale=["remote spillover selected"],
+        considered_backends=["remote-worker:cuda-a"],
+        selected_deployment=BackendDeployment(
+            name="remote-worker:cuda-a",
+            backend_type=BackendType.VLLM_CUDA,
+            engine_type=EngineType.VLLM,
+            model_identifier="meta-llama/Llama-3.1-8B-Instruct",
+            serving_targets=["chat-shared"],
+            deployment_profile=DeploymentProfile.REMOTE,
+            execution_mode=ExecutionModeLabel.REMOTE_WORKER,
+            environment="staging",
+            placement=CloudPlacementMetadata(provider="aws", region="us-east-1"),
+            cost_profile=CostBudgetProfile(
+                profile=CostProfileClass.STANDARD,
+                budget_bucket="gpu-staging",
+                relative_cost_index=0.42,
+                currency="usd",
+            ),
+            instances=[
+                BackendInstance(
+                    instance_id="cuda-a-1",
+                    endpoint=BackendNetworkEndpoint(
+                        base_url="https://cuda-a.internal",
+                        transport=WorkerTransportType.HTTPS,
+                    ),
+                    backend_type=BackendType.VLLM_CUDA,
+                    device_class=DeviceClass.NVIDIA_GPU,
+                    execution_mode=ExecutionModeLabel.REMOTE_WORKER,
+                    placement=CloudPlacementMetadata(
+                        provider="aws",
+                        region="us-east-1",
+                        zone="us-east-1b",
+                    ),
+                    cost_profile=CostBudgetProfile(
+                        profile=CostProfileClass.PREMIUM,
+                        budget_bucket="gpu-canary",
+                        relative_cost_index=0.73,
+                        currency="usd",
+                    ),
+                )
+            ],
+        ),
+        execution_observation=RouteExecutionObservation(
+            executed_backend="remote-worker:cuda-a",
+            backend_instance_id="cuda-a-1",
+            status_code=200,
+            final_outcome="succeeded",
+        ),
+    )
+
+    hybrid_context = _hybrid_context_for_record(
+        metadata=None,
+        route_decision=route_decision,
+        backend_name="remote-worker:cuda-a",
+        routing_policy=RoutingPolicy.BURST_TO_REMOTE,
+    )
+
+    assert hybrid_context is not None
+    assert hybrid_context.observed_placement_evidence is not None
+    assert hybrid_context.observed_cost_evidence is not None
+    assert hybrid_context.observed_placement_evidence.source is CloudEvidenceSource.OBSERVED_RUNTIME
+    assert hybrid_context.observed_placement_evidence.zone == "us-east-1b"
+    assert hybrid_context.observed_cost_evidence.source is CloudEvidenceSource.OBSERVED_RUNTIME
+    assert hybrid_context.observed_cost_evidence.relative_cost_index == 0.73
 
 
 def test_benchmark_config_snapshot_fingerprint_changes_with_knobs() -> None:

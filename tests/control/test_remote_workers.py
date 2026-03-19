@@ -39,6 +39,7 @@ def _registration_request(
     worker_id: str = "worker-1",
     ready: bool = False,
     lifecycle_state: WorkerLifecycleState = WorkerLifecycleState.REGISTERING,
+    runtime_version: str = "0.6.5",
 ) -> RemoteWorkerRegistrationRequest:
     return RemoteWorkerRegistrationRequest(
         worker_id=worker_id,
@@ -57,7 +58,7 @@ def _registration_request(
             runtime=RuntimeIdentity(
                 runtime_family="vllm_cuda",
                 runtime_label="vllm_cuda",
-                runtime_version="0.6.5",
+                runtime_version=runtime_version,
                 engine_type=EngineType.VLLM_CUDA,
                 backend_type=BackendType.VLLM_CUDA,
             ),
@@ -84,7 +85,7 @@ def _registration_request(
         runtime=RuntimeIdentity(
             runtime_family="vllm_cuda",
             runtime_label="vllm_cuda",
-            runtime_version="0.6.5",
+            runtime_version=runtime_version,
             engine_type=EngineType.VLLM_CUDA,
             backend_type=BackendType.VLLM_CUDA,
         ),
@@ -125,6 +126,8 @@ def test_remote_worker_registry_tracks_lifecycle_and_ready_state() -> None:
     registered = service.register(_registration_request(), token=None)
     assert registered.lifecycle_state is WorkerLifecycleState.REGISTERING
     assert registered.ready is False
+    assert registered.usable is False
+    assert registered.quarantined is False
     assert registered.lease_token is not None
 
     now = now + timedelta(seconds=5)
@@ -164,12 +167,16 @@ def test_remote_worker_registry_tracks_lifecycle_and_ready_state() -> None:
 
     snapshot = service.snapshot()
     assert snapshot.ready_worker_count == 1
+    assert snapshot.usable_worker_count == 1
     assert snapshot.live_worker_count == 1
     assert snapshot.workers[0].heartbeat_count == 3
     assert snapshot.workers[0].lifecycle_state is WorkerLifecycleState.READY
+    assert snapshot.workers[0].usable is True
+    assert snapshot.workers[0].quarantined is False
     assert snapshot.workers[0].instance.registration.lifecycle_state is WorkerLifecycleState.READY
     assert snapshot.workers[0].runtime is not None
     assert snapshot.workers[0].runtime.runtime_label == "vllm_cuda"
+    assert snapshot.workers[0].runtime.runtime_version == "0.6.5"
     assert snapshot.workers[0].gpu is not None
     assert snapshot.workers[0].gpu.vendor == "nvidia"
     assert snapshot.workers[0].observed_capacity is not None
@@ -240,6 +247,35 @@ def test_remote_worker_registry_supports_graceful_drain_and_retire() -> None:
     assert retired.live is False
 
 
+def test_remote_worker_registry_transitions_worker_to_unhealthy_from_heartbeat() -> None:
+    service = RemoteWorkerRegistryService(
+        RemoteWorkerLifecycleSettings(dynamic_registration_enabled=True)
+    )
+    registered = service.register(
+        _registration_request(ready=True, lifecycle_state=WorkerLifecycleState.READY),
+        token=None,
+    )
+
+    unhealthy = service.heartbeat(
+        RemoteWorkerHeartbeatRequest(
+            worker_id="worker-1",
+            ready=False,
+            active_requests=0,
+            queue_depth=0,
+            health=BackendHealth(
+                state=BackendHealthState.UNAVAILABLE,
+                load_state=BackendLoadState.FAILED,
+                detail="runtime probe failed",
+            ),
+        ),
+        lease_token=registered.lease_token,
+    )
+
+    assert unhealthy.lifecycle_state is WorkerLifecycleState.UNHEALTHY
+    assert unhealthy.ready is False
+    assert unhealthy.usable is False
+
+
 def test_remote_worker_registry_snapshot_orders_recent_events_newest_first() -> None:
     service = RemoteWorkerRegistryService(
         RemoteWorkerLifecycleSettings(dynamic_registration_enabled=True)
@@ -281,6 +317,7 @@ def test_remote_worker_registry_supports_operator_quarantine_and_canary_only() -
     assert quarantined.lifecycle_state is WorkerLifecycleState.UNHEALTHY
     snapshot = service.snapshot()
     assert "quarantined" in snapshot.workers[0].instance.tags
+    assert snapshot.workers[0].quarantined is True
 
     canary_only = service.set_canary_only(
         "worker-1",
@@ -290,6 +327,55 @@ def test_remote_worker_registry_supports_operator_quarantine_and_canary_only() -
     assert canary_only.worker_id == "worker-1"
     snapshot = service.snapshot()
     assert "canary-only" in snapshot.workers[0].instance.tags
+
+
+def test_remote_worker_registry_quarantines_incompatible_vllm_cuda_runtime_version() -> None:
+    service = RemoteWorkerRegistryService(
+        RemoteWorkerLifecycleSettings(dynamic_registration_enabled=True)
+    )
+
+    registered = service.register(
+        _registration_request(runtime_version="0.5.9"),
+        token=None,
+    )
+
+    assert registered.lifecycle_state is WorkerLifecycleState.UNHEALTHY
+    assert registered.ready is False
+    assert registered.usable is False
+    assert registered.quarantined is True
+    assert registered.detail is not None
+    assert "minimum supported is 0.6.0" in registered.detail
+
+    snapshot = service.snapshot()
+    assert snapshot.unhealthy_worker_count == 1
+    assert snapshot.quarantined_worker_count == 1
+    assert snapshot.usable_worker_count == 0
+    assert snapshot.workers[0].runtime is not None
+    assert snapshot.workers[0].runtime.runtime_version == "0.5.9"
+    assert snapshot.workers[0].eligibility_reasons == [
+        "worker reported unsupported vllm_cuda runtime_version 0.5.9; minimum supported is 0.6.0"
+    ]
+    assert snapshot.workers[0].instance.registration.detail is not None
+    assert snapshot.recent_events[0].event_type.value == "quarantined"
+
+
+def test_remote_worker_registry_rejects_bad_capability_inventory() -> None:
+    service = RemoteWorkerRegistryService(
+        RemoteWorkerLifecycleSettings(dynamic_registration_enabled=True)
+    )
+    request = _registration_request()
+    request.capabilities.model_ids = ["different-model"]
+
+    with pytest.raises(
+        RemoteWorkerRegistrationError,
+        match="model_identifier is not present in the advertised capability inventory",
+    ):
+        service.register(request, token=None)
+
+    snapshot = service.snapshot()
+    assert snapshot.worker_count == 0
+    assert snapshot.recent_events[0].event_type.value == "registration_rejected"
+    assert "model_identifier is not present" in (snapshot.recent_events[0].detail or "")
 
 
 def test_remote_worker_registry_requires_valid_static_token_and_lease_token(
