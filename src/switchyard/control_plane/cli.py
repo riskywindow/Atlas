@@ -13,6 +13,7 @@ import uvicorn
 from switchyard.config import Settings
 from switchyard.diagnostics import collect_deployment_diagnostics
 from switchyard.gateway.app import create_app
+from switchyard.optimization import build_optimization_profile
 from switchyard.schemas.admin import DeploymentDiagnosticsResponse
 
 app = typer.Typer(help="Switchyard control-plane entrypoints.")
@@ -83,6 +84,14 @@ def doctor(
     typer.echo(json.dumps(payload, indent=2))
     if fail_on_issues and _diagnostics_has_issues(payload):
         raise typer.Exit(code=1)
+
+
+@app.command("export-optimization-profile")
+def export_optimization_profile() -> None:
+    """Export the optimization-ready control-plane knob surface as JSON."""
+
+    profile = build_optimization_profile(Settings())
+    typer.echo(profile.model_dump_json(indent=2))
 
 
 def main() -> None:

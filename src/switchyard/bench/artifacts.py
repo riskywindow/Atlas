@@ -21,6 +21,8 @@ from pydantic import BaseModel
 from switchyard.adapters.mock import MockBackendAdapter, MockResponseTemplate
 from switchyard.adapters.registry import AdapterRegistry
 from switchyard.bench.recommendations import render_policy_recommendation_report_markdown
+from switchyard.config import Settings
+from switchyard.optimization import attach_benchmark_config_snapshot
 from switchyard.router.service import RouterService
 from switchyard.schemas.admin import RuntimeInspectionResponse
 from switchyard.schemas.backend import (
@@ -316,6 +318,7 @@ async def run_synthetic_benchmark(
     *,
     scenario: BenchmarkScenario,
     registry: AdapterRegistry | None = None,
+    settings: Settings | None = None,
     timestamp: datetime | None = None,
     internal_backend_pin: str | None = None,
 ) -> BenchmarkRunArtifact:
@@ -409,6 +412,12 @@ async def run_synthetic_benchmark(
             },
         ),
         run_id_suffix=None if internal_backend_pin is None else f"pinned_{internal_backend_pin}",
+        run_config=BenchmarkRunConfig(
+            benchmark_mode="synthetic",
+            concurrency=1,
+            timeout_seconds=30.0,
+        ),
+        settings=settings,
     )
 
 
@@ -423,6 +432,7 @@ async def run_gateway_benchmark(
     config_profile_name: str | None = None,
     control_plane_image: BackendImageMetadata | None = None,
     runtime_inspection_path: str | None = "/admin/runtime",
+    settings: Settings | None = None,
     timestamp: datetime | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> BenchmarkRunArtifact:
@@ -519,6 +529,21 @@ async def run_gateway_benchmark(
                 }
             }
         ),
+        run_config=BenchmarkRunConfig(
+            benchmark_mode="gateway",
+            concurrency=1,
+            timeout_seconds=timeout_seconds,
+            canary_percentage=(
+                0.0 if settings is None else settings.phase4.canary_routing.default_percentage
+            ),
+            shadow_sampling_rate=(
+                0.0 if settings is None else settings.phase4.shadow_routing.default_sampling_rate
+            ),
+            session_affinity_ttl_seconds=(
+                None if settings is None else settings.phase4.session_affinity.ttl_seconds
+            ),
+        ),
+        settings=settings,
     )
 
 
@@ -535,6 +560,7 @@ async def run_workload_manifest_benchmark(
     config_profile_name: str | None = None,
     control_plane_image: BackendImageMetadata | None = None,
     runtime_inspection_path: str | None = "/admin/runtime",
+    settings: Settings | None = None,
     timestamp: datetime | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> BenchmarkRunArtifact:
@@ -629,7 +655,17 @@ async def run_workload_manifest_benchmark(
             concurrency=1,
             warmup=resolved_warmup,
             timeout_seconds=timeout_seconds,
+            canary_percentage=(
+                0.0 if settings is None else settings.phase4.canary_routing.default_percentage
+            ),
+            shadow_sampling_rate=(
+                0.0 if settings is None else settings.phase4.shadow_routing.default_sampling_rate
+            ),
+            session_affinity_ttl_seconds=(
+                None if settings is None else settings.phase4.session_affinity.ttl_seconds
+            ),
         ),
+        settings=settings,
     )
 
 
@@ -672,12 +708,13 @@ def build_replay_plan(
     concurrency: int,
     warmup: BenchmarkWarmupConfig | None = None,
     source_run_id: str,
+    settings: Settings | None = None,
 ) -> ReplayPlan:
     """Build a typed replay plan from captured traces."""
 
     planned_requests = _planned_replay_requests(traces=traces, replay_mode=replay_mode)
     resolved_concurrency = concurrency if replay_mode is ReplayMode.FIXED_CONCURRENCY else 1
-    return ReplayPlan(
+    replay_plan = ReplayPlan(
         plan_id=f"replay_{source_run_id}",
         source_run_id=source_run_id,
         source_schema_version=BenchmarkArtifactSchemaVersion.V2,
@@ -692,6 +729,29 @@ def build_replay_plan(
                 sum(1 for trace in traces if trace.request_timestamp is not None)
             ),
         },
+    )
+    if settings is None:
+        return replay_plan
+    resolved_run_config = attach_benchmark_config_snapshot(
+        settings=settings,
+        run_config=BenchmarkRunConfig(
+            benchmark_mode="trace_replay",
+            execution_target=execution_target,
+            concurrency=resolved_concurrency,
+            warmup=warmup or BenchmarkWarmupConfig(),
+            replay_mode=replay_mode,
+            timeout_seconds=30.0,
+            canary_percentage=settings.phase4.canary_routing.default_percentage,
+            shadow_sampling_rate=settings.phase4.shadow_routing.default_sampling_rate,
+            session_affinity_ttl_seconds=settings.phase4.session_affinity.ttl_seconds,
+        ),
+    )
+    return replay_plan.model_copy(
+        update={
+            "config_fingerprint": resolved_run_config.config_fingerprint,
+            "immutable_config": resolved_run_config.immutable_config,
+        },
+        deep=True,
     )
 
 
@@ -711,6 +771,7 @@ async def run_trace_replay_benchmark(
     config_profile_name: str | None = None,
     control_plane_image: BackendImageMetadata | None = None,
     runtime_inspection_path: str | None = "/admin/runtime",
+    settings: Settings | None = None,
     timestamp: datetime | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> BenchmarkRunArtifact:
@@ -732,6 +793,7 @@ async def run_trace_replay_benchmark(
         concurrency=concurrency,
         warmup=warmup,
         source_run_id=source_run_id,
+        settings=settings,
     )
     scenario = _build_replay_scenario(
         traces=traces,
@@ -811,8 +873,20 @@ async def run_trace_replay_benchmark(
             warmup=replay_plan.warmup,
             replay_mode=replay_mode,
             timeout_seconds=timeout_seconds,
+            canary_percentage=(
+                0.0 if settings is None else settings.phase4.canary_routing.default_percentage
+            ),
+            shadow_sampling_rate=(
+                0.0 if settings is None else settings.phase4.shadow_routing.default_sampling_rate
+            ),
+            session_affinity_ttl_seconds=(
+                None if settings is None else settings.phase4.session_affinity.ttl_seconds
+            ),
+            config_fingerprint=replay_plan.config_fingerprint,
+            immutable_config=replay_plan.immutable_config,
             metadata={"source_run_id": source_run_id},
         ),
+        settings=settings,
     )
 
 
@@ -3267,7 +3341,14 @@ def _build_artifact(
     run_id_suffix: str | None = None,
     execution_target: ExecutionTarget | None = None,
     run_config: BenchmarkRunConfig | None = None,
+    settings: Settings | None = None,
 ) -> BenchmarkRunArtifact:
+    resolved_run_config = run_config or BenchmarkRunConfig()
+    if settings is not None:
+        resolved_run_config = attach_benchmark_config_snapshot(
+            settings=settings,
+            run_config=resolved_run_config,
+        )
     return BenchmarkRunArtifact(
         run_id=build_run_id(
             run_timestamp=run_timestamp,
@@ -3289,7 +3370,7 @@ def _build_artifact(
         summary=summarize_records(records),
         environment=environment,
         execution_target=execution_target,
-        run_config=run_config or BenchmarkRunConfig(),
+        run_config=resolved_run_config,
         records=records,
     )
 

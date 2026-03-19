@@ -20,6 +20,10 @@ from switchyard.schemas.benchmark import (
     BenchmarkComparisonArtifact,
     BenchmarkComparisonDeltaSummary,
     BenchmarkComparisonSideSummary,
+    BenchmarkConfigFingerprint,
+    BenchmarkConfigKnob,
+    BenchmarkConfigKnobCategory,
+    BenchmarkConfigSnapshot,
     BenchmarkDeploymentTarget,
     BenchmarkEnvironmentMetadata,
     BenchmarkPolicyComparison,
@@ -585,6 +589,30 @@ def test_run_config_rejects_disabled_warmup_with_requests() -> None:
         raise AssertionError("Disabled warmup should not permit warmup requests")
 
 
+def test_run_config_serializes_immutable_config_snapshot() -> None:
+    run_config = BenchmarkRunConfig(
+        concurrency=2,
+        config_fingerprint=BenchmarkConfigFingerprint(value="a" * 64),
+        immutable_config=BenchmarkConfigSnapshot(
+            profile_id="stage-a-smoke",
+            fingerprint=BenchmarkConfigFingerprint(value="a" * 64),
+            knobs=[
+                BenchmarkConfigKnob(
+                    knob_id="routing.default_policy",
+                    category=BenchmarkConfigKnobCategory.ROUTING,
+                    config_path="default_routing_policy",
+                    value="balanced",
+                )
+            ],
+        ),
+    )
+
+    payload = run_config.model_dump(mode="json")
+
+    assert payload["config_fingerprint"]["value"] == "a" * 64
+    assert payload["immutable_config"]["knobs"][0]["knob_id"] == "routing.default_policy"
+
+
 def test_trace_record_and_replay_plan_serialize() -> None:
     target = ExecutionTarget(
         target_type=ExecutionTargetType.PINNED_BACKEND,
@@ -607,6 +635,11 @@ def test_trace_record_and_replay_plan_serialize() -> None:
         replay_mode=ReplayMode.FIXED_CONCURRENCY,
         concurrency=2,
         warmup=BenchmarkWarmupConfig(enabled=True, request_count=1),
+        immutable_config=BenchmarkConfigSnapshot(
+            profile_id="stage-a-smoke",
+            fingerprint=BenchmarkConfigFingerprint(value="b" * 64),
+            knobs=[],
+        ),
         requests=[
             ReplayRequest(
                 replay_request_id="replay_req_1",
@@ -626,6 +659,54 @@ def test_trace_record_and_replay_plan_serialize() -> None:
     assert replay_payload["concurrency"] == 2
     assert replay_payload["replay_mode"] == "fixed_concurrency"
     assert replay_payload["trace_record_ids"] == ["trace-1"]
+    assert replay_payload["config_fingerprint"]["value"] == "b" * 64
+
+
+def test_benchmark_artifact_compatibility_without_immutable_config() -> None:
+    artifact = BenchmarkRunArtifact(
+        run_id="run-compat",
+        scenario=BenchmarkScenario(
+            name="compat",
+            model="mock-chat",
+            policy=RoutingPolicy.BALANCED,
+            workload_shape=WorkloadShape.INTERACTIVE,
+            request_count=1,
+        ),
+        policy=RoutingPolicy.BALANCED,
+        backends_involved=["mock-a"],
+        request_count=1,
+        summary=BenchmarkSummary(
+            request_count=1,
+            success_count=1,
+            failure_count=0,
+            avg_latency_ms=1.0,
+            p50_latency_ms=1.0,
+            p95_latency_ms=1.0,
+            total_output_tokens=1,
+            avg_output_tokens=1.0,
+            fallback_count=0,
+            chosen_backend_counts={"mock-a": 1},
+        ),
+        records=[
+            BenchmarkRequestRecord(
+                request_id="req-1",
+                backend_name="mock-a",
+                started_at=datetime(2026, 3, 18, 12, 0, tzinfo=UTC),
+                completed_at=datetime(2026, 3, 18, 12, 0, tzinfo=UTC),
+                latency_ms=1.0,
+                success=True,
+                status_code=200,
+            )
+        ],
+    )
+    payload = artifact.model_dump(mode="json")
+    payload["run_config"].pop("immutable_config", None)
+    payload["run_config"].pop("config_fingerprint", None)
+
+    parsed = BenchmarkRunArtifact.model_validate(payload)
+
+    assert parsed.run_config.immutable_config is None
+    assert parsed.run_config.config_fingerprint is None
 
 
 def test_comparison_summary_and_report_metadata_serialize() -> None:

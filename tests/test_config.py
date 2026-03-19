@@ -11,7 +11,7 @@ from switchyard.schemas.backend import (
     WorkerTransportType,
 )
 from switchyard.schemas.benchmark import TraceCaptureMode
-from switchyard.schemas.routing import RoutingPolicy
+from switchyard.schemas.routing import PolicyRolloutMode, RoutingPolicy
 
 
 def test_settings_loads_valid_values(monkeypatch: MonkeyPatch) -> None:
@@ -188,6 +188,80 @@ def test_settings_load_phase7_hybrid_and_remote_worker_config(
     assert settings.phase7.remote_workers.stale_eviction_seconds == 120.0
     assert settings.phase7.remote_workers.registration_token_name == "SWITCHYARD_WORKER_TOKEN"
     assert settings.phase7.remote_workers.allow_static_instances is False
+
+
+def test_settings_load_optimization_profile_config(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "SWITCHYARD_OPTIMIZATION",
+        (
+            '{"profile_id":"stage-a-smoke","objective":"latency",'
+            '"allowlisted_routing_policies":["balanced","latency_slo"],'
+            '"allowlisted_rollout_modes":["shadow_only","canary"],'
+            '"min_evidence_count":7,"max_predicted_error_rate":0.02,'
+            '"max_predicted_latency_regression_ms":12.5,'
+            '"require_observed_backend_evidence":true,'
+            '"promotion_requires_operator_review":true,'
+            '"max_rollout_canary_percentage":15.0,'
+            '"max_shadow_sampling_rate":0.15,'
+            '"max_remote_share_percent":30.0,'
+            '"max_remote_request_budget_per_minute":240,'
+            '"max_remote_concurrency_cap":24,'
+            '"max_remote_cooldown_seconds":90.0,'
+            '"max_global_concurrency_cap":256,'
+            '"max_circuit_open_cooldown_seconds":120.0}'
+        ),
+    )
+
+    settings = Settings()
+
+    assert settings.optimization.profile_id == "stage-a-smoke"
+    assert settings.optimization.objective.value == "latency"
+    assert settings.optimization.allowlisted_routing_policies == (
+        RoutingPolicy.BALANCED,
+        RoutingPolicy.LATENCY_SLO,
+    )
+    assert settings.optimization.allowlisted_rollout_modes == (
+        PolicyRolloutMode.SHADOW_ONLY,
+        PolicyRolloutMode.CANARY,
+    )
+    assert settings.optimization.min_evidence_count == 7
+    assert settings.optimization.max_predicted_error_rate == 0.02
+    assert settings.optimization.require_observed_backend_evidence is True
+    assert settings.optimization.max_remote_request_budget_per_minute == 240
+    assert settings.optimization.worker_launch_presets[0].preset_name == "host_native_config"
+
+
+def test_settings_reject_duplicate_optimization_policies(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "SWITCHYARD_OPTIMIZATION",
+        '{"allowlisted_routing_policies":["balanced","balanced"]}',
+    )
+
+    try:
+        Settings()
+    except ValidationError as exc:
+        assert "allowlisted_routing_policies" in str(exc)
+    else:
+        raise AssertionError("Settings should reject duplicate optimization routing policies")
+
+
+def test_settings_reject_duplicate_worker_launch_presets(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "SWITCHYARD_OPTIMIZATION",
+        (
+            '{"worker_launch_presets":['
+            '{"preset_name":"dup","scope":"host_native","warmup_mode":"config"},'
+            '{"preset_name":"dup","scope":"remote_worker","concurrency_limit":4}'
+            "]}"
+        ),
+    )
+
+    try:
+        Settings()
+    except ValidationError as exc:
+        assert "worker_launch_presets" in str(exc)
+    else:
+        raise AssertionError("Settings should reject duplicate worker launch preset names")
 
 
 def test_settings_reject_duplicate_phase7_remote_environments(

@@ -108,3 +108,15 @@ def test_doctor_command_queries_remote_gateway(monkeypatch: pytest.MonkeyPatch) 
 
     assert result.exit_code == 0
     assert '"diagnostics_source": "runtime"' in result.stdout
+
+
+def test_export_optimization_profile_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings()
+    monkeypatch.setattr(control_plane_cli, "Settings", lambda: settings)
+
+    runner = CliRunner()
+    result = runner.invoke(control_plane_cli.app, ["export-optimization-profile"])
+
+    assert result.exit_code == 0
+    assert '"profile_id": "phase7-stage-a-baseline"' in result.stdout
+    assert '"knob_id": "default_routing_policy"' in result.stdout

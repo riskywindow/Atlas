@@ -859,6 +859,7 @@ async def _run_synthetic_command(
     artifact = await run_synthetic_benchmark(
         scenario=scenario,
         registry=_resolve_benchmark_registry(settings),
+        settings=settings,
     )
     resolved_output_dir = output_dir or settings.benchmark_output_dir
     artifact_path = write_artifact(artifact, default_output_path(resolved_output_dir, artifact))
@@ -898,6 +899,7 @@ async def _run_gateway_command(
     artifact = await run_gateway_benchmark(
         scenario=scenario,
         gateway_base_url=gateway_base_url,
+        settings=settings,
         metrics_path=metrics_path,
         timeout_seconds=timeout_seconds,
         deployment_target=deployment_target,
@@ -998,6 +1000,7 @@ async def _run_workload_command(
         gateway_base_url=gateway_base_url,
         execution_target=execution_target,
         warmup=warmup,
+        settings=settings,
         metrics_path=metrics_path,
         timeout_seconds=timeout_seconds,
         deployment_target=deployment_target,
@@ -1085,6 +1088,7 @@ async def _replay_traces_command(
         concurrency=concurrency,
         warmup=warmup,
         source_run_id=source_run_id,
+        settings=settings,
     )
     artifact = await run_trace_replay_benchmark(
         traces=traces,
@@ -1094,6 +1098,7 @@ async def _replay_traces_command(
         concurrency=concurrency,
         warmup=warmup,
         source_run_id=source_run_id,
+        settings=settings,
         metrics_path=metrics_path,
         timeout_seconds=timeout_seconds,
         deployment_target=deployment_target,

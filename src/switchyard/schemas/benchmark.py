@@ -388,6 +388,50 @@ class BenchmarkWarmupConfig(BaseModel):
         return self
 
 
+class BenchmarkConfigKnobCategory(StrEnum):
+    """High-level grouping for one benchmark-relevant config knob."""
+
+    SERVING = "serving"
+    ROUTING = "routing"
+    SCHEDULING = "scheduling"
+    HYBRID_EXECUTION = "hybrid_execution"
+    WORKER_LAUNCH = "worker_launch"
+    SEARCH_SPACE = "search_space"
+
+
+class BenchmarkConfigKnob(BaseModel):
+    """One benchmark-relevant knob captured in a canonical config snapshot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    knob_id: str = Field(min_length=1, max_length=256)
+    category: BenchmarkConfigKnobCategory
+    config_path: str = Field(min_length=1, max_length=256)
+    value: bool | int | float | str | list[str] | None = None
+    source_scope: str = Field(default="global", min_length=1, max_length=128)
+    notes: list[str] = Field(default_factory=list)
+
+
+class BenchmarkConfigFingerprint(BaseModel):
+    """Canonical fingerprint for an immutable benchmark or replay config snapshot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    algorithm: str = Field(default="sha256_canonical_json", min_length=1, max_length=64)
+    value: str = Field(min_length=16, max_length=128)
+
+
+class BenchmarkConfigSnapshot(BaseModel):
+    """Immutable configuration truth recorded with one benchmark or replay run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: str | None = Field(default=None, min_length=1, max_length=128)
+    fingerprint: BenchmarkConfigFingerprint
+    knobs: list[BenchmarkConfigKnob] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
 class BenchmarkRunConfig(BaseModel):
     """Execution configuration for a benchmark run."""
 
@@ -403,6 +447,8 @@ class BenchmarkRunConfig(BaseModel):
     canary_percentage: float = Field(default=0.0, ge=0.0, le=100.0)
     shadow_sampling_rate: float = Field(default=0.0, ge=0.0, le=1.0)
     session_affinity_ttl_seconds: float | None = Field(default=None, gt=0.0, le=86_400.0)
+    config_fingerprint: BenchmarkConfigFingerprint | None = None
+    immutable_config: BenchmarkConfigSnapshot | None = None
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
@@ -516,6 +562,8 @@ class ReplayPlan(BaseModel):
     replay_mode: ReplayMode = ReplayMode.SEQUENTIAL
     concurrency: int = Field(default=1, ge=1, le=1024)
     warmup: BenchmarkWarmupConfig = Field(default_factory=BenchmarkWarmupConfig)
+    config_fingerprint: BenchmarkConfigFingerprint | None = None
+    immutable_config: BenchmarkConfigSnapshot | None = None
     request_ids: list[str] = Field(default_factory=list)
     trace_record_ids: list[str] = Field(default_factory=list)
     requests: list[ReplayRequest] = Field(default_factory=list)
@@ -538,6 +586,8 @@ class ReplayPlan(BaseModel):
                 self.request_ids = request_ids
             if not self.trace_record_ids:
                 self.trace_record_ids = trace_record_ids
+        if self.config_fingerprint is None and self.immutable_config is not None:
+            self.config_fingerprint = self.immutable_config.fingerprint
         return self
 
 

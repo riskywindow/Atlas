@@ -126,3 +126,42 @@ worker packaging path before any real cloud GPU rollout exists. That path should
 the existing HTTP worker protocol, static discovery or typed registration, and CI-safe
 stub workers rather than rented GPUs. The packaging and documentation slice in this repo
 now covers that boundary directly.
+
+## Optimization-Ready Surface
+
+Phase 7 now exposes a dedicated optimization-ready config/export surface for later Forge
+Stage A work.
+
+- `SWITCHYARD_OPTIMIZATION` defines the allowlisted routing policies, rollout modes,
+  evidence thresholds, and bounded knob ranges that later offline tuning is allowed to
+  inspect.
+- The benchmark layer now records an immutable run config snapshot plus a deterministic
+  config fingerprint so later optimization loops can compare runs honestly.
+- `switchyard-control-plane export-optimization-profile` exports the resolved knob
+  surface as JSON.
+- The exported profile is descriptive rather than prescriptive. It gives later tuning
+  jobs a typed control-plane posture without scraping router internals or mutating live
+  state.
+
+## Knob Audit
+
+The current repo exposes benchmark-relevant knobs across several existing boundaries:
+
+- scheduling and overload posture:
+  admission concurrency caps, queue sizes, queue timeout, replay concurrency, and
+  benchmark warmup settings.
+- routing and rollout posture:
+  default routing policy, scorer rollout mode, canary percentages, shadow sampling, and
+  session-affinity TTL.
+- hybrid execution posture:
+  local preference, spillover enablement, remote share limits, remote request budgets,
+  remote concurrency caps, and cooldown duration.
+- serving and worker-launch posture:
+  per-backend configured priority/weight, worker transport, warmup eagerness, and
+  bounded launch presets for host-native and remote-worker runs.
+
+What is intentionally not modeled yet:
+
+- kernel or code generation choices,
+- opaque learned-policy weights,
+- batching knobs that the current runtime boundary does not expose explicitly.

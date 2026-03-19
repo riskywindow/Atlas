@@ -21,7 +21,8 @@ Phase 7 adds:
 - evidence-based recommendation reports that do not auto-apply changes,
 - typed hybrid local/remote execution settings and runtime inspection,
 - operator-visible remote spillover budgets and remote-health summaries,
-- remote worker lifecycle posture for later secure registration and cloud-ready workers.
+- remote worker lifecycle posture for later secure registration and cloud-ready workers,
+- optimization-ready config and export surfaces for later Forge Stage A work.
 
 Phase 7 is Mac-first, not Mac-locked:
 - real local backends are currently Apple Silicon focused,
@@ -167,6 +168,7 @@ curl -s http://127.0.0.1:8000/readyz | python -m json.tool
 curl -s http://127.0.0.1:8000/admin/runtime | python -m json.tool
 curl -s http://127.0.0.1:8000/admin/deployment | python -m json.tool
 uv run switchyard-control-plane doctor --gateway-base-url http://127.0.0.1:8000
+uv run switchyard-control-plane export-optimization-profile | python -m json.tool
 ```
 
 6. Send one request through the gateway:

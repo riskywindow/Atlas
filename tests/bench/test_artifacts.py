@@ -44,6 +44,7 @@ from switchyard.bench.simulation import compare_candidate_policies_offline
 from switchyard.bench.workloads import build_workload_manifest
 from switchyard.config import AppEnvironment, Settings
 from switchyard.gateway import create_app
+from switchyard.optimization import build_benchmark_config_snapshot
 from switchyard.schemas.backend import BackendCapabilities, BackendType, DeviceClass
 from switchyard.schemas.benchmark import (
     BenchmarkArtifactSchemaVersion,
@@ -53,6 +54,7 @@ from switchyard.schemas.benchmark import (
     BenchmarkEnvironmentMetadata,
     BenchmarkRequestRecord,
     BenchmarkRunArtifact,
+    BenchmarkRunConfig,
     BenchmarkScenario,
     BenchmarkSummary,
     BenchmarkTargetComparisonArtifact,
@@ -117,6 +119,7 @@ async def test_run_synthetic_benchmark_builds_artifact() -> None:
     )
     artifact = await run_synthetic_benchmark(
         scenario=scenario,
+        settings=Settings(),
         timestamp=datetime(2026, 3, 15, 12, 0, tzinfo=UTC),
     )
 
@@ -131,6 +134,28 @@ async def test_run_synthetic_benchmark_builds_artifact() -> None:
     assert artifact.summary.chosen_backend_counts == {"mock-local-fast": 2}
     assert artifact.environment.benchmark_mode == "synthetic"
     assert artifact.scenario.workload_generation.pattern is WorkloadPattern.REPEATED_PREFIX
+    assert artifact.run_config.immutable_config is not None
+    assert artifact.run_config.config_fingerprint is not None
+    assert artifact.run_config.immutable_config.knobs[0].knob_id == "benchmark.concurrency"
+
+
+def test_benchmark_config_snapshot_fingerprint_changes_with_knobs() -> None:
+    baseline = Settings()
+    modified = Settings(
+        phase7=baseline.phase7.model_copy(
+            update={
+                "hybrid_execution": baseline.phase7.hybrid_execution.model_copy(
+                    update={"remote_cooldown_seconds": 90.0}
+                )
+            }
+        )
+    )
+    run_config = BenchmarkRunConfig(benchmark_mode="synthetic", concurrency=1)
+
+    baseline_snapshot = build_benchmark_config_snapshot(settings=baseline, run_config=run_config)
+    modified_snapshot = build_benchmark_config_snapshot(settings=modified, run_config=run_config)
+
+    assert baseline_snapshot.fingerprint.value != modified_snapshot.fingerprint.value
 
 
 @pytest.mark.asyncio

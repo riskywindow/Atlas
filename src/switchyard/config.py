@@ -26,7 +26,8 @@ from switchyard.schemas.backend import (
     WorkerLocalityClass,
     WorkerTransportType,
 )
-from switchyard.schemas.benchmark import TraceCaptureMode
+from switchyard.schemas.benchmark import CounterfactualObjective, TraceCaptureMode
+from switchyard.schemas.optimization import WorkerLaunchPreset, WorkerLaunchPresetScope
 from switchyard.schemas.routing import (
     CanaryPolicy,
     PolicyRolloutMode,
@@ -434,6 +435,81 @@ class Phase7ControlPlaneSettings(BaseModel):
     )
 
 
+class OptimizationSettings(BaseModel):
+    """Optimization-ready bounds and evidence posture for later Stage A workflows."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: str = Field(default="phase7-stage-a-baseline", min_length=1, max_length=128)
+    objective: CounterfactualObjective = CounterfactualObjective.BALANCED
+    allowlisted_routing_policies: tuple[RoutingPolicy, ...] = (
+        RoutingPolicy.BALANCED,
+        RoutingPolicy.LOCAL_PREFERRED,
+        RoutingPolicy.BURST_TO_REMOTE,
+        RoutingPolicy.LATENCY_SLO,
+        RoutingPolicy.QUALITY_ON_DEMAND,
+        RoutingPolicy.REMOTE_PREFERRED_IF_LOCAL_UNHEALTHY,
+    )
+    allowlisted_rollout_modes: tuple[PolicyRolloutMode, ...] = (
+        PolicyRolloutMode.SHADOW_ONLY,
+        PolicyRolloutMode.REPORT_ONLY,
+        PolicyRolloutMode.CANARY,
+        PolicyRolloutMode.ACTIVE_GUARDED,
+    )
+    min_evidence_count: int = Field(default=3, ge=1, le=100_000)
+    max_predicted_error_rate: float | None = Field(default=0.05, ge=0.0, le=1.0)
+    max_predicted_latency_regression_ms: float | None = Field(default=25.0, ge=0.0)
+    require_observed_backend_evidence: bool = False
+    promotion_requires_operator_review: bool = True
+    max_rollout_canary_percentage: float = Field(default=25.0, ge=0.0, le=100.0)
+    max_shadow_sampling_rate: float = Field(default=0.25, ge=0.0, le=1.0)
+    max_remote_share_percent: float = Field(default=50.0, ge=0.0, le=100.0)
+    max_remote_request_budget_per_minute: int | None = Field(default=1_000, ge=1, le=1_000_000)
+    max_remote_concurrency_cap: int | None = Field(default=128, ge=1, le=100_000)
+    max_remote_cooldown_seconds: float = Field(default=300.0, ge=0.0, le=3600.0)
+    max_global_concurrency_cap: int = Field(default=10_000, ge=1, le=100_000)
+    max_circuit_open_cooldown_seconds: float = Field(default=600.0, ge=0.0, le=3600.0)
+    worker_launch_presets: tuple[WorkerLaunchPreset, ...] = (
+        WorkerLaunchPreset(
+            preset_name="host_native_config",
+            scope=WorkerLaunchPresetScope.HOST_NATIVE,
+            warmup_mode="config",
+            feature_flags={"startup_warmup": True},
+            notes=["follow the per-model warmup configuration"],
+        ),
+        WorkerLaunchPreset(
+            preset_name="host_native_lazy",
+            scope=WorkerLaunchPresetScope.HOST_NATIVE,
+            warmup_mode="lazy",
+            feature_flags={"startup_warmup": False},
+            notes=["defer warmup for local developer workflows"],
+        ),
+        WorkerLaunchPreset(
+            preset_name="remote_default",
+            scope=WorkerLaunchPresetScope.REMOTE_WORKER,
+            concurrency_limit=4,
+            supports_streaming=True,
+            stream_chunk_size=3,
+            feature_flags={"startup_registration": True},
+            notes=["matches the generic fake remote worker defaults"],
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> OptimizationSettings:
+        if len(self.allowlisted_routing_policies) != len(set(self.allowlisted_routing_policies)):
+            msg = "allowlisted_routing_policies must not contain duplicate entries"
+            raise ValueError(msg)
+        if len(self.allowlisted_rollout_modes) != len(set(self.allowlisted_rollout_modes)):
+            msg = "allowlisted_rollout_modes must not contain duplicate entries"
+            raise ValueError(msg)
+        preset_names = [preset.preset_name for preset in self.worker_launch_presets]
+        if len(preset_names) != len(set(preset_names)):
+            msg = "worker_launch_presets must not contain duplicate preset_name values"
+            raise ValueError(msg)
+        return self
+
+
 class Phase4ControlPlaneSettings(BaseModel):
     """Phase 4 control-plane configuration."""
 
@@ -479,6 +555,7 @@ class Settings(BaseSettings):
     topology: DeploymentTopologySettings = Field(default_factory=DeploymentTopologySettings)
     phase4: Phase4ControlPlaneSettings = Field(default_factory=Phase4ControlPlaneSettings)
     phase7: Phase7ControlPlaneSettings = Field(default_factory=Phase7ControlPlaneSettings)
+    optimization: OptimizationSettings = Field(default_factory=OptimizationSettings)
 
     model_config = SettingsConfigDict(
         env_prefix="SWITCHYARD_",

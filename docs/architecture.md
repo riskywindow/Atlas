@@ -1,13 +1,12 @@
 # Architecture
 
-Switchyard is in Phase 6 on top of the Phase 5 control-plane foundation: two real
+Switchyard is in Phase 7 on top of the Phase 6 control-plane foundation: two real
 backend families, logical alias routing, explicit worker inventory, conservative
-health-aware fallback, reproducible benchmark and trace workflows, and now a typed
-routing-intelligence layer with deterministic request features, historical summaries,
-transparent adaptive scoring, offline simulation, safe rollout controls, and
-recommendation reporting. The core design goal is still portability: Apple-specific
-runtime details stop at the adapter/runtime boundary so the same contracts can later
-host CUDA or remote workers.
+health-aware fallback, reproducible benchmark and trace workflows, typed
+routing-intelligence, remote-worker lifecycle posture, hybrid local/remote guardrails,
+and operator-visible budget state. The core design goal is still portability:
+Apple-specific runtime details stop at the adapter/runtime boundary so the same
+contracts can later host CUDA or remote workers.
 
 ## Core Terms
 
@@ -193,6 +192,26 @@ They fit into the architecture like this:
 
 This split matters because benchmark and replay workflows should remain backend-agnostic
 extensions of the control plane, not a second system with its own contracts.
+
+## Optimization-Ready Control Surface
+
+Phase 7 also exposes a typed optimization-ready surface for later Forge Stage A work.
+This stays separate from the live request path.
+
+- `switchyard.config.OptimizationSettings` defines allowlisted routing policies,
+  rollout modes, evidence thresholds, bounded tuning ranges, and worker-launch presets.
+- `switchyard.optimization.build_optimization_profile` resolves the current settings
+  into a serializable profile of knobs, current values, and promotion constraints.
+- `BenchmarkRunConfig` and `ReplayPlan` now carry an immutable config snapshot and
+  deterministic fingerprint for experiment truthfulness.
+- `switchyard-control-plane export-optimization-profile` emits that profile as JSON for
+  offline tuning, replay, and simulation workflows.
+
+This keeps later optimization work reviewable and reproducible:
+
+- tuning inputs are typed and diffable,
+- local-first and spillover constraints remain explicit,
+- operator review is still required before promotion.
 
 ## Request And Routing Flow
 
