@@ -19,6 +19,7 @@ from switchyard.schemas.backend import (
     DeploymentProfile,
     ExecutionModeLabel,
     NetworkProfile,
+    RuntimeIdentity,
     TopologySchemaVersion,
     WorkerLocalityClass,
     WorkerTransportType,
@@ -81,6 +82,7 @@ class WorkloadScenarioFamily(StrEnum):
     HYBRID_SPILLOVER = "hybrid_spillover"
     REMOTE_COLD_WARM = "remote_cold_warm"
     REMOTE_BUDGET_GUARDRAIL = "remote_budget_guardrail"
+    REAL_CLOUD_VALIDATION = "real_cloud_validation"
     MIXED = "mixed"
 
 
@@ -120,6 +122,29 @@ class ReportSourceOfTruth(StrEnum):
     """Authoritative data source for generated reports."""
 
     BENCHMARK_ARTIFACT = "benchmark_artifact"
+
+
+class BenchmarkEvidenceClass(StrEnum):
+    """Evidence class for one benchmark record or aggregate summary."""
+
+    OBSERVED = "observed"
+    MOCK = "mock"
+    ESTIMATED = "estimated"
+    CONFIGURED = "configured"
+    UNSUPPORTED = "unsupported"
+    MIXED = "mixed"
+
+
+class BenchmarkRunKind(StrEnum):
+    """High-level posture of a benchmark or replay run."""
+
+    LOCAL_ONLY = "local_only"
+    MOCK_REMOTE_HYBRID = "mock_remote_hybrid"
+    OBSERVED_CLOUD = "observed_cloud"
+    CONFIGURED_CLOUD = "configured_cloud"
+    ESTIMATED_CLOUD = "estimated_cloud"
+    MIXED_EVIDENCE = "mixed_evidence"
+    UNSUPPORTED = "unsupported"
 
 
 class ComparisonSourceKind(StrEnum):
@@ -240,6 +265,67 @@ class HybridExecutionContext(BaseModel):
     reason_codes: list[str] = Field(default_factory=list)
     injected_condition: HybridConditionProfile | None = None
     predictor_condition: HybridConditionProfile | None = None
+
+
+class CloudWorkerRuntimeEvidence(BaseModel):
+    """Cloud-worker identity and observed/runtime metadata for one request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    backend_name: str = Field(min_length=1, max_length=128)
+    backend_instance_id: str | None = Field(default=None, min_length=1, max_length=128)
+    runtime: RuntimeIdentity | None = None
+    provider: str | None = Field(default=None, min_length=1, max_length=128)
+    region: str | None = Field(default=None, min_length=1, max_length=128)
+    zone: str | None = Field(default=None, min_length=1, max_length=128)
+    observed_queue_delay_ms: float | None = Field(default=None, ge=0.0)
+    observed_latency_ms: float | None = Field(default=None, ge=0.0)
+    observed_ttft_ms: float | None = Field(default=None, ge=0.0)
+    observed_status_code: int | None = Field(default=None, ge=100, le=599)
+    observed_error_category: str | None = Field(default=None, min_length=1, max_length=128)
+    observed_budget_outcome: RemoteBudgetOutcome | None = None
+    placement_evidence_source: CloudEvidenceSource | None = None
+    cost_evidence_source: CloudEvidenceSource | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class BenchmarkEvidenceSummary(BaseModel):
+    """Honest summary of evidence quality and cloud-worker posture for a run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_kind: BenchmarkRunKind = BenchmarkRunKind.UNSUPPORTED
+    sample_size: int = Field(default=0, ge=0)
+    evidence_class_counts: dict[BenchmarkEvidenceClass, int] = Field(default_factory=dict)
+    observed_cloud_request_count: int = Field(default=0, ge=0)
+    mock_request_count: int = Field(default=0, ge=0)
+    configured_cloud_request_count: int = Field(default=0, ge=0)
+    estimated_request_count: int = Field(default=0, ge=0)
+    unsupported_request_count: int = Field(default=0, ge=0)
+    mixed_request_count: int = Field(default=0, ge=0)
+    cloud_provider_counts: dict[str, int] = Field(default_factory=dict)
+    cloud_region_counts: dict[str, int] = Field(default_factory=dict)
+    cloud_runtime_counts: dict[str, int] = Field(default_factory=dict)
+    cloud_runtime_version_counts: dict[str, int] = Field(default_factory=dict)
+    cloud_worker_identity_counts: dict[str, int] = Field(default_factory=dict)
+    observed_error_count: int = Field(default=0, ge=0)
+    observed_budget_outcome_counts: dict[str, int] = Field(default_factory=dict)
+    avg_observed_queue_delay_ms: float | None = Field(default=None, ge=0.0)
+    avg_observed_remote_latency_ms: float | None = Field(default=None, ge=0.0)
+    confidence_notes: list[str] = Field(default_factory=list)
+    comparability_limitations: list[str] = Field(default_factory=list)
+
+
+class BenchmarkComparabilityAssessment(BaseModel):
+    """Whether two benchmark runs are comparable enough for direct conclusions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    directly_comparable: bool = True
+    left_run_kind: BenchmarkRunKind = BenchmarkRunKind.UNSUPPORTED
+    right_run_kind: BenchmarkRunKind = BenchmarkRunKind.UNSUPPORTED
+    shared_evidence_classes: list[BenchmarkEvidenceClass] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
 
 
 class HybridBenchmarkSummary(BaseModel):
@@ -697,6 +783,7 @@ class BenchmarkComparisonSideSummary(BaseModel):
     route_distribution: dict[str, int] = Field(default_factory=dict)
     backend_distribution: dict[str, int] = Field(default_factory=dict)
     hybrid_summary: HybridBenchmarkSummary | None = None
+    evidence_summary: BenchmarkEvidenceSummary | None = None
 
 
 class ScenarioDelta(BaseModel):
@@ -758,6 +845,9 @@ class BenchmarkTargetComparisonArtifact(BaseModel):
     right: BenchmarkComparisonSideSummary
     delta: BenchmarkComparisonDeltaSummary
     comparison_summary: ComparisonRunSummary | None = None
+    comparability_assessment: BenchmarkComparabilityAssessment = Field(
+        default_factory=BenchmarkComparabilityAssessment
+    )
 
     @model_validator(mode="after")
     def validate_sides(self) -> BenchmarkTargetComparisonArtifact:
@@ -838,6 +928,8 @@ class EnvironmentSnapshot(BaseModel):
 class BenchmarkRequestRecord(BaseModel):
     """Per-request benchmark result."""
 
+    model_config = ConfigDict(extra="forbid")
+
     request_id: str = Field(min_length=1, max_length=128)
     workload_item_id: str | None = Field(default=None, min_length=1, max_length=128)
     scenario_family: WorkloadScenarioFamily | None = None
@@ -872,6 +964,10 @@ class BenchmarkRequestRecord(BaseModel):
     execution_observation: RouteExecutionObservation | None = None
     control_plane_metadata: ControlPlaneReportMetadata | None = None
     hybrid_context: HybridExecutionContext | None = None
+    evidence_class: BenchmarkEvidenceClass = BenchmarkEvidenceClass.UNSUPPORTED
+    cloud_worker_evidence: CloudWorkerRuntimeEvidence | None = None
+    confidence_notes: list[str] = Field(default_factory=list)
+    comparability_limitations: list[str] = Field(default_factory=list)
     success: bool
     status_code: int = Field(ge=100, le=599)
     usage: UsageStats | None = None
@@ -996,6 +1092,8 @@ class FamilyBenchmarkSummary(BaseModel):
 class BenchmarkSummary(BaseModel):
     """Summary statistics for a benchmark run."""
 
+    model_config = ConfigDict(extra="forbid")
+
     request_count: int = Field(ge=0)
     success_count: int = Field(ge=0)
     failure_count: int = Field(ge=0)
@@ -1012,6 +1110,7 @@ class BenchmarkSummary(BaseModel):
     fallback_count: int = Field(default=0, ge=0)
     chosen_backend_counts: dict[str, int] = Field(default_factory=dict)
     hybrid_summary: HybridBenchmarkSummary | None = None
+    evidence_summary: BenchmarkEvidenceSummary | None = None
     family_summaries: dict[WorkloadScenarioFamily, FamilyBenchmarkSummary] = Field(
         default_factory=dict
     )
@@ -1548,6 +1647,8 @@ class BenchmarkRunArtifact(BaseModel):
         default_factory=lambda: BenchmarkEnvironmentMetadata(benchmark_mode="synthetic")
     )
     environment_snapshot: EnvironmentSnapshot | None = None
+    run_kind: BenchmarkRunKind = BenchmarkRunKind.UNSUPPORTED
+    comparability_limitations: list[str] = Field(default_factory=list)
     records: list[BenchmarkRequestRecord] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -1584,6 +1685,12 @@ class BenchmarkRunArtifact(BaseModel):
             self.model_alias = self.execution_target.model_alias
         if self.environment_snapshot is None:
             self.environment_snapshot = EnvironmentSnapshot.from_environment(self.environment)
+        if self.summary.evidence_summary is not None:
+            self.run_kind = self.summary.evidence_summary.run_kind
+        if not self.comparability_limitations and self.summary.evidence_summary is not None:
+            self.comparability_limitations = list(
+                self.summary.evidence_summary.comparability_limitations
+            )
         if (
             self.environment.topology_reference is None
             and self.environment.topology_capture_source is not None

@@ -59,17 +59,22 @@ from switchyard.schemas.backend import (
     DeviceClass,
     EngineType,
     ExecutionModeLabel,
+    RuntimeIdentity,
     WorkerTransportType,
 )
 from switchyard.schemas.benchmark import (
     BenchmarkArtifactSchemaVersion,
+    BenchmarkComparabilityAssessment,
     BenchmarkComparisonDeltaSummary,
     BenchmarkComparisonSideSummary,
     BenchmarkDeploymentTarget,
     BenchmarkEnvironmentMetadata,
+    BenchmarkEvidenceClass,
+    BenchmarkEvidenceSummary,
     BenchmarkRequestRecord,
     BenchmarkRunArtifact,
     BenchmarkRunConfig,
+    BenchmarkRunKind,
     BenchmarkScenario,
     BenchmarkSummary,
     BenchmarkTargetComparisonArtifact,
@@ -855,6 +860,7 @@ def test_render_run_report_markdown_includes_hybrid_runtime_sections() -> None:
 
     markdown = render_run_report_markdown(artifact)
 
+    assert "## Evidence Posture" in markdown
     assert "## Hybrid Execution" in markdown
     assert "## Remote Worker Lifecycle" in markdown
     assert "Captured locality mix: `1 local / 1 remote / 0 external`" in markdown
@@ -931,6 +937,131 @@ def test_summarize_records_captures_hybrid_evidence_honestly() -> None:
     assert summary.hybrid_summary.estimated_placement_evidence_count == 1
     assert summary.hybrid_summary.estimated_cost_evidence_count == 1
     assert summary.hybrid_summary.total_modeled_cost == 0.05
+    assert summary.evidence_summary is not None
+    assert summary.evidence_summary.run_kind is BenchmarkRunKind.MIXED_EVIDENCE
+    assert summary.evidence_summary.evidence_class_counts == {
+        BenchmarkEvidenceClass.MOCK: 2,
+        BenchmarkEvidenceClass.MIXED: 1,
+    }
+    assert summary.evidence_summary.cloud_provider_counts == {"aws": 1}
+    assert summary.evidence_summary.cloud_worker_identity_counts == {
+        "remote-worker:cuda-a": 1
+    }
+    assert "run does not contain direct observed cloud-worker execution" in (
+        summary.evidence_summary.comparability_limitations
+    )
+
+
+def test_summarize_records_marks_observed_real_cloud_evidence() -> None:
+    started_at = datetime(2026, 3, 17, 12, 0, tzinfo=UTC)
+    record = BenchmarkRequestRecord(
+        request_id="req-real-cloud",
+        backend_name="remote-worker:vllm-cuda",
+        backend_type="vllm_cuda",
+        backend_instance_id="cuda-1",
+        model_alias="chat-shared",
+        started_at=started_at,
+        completed_at=started_at,
+        latency_ms=24.0,
+        ttft_ms=8.0,
+        queue_delay_ms=3.5,
+        success=True,
+        status_code=200,
+        route_decision=RouteDecision(
+            backend_name="remote-worker:vllm-cuda",
+            serving_target="chat-shared",
+            policy=RoutingPolicy.BURST_TO_REMOTE,
+            request_id="req-real-cloud",
+            workload_shape=WorkloadShape.INTERACTIVE,
+            rationale=["real cloud execution"],
+            considered_backends=["remote-worker:vllm-cuda"],
+            selected_deployment=BackendDeployment(
+                name="remote-worker:vllm-cuda",
+                backend_type=BackendType.VLLM_CUDA,
+                engine_type=EngineType.VLLM,
+                model_identifier="meta-llama/Llama-3.1-8B-Instruct",
+                runtime=RuntimeIdentity(
+                    runtime_family="vllm_cuda",
+                    runtime_label="vllm_cuda",
+                    runtime_version="0.6.5",
+                    engine_type=EngineType.VLLM,
+                    backend_type=BackendType.VLLM_CUDA,
+                ),
+                serving_targets=["chat-shared"],
+                deployment_profile=DeploymentProfile.REMOTE,
+                execution_mode=ExecutionModeLabel.REMOTE_WORKER,
+                environment="staging",
+                placement=CloudPlacementMetadata(
+                    provider="aws",
+                    region="us-east-1",
+                    zone="us-east-1b",
+                ),
+                instances=[
+                    BackendInstance(
+                        instance_id="cuda-1",
+                        endpoint=BackendNetworkEndpoint(
+                            base_url="https://cuda-1.internal",
+                            transport=WorkerTransportType.HTTPS,
+                        ),
+                        backend_type=BackendType.VLLM_CUDA,
+                        device_class=DeviceClass.NVIDIA_GPU,
+                        execution_mode=ExecutionModeLabel.REMOTE_WORKER,
+                        runtime=RuntimeIdentity(
+                            runtime_family="vllm_cuda",
+                            runtime_label="vllm_cuda",
+                            runtime_version="0.6.5",
+                            engine_type=EngineType.VLLM,
+                            backend_type=BackendType.VLLM_CUDA,
+                        ),
+                        placement=CloudPlacementMetadata(
+                            provider="aws",
+                            region="us-east-1",
+                            zone="us-east-1b",
+                        ),
+                    )
+                ],
+            ),
+            execution_observation=RouteExecutionObservation(
+                executed_backend="remote-worker:vllm-cuda",
+                backend_instance_id="cuda-1",
+                status_code=200,
+                queue_delay_ms=3.5,
+                final_outcome="succeeded",
+            ),
+        ),
+        hybrid_context=HybridExecutionContext(
+            observed_execution_path=HybridExecutionPath.HYBRID_SPILLOVER,
+            observed_remote_temperature=RemoteTemperature.WARM,
+            observed_budget_outcome=RemoteBudgetOutcome.WITHIN_BUDGET,
+            observed_placement_evidence=CloudPlacementEvidence(
+                source=CloudEvidenceSource.OBSERVED_RUNTIME,
+                provider="aws",
+                region="us-east-1",
+                zone="us-east-1b",
+            ),
+            observed_cost_evidence=CloudCostEvidence(
+                source=CloudEvidenceSource.OBSERVED_RUNTIME,
+                relative_cost_index=0.73,
+                budget_bucket="gpu-canary",
+            ),
+        ),
+    )
+
+    summary = summarize_records([record])
+
+    assert record.evidence_class is BenchmarkEvidenceClass.OBSERVED
+    assert record.cloud_worker_evidence is not None
+    assert record.cloud_worker_evidence.runtime is not None
+    assert record.cloud_worker_evidence.runtime.runtime_version == "0.6.5"
+    assert record.cloud_worker_evidence.provider == "aws"
+    assert record.cloud_worker_evidence.observed_queue_delay_ms == 3.5
+    assert summary.evidence_summary is not None
+    assert summary.evidence_summary.run_kind is BenchmarkRunKind.OBSERVED_CLOUD
+    assert summary.evidence_summary.observed_cloud_request_count == 1
+    assert summary.evidence_summary.cloud_runtime_version_counts == {"vllm_cuda:0.6.5": 1}
+    assert summary.evidence_summary.observed_budget_outcome_counts == {
+        "within_budget": 1
+    }
 
 
 def test_compare_benchmark_runs_marks_hybrid_benefit_and_uncertainty() -> None:
@@ -1109,6 +1240,12 @@ def test_compare_benchmark_runs_marks_hybrid_benefit_and_uncertainty() -> None:
         delta.evidence_kind is SimulationEvidenceKind.PREDICTOR_ESTIMATE
         for delta in comparison.delta.notable_scenario_deltas
     )
+    assert comparison.comparability_assessment.directly_comparable is False
+    assert comparison.comparability_assessment.left_run_kind is BenchmarkRunKind.LOCAL_ONLY
+    assert comparison.comparability_assessment.right_run_kind is BenchmarkRunKind.MIXED_EVIDENCE
+    assert "comparison spans different run kinds and is not apples-to-apples" in (
+        comparison.comparability_assessment.limitations
+    )
 
 
 def test_render_target_comparison_report_marks_unsupported_hybrid_evidence() -> None:
@@ -1132,6 +1269,15 @@ def test_render_target_comparison_report_marks_unsupported_hybrid_evidence() -> 
             p95_latency_ms=10.0,
             route_distribution={"mock-local": 1},
             backend_distribution={"mock-local": 1},
+            evidence_summary=BenchmarkEvidenceSummary(
+                run_kind=BenchmarkRunKind.LOCAL_ONLY,
+                sample_size=1,
+                evidence_class_counts={BenchmarkEvidenceClass.UNSUPPORTED: 1},
+                unsupported_request_count=1,
+                comparability_limitations=[
+                    "record stayed local-only and carries no cloud-worker evidence"
+                ],
+            ),
         ),
         right=BenchmarkComparisonSideSummary(
             run_id="right",
@@ -1148,6 +1294,15 @@ def test_render_target_comparison_report_marks_unsupported_hybrid_evidence() -> 
             p95_latency_ms=12.0,
             route_distribution={"remote-worker:cuda-a": 1},
             backend_distribution={"remote-worker:cuda-a": 1},
+            evidence_summary=BenchmarkEvidenceSummary(
+                run_kind=BenchmarkRunKind.MOCK_REMOTE_HYBRID,
+                sample_size=1,
+                evidence_class_counts={BenchmarkEvidenceClass.MOCK: 1},
+                mock_request_count=1,
+                comparability_limitations=[
+                    "record relies on mock backend or injected mock cloud conditions"
+                ],
+            ),
         ),
         delta=BenchmarkComparisonDeltaSummary(
             p50_latency_delta_ms=2.0,
@@ -1170,10 +1325,22 @@ def test_render_target_comparison_report_marks_unsupported_hybrid_evidence() -> 
                 )
             ],
         ),
+        comparability_assessment=BenchmarkComparabilityAssessment(
+            directly_comparable=False,
+            left_run_kind=BenchmarkRunKind.LOCAL_ONLY,
+            right_run_kind=BenchmarkRunKind.MOCK_REMOTE_HYBRID,
+            shared_evidence_classes=[],
+            limitations=[
+                "comparison spans different run kinds and is not apples-to-apples",
+                "comparison mixes mock-remote evidence with non-mock evidence",
+            ],
+        ),
     )
 
     markdown = render_target_comparison_report_markdown(artifact)
 
+    assert "## Comparability" in markdown
+    assert "not apples-to-apples" in markdown
     assert "## Hybrid Evaluation" in markdown
     assert "unsupported" in markdown
     assert "comparison relied on injected/mock remote conditions" in markdown

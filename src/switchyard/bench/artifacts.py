@@ -8,12 +8,13 @@ import json
 import math
 import random
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from subprocess import DEVNULL, CalledProcessError, check_output
 from time import perf_counter
+from typing import Any
 
 import httpx
 from pydantic import BaseModel
@@ -53,15 +54,19 @@ from switchyard.schemas.backend import (
 )
 from switchyard.schemas.benchmark import (
     BenchmarkArtifactSchemaVersion,
+    BenchmarkComparabilityAssessment,
     BenchmarkComparisonArtifact,
     BenchmarkComparisonDeltaSummary,
     BenchmarkComparisonSideSummary,
     BenchmarkDeploymentTarget,
     BenchmarkEnvironmentMetadata,
+    BenchmarkEvidenceClass,
+    BenchmarkEvidenceSummary,
     BenchmarkPolicyComparison,
     BenchmarkRequestRecord,
     BenchmarkRunArtifact,
     BenchmarkRunConfig,
+    BenchmarkRunKind,
     BenchmarkScenario,
     BenchmarkSummary,
     BenchmarkTargetComparisonArtifact,
@@ -71,6 +76,7 @@ from switchyard.schemas.benchmark import (
     CloudCostEvidence,
     CloudEvidenceSource,
     CloudPlacementEvidence,
+    CloudWorkerRuntimeEvidence,
     ComparisonSourceKind,
     ControlPlaneReportMetadata,
     CounterfactualSimulationArtifact,
@@ -1059,11 +1065,21 @@ def compare_benchmark_runs(
                 right_artifact.records,
             ),
         ),
+        comparability_assessment=_comparability_assessment(
+            left_artifact=left_artifact,
+            right_artifact=right_artifact,
+        ),
     )
 
 
 def summarize_records(records: list[BenchmarkRequestRecord]) -> BenchmarkSummary:
     """Summarize per-request benchmark records."""
+
+    for record in records:
+        record.cloud_worker_evidence = _cloud_worker_evidence_for_record(record)
+        record.evidence_class = _classify_record_evidence(record)
+        record.confidence_notes = _confidence_notes_for_record(record)
+        record.comparability_limitations = _record_comparability_limitations(record)
 
     latencies = [record.latency_ms for record in records]
     ttfts = [record.ttft_ms for record in records if record.ttft_ms is not None]
@@ -1081,6 +1097,7 @@ def summarize_records(records: list[BenchmarkRequestRecord]) -> BenchmarkSummary
             chosen_backend_counts.get(record.backend_name, 0) + 1
         )
     family_summaries = _summarize_records_by_family(records)
+    evidence_summary = _summarize_record_evidence(records)
 
     return BenchmarkSummary(
         request_count=len(records),
@@ -1099,8 +1116,382 @@ def summarize_records(records: list[BenchmarkRequestRecord]) -> BenchmarkSummary
         fallback_count=sum(1 for record in records if record.fallback_used),
         chosen_backend_counts=dict(sorted(chosen_backend_counts.items())),
         hybrid_summary=_summarize_hybrid_records(records),
+        evidence_summary=evidence_summary,
         family_summaries=family_summaries,
     )
+
+
+def _summarize_record_evidence(
+    records: list[BenchmarkRequestRecord],
+) -> BenchmarkEvidenceSummary:
+    class_counts: Counter[BenchmarkEvidenceClass] = Counter(
+        record.evidence_class for record in records
+    )
+    provider_counts: Counter[str] = Counter()
+    region_counts: Counter[str] = Counter()
+    runtime_counts: Counter[str] = Counter()
+    runtime_version_counts: Counter[str] = Counter()
+    worker_identity_counts: Counter[str] = Counter()
+    observed_budget_outcomes: Counter[str] = Counter()
+    queue_delays: list[float] = []
+    remote_latencies: list[float] = []
+    confidence_notes: list[str] = []
+    comparability_limitations: list[str] = []
+    observed_error_count = 0
+
+    for record in records:
+        for note in record.confidence_notes:
+            if note not in confidence_notes:
+                confidence_notes.append(note)
+        for limitation in record.comparability_limitations:
+            if limitation not in comparability_limitations:
+                comparability_limitations.append(limitation)
+        evidence = record.cloud_worker_evidence
+        if evidence is None:
+            continue
+        if evidence.provider is not None:
+            provider_counts[evidence.provider] += 1
+        if evidence.region is not None:
+            region_counts[evidence.region] += 1
+        if evidence.runtime is not None:
+            runtime_label = evidence.runtime.runtime_label or evidence.runtime.runtime_family
+            runtime_counts[runtime_label] += 1
+            if evidence.runtime.runtime_version is not None:
+                runtime_version_counts[
+                    f"{runtime_label}:{evidence.runtime.runtime_version}"
+                ] += 1
+        identity = (
+            evidence.backend_name
+            if evidence.backend_instance_id is None
+            else f"{evidence.backend_name}/{evidence.backend_instance_id}"
+        )
+        worker_identity_counts[identity] += 1
+        if evidence.observed_budget_outcome is not None:
+            observed_budget_outcomes[evidence.observed_budget_outcome.value] += 1
+        if evidence.observed_queue_delay_ms is not None:
+            queue_delays.append(evidence.observed_queue_delay_ms)
+        if evidence.observed_latency_ms is not None:
+            remote_latencies.append(evidence.observed_latency_ms)
+        if evidence.observed_error_category is not None:
+            observed_error_count += 1
+
+    observed_count = class_counts.get(BenchmarkEvidenceClass.OBSERVED, 0)
+    mock_count = class_counts.get(BenchmarkEvidenceClass.MOCK, 0)
+    configured_count = class_counts.get(BenchmarkEvidenceClass.CONFIGURED, 0)
+    estimated_count = class_counts.get(BenchmarkEvidenceClass.ESTIMATED, 0)
+    mixed_count = class_counts.get(BenchmarkEvidenceClass.MIXED, 0)
+    unsupported_count = class_counts.get(BenchmarkEvidenceClass.UNSUPPORTED, 0)
+    if mixed_count > 0:
+        comparability_limitations.append(
+            "run mixes observed cloud evidence with configured, mock, or estimated evidence"
+        )
+    if observed_count == 0 and any(
+        count > 0 for count in (mock_count, configured_count, estimated_count)
+    ):
+        comparability_limitations.append(
+            "run does not contain direct observed cloud-worker execution"
+        )
+    run_kind = _run_kind_for_records(records, class_counts)
+    return BenchmarkEvidenceSummary(
+        run_kind=run_kind,
+        sample_size=len(records),
+        evidence_class_counts=dict(sorted(class_counts.items(), key=lambda item: item[0].value)),
+        observed_cloud_request_count=observed_count,
+        mock_request_count=mock_count,
+        configured_cloud_request_count=configured_count,
+        estimated_request_count=estimated_count,
+        unsupported_request_count=unsupported_count,
+        mixed_request_count=mixed_count,
+        cloud_provider_counts=dict(sorted(provider_counts.items())),
+        cloud_region_counts=dict(sorted(region_counts.items())),
+        cloud_runtime_counts=dict(sorted(runtime_counts.items())),
+        cloud_runtime_version_counts=dict(sorted(runtime_version_counts.items())),
+        cloud_worker_identity_counts=dict(sorted(worker_identity_counts.items())),
+        observed_error_count=observed_error_count,
+        observed_budget_outcome_counts=dict(sorted(observed_budget_outcomes.items())),
+        avg_observed_queue_delay_ms=(
+            None if not queue_delays else _average(queue_delays)
+        ),
+        avg_observed_remote_latency_ms=(
+            None if not remote_latencies else _average(remote_latencies)
+        ),
+        confidence_notes=confidence_notes,
+        comparability_limitations=list(dict.fromkeys(comparability_limitations)),
+    )
+
+
+def _run_kind_for_records(
+    records: list[BenchmarkRequestRecord],
+    class_counts: Counter[BenchmarkEvidenceClass],
+) -> BenchmarkRunKind:
+    if records and all(_is_local_only_record(record) for record in records):
+        return BenchmarkRunKind.LOCAL_ONLY
+    observed_count = class_counts.get(BenchmarkEvidenceClass.OBSERVED, 0)
+    mock_count = class_counts.get(BenchmarkEvidenceClass.MOCK, 0)
+    configured_count = class_counts.get(BenchmarkEvidenceClass.CONFIGURED, 0)
+    estimated_count = class_counts.get(BenchmarkEvidenceClass.ESTIMATED, 0)
+    mixed_count = class_counts.get(BenchmarkEvidenceClass.MIXED, 0)
+    if observed_count > 0 and any(
+        count > 0
+        for count in (mock_count, configured_count, estimated_count, mixed_count)
+    ):
+        return BenchmarkRunKind.MIXED_EVIDENCE
+    if mixed_count > 0:
+        return BenchmarkRunKind.MIXED_EVIDENCE
+    if observed_count > 0:
+        return BenchmarkRunKind.OBSERVED_CLOUD
+    if mock_count > 0 and configured_count == 0 and estimated_count == 0:
+        return BenchmarkRunKind.MOCK_REMOTE_HYBRID
+    if configured_count > 0 and estimated_count == 0:
+        return BenchmarkRunKind.CONFIGURED_CLOUD
+    if estimated_count > 0 and configured_count == 0:
+        return BenchmarkRunKind.ESTIMATED_CLOUD
+    if configured_count > 0 or estimated_count > 0:
+        return BenchmarkRunKind.MIXED_EVIDENCE
+    return BenchmarkRunKind.UNSUPPORTED
+
+
+def _classify_record_evidence(record: BenchmarkRequestRecord) -> BenchmarkEvidenceClass:
+    classes = _record_evidence_classes(record)
+    if not classes:
+        return BenchmarkEvidenceClass.UNSUPPORTED
+    if len(classes) > 1:
+        return BenchmarkEvidenceClass.MIXED
+    return next(iter(classes))
+
+
+def _record_evidence_classes(
+    record: BenchmarkRequestRecord,
+) -> set[BenchmarkEvidenceClass]:
+    classes: set[BenchmarkEvidenceClass] = set()
+    if _record_uses_mock_evidence(record):
+        classes.add(BenchmarkEvidenceClass.MOCK)
+    if _record_has_observed_cloud_evidence(record):
+        classes.add(BenchmarkEvidenceClass.OBSERVED)
+    if _record_has_estimated_evidence(record):
+        classes.add(BenchmarkEvidenceClass.ESTIMATED)
+    if _record_has_configured_cloud_evidence(record):
+        classes.add(BenchmarkEvidenceClass.CONFIGURED)
+    if not classes:
+        classes.add(BenchmarkEvidenceClass.UNSUPPORTED)
+    return classes
+
+
+def _record_uses_mock_evidence(record: BenchmarkRequestRecord) -> bool:
+    if (record.backend_type or "").lower() == "mock" or record.backend_name.startswith("mock"):
+        return True
+    context = record.hybrid_context
+    return bool(context is not None and context.injected_condition is not None)
+
+
+def _record_has_observed_cloud_evidence(record: BenchmarkRequestRecord) -> bool:
+    context = record.hybrid_context
+    if context is not None:
+        if (
+            context.observed_placement_evidence is not None
+            and context.observed_placement_evidence.source is CloudEvidenceSource.OBSERVED_RUNTIME
+        ):
+            return True
+        if (
+            context.observed_cost_evidence is not None
+            and context.observed_cost_evidence.source is CloudEvidenceSource.OBSERVED_RUNTIME
+        ):
+            return True
+    observed_instance = _observed_backend_instance(record.route_decision)
+    if observed_instance is None:
+        return False
+    return bool(
+        observed_instance.runtime is not None
+        or observed_instance.placement.provider is not None
+        or observed_instance.placement.region is not None
+        or observed_instance.placement.zone is not None
+        or observed_instance.execution_mode
+        in {ExecutionModeLabel.REMOTE_WORKER, ExecutionModeLabel.EXTERNAL_SERVICE}
+    )
+
+
+def _record_has_estimated_evidence(record: BenchmarkRequestRecord) -> bool:
+    context = record.hybrid_context
+    return bool(context is not None and context.predictor_condition is not None)
+
+
+def _record_has_configured_cloud_evidence(record: BenchmarkRequestRecord) -> bool:
+    if _record_has_observed_cloud_evidence(record):
+        return False
+    context = record.hybrid_context
+    if context is not None:
+        if (
+            context.observed_placement_evidence is not None
+            and context.observed_placement_evidence.source
+            is CloudEvidenceSource.DEPLOYMENT_METADATA_ESTIMATE
+        ):
+            return True
+        if (
+            context.observed_cost_evidence is not None
+            and context.observed_cost_evidence.source
+            is CloudEvidenceSource.DEPLOYMENT_METADATA_ESTIMATE
+        ):
+            return True
+    route_decision = record.route_decision
+    if route_decision is None or route_decision.selected_deployment is None:
+        return False
+    deployment = route_decision.selected_deployment
+    if deployment.runtime is not None or any(
+        instance.runtime is not None for instance in deployment.instances
+    ):
+        return True
+    if (
+        deployment.placement.provider is not None
+        or deployment.placement.region is not None
+        or deployment.placement.zone is not None
+    ):
+        return True
+    if (
+        deployment.cost_profile.relative_cost_index is not None
+        or deployment.cost_profile.budget_bucket is not None
+        or deployment.cost_profile.currency is not None
+    ):
+        return True
+    return False
+
+
+def _cloud_worker_evidence_for_record(
+    record: BenchmarkRequestRecord,
+) -> CloudWorkerRuntimeEvidence | None:
+    route_decision = record.route_decision
+    deployment = None if route_decision is None else route_decision.selected_deployment
+    observed_instance = _observed_backend_instance(route_decision)
+    context = record.hybrid_context
+    has_context_cloud_metadata = bool(
+        context is not None
+        and (
+            context.observed_placement_evidence is not None
+            or context.observed_cost_evidence is not None
+        )
+    )
+    remote_backend_name = record.backend_name.startswith("remote-worker:")
+    if observed_instance is None and deployment is None and context is None:
+        return None
+    if (
+        observed_instance is None
+        and deployment is None
+        and not has_context_cloud_metadata
+        and not remote_backend_name
+    ):
+        return None
+    runtime = (
+        observed_instance.runtime.model_copy(deep=True)
+        if observed_instance is not None and observed_instance.runtime is not None
+        else deployment.runtime.model_copy(deep=True)
+        if deployment is not None and deployment.runtime is not None
+        else None
+    )
+    provider = (
+        observed_instance.placement.provider
+        if observed_instance is not None and observed_instance.placement.provider is not None
+        else deployment.placement.provider
+        if deployment is not None
+        else context.observed_placement_evidence.provider
+        if context is not None and context.observed_placement_evidence is not None
+        else None
+    )
+    region = (
+        observed_instance.placement.region
+        if observed_instance is not None and observed_instance.placement.region is not None
+        else deployment.placement.region
+        if deployment is not None
+        else context.observed_placement_evidence.region
+        if context is not None and context.observed_placement_evidence is not None
+        else None
+    )
+    zone = (
+        observed_instance.placement.zone
+        if observed_instance is not None and observed_instance.placement.zone is not None
+        else deployment.placement.zone
+        if deployment is not None
+        else context.observed_placement_evidence.zone
+        if context is not None and context.observed_placement_evidence is not None
+        else None
+    )
+    notes: list[str] = []
+    if observed_instance is not None:
+        notes.append("cloud worker identity derived from observed backend instance metadata")
+    elif deployment is not None:
+        notes.append("cloud worker identity derived from configured deployment metadata")
+    return CloudWorkerRuntimeEvidence(
+        backend_name=record.backend_name,
+        backend_instance_id=record.backend_instance_id,
+        runtime=runtime,
+        provider=provider,
+        region=region,
+        zone=zone,
+        observed_queue_delay_ms=record.queue_delay_ms,
+        observed_latency_ms=record.latency_ms,
+        observed_ttft_ms=record.ttft_ms,
+        observed_status_code=record.status_code,
+        observed_error_category=record.error_category,
+        observed_budget_outcome=None if context is None else context.observed_budget_outcome,
+        placement_evidence_source=(
+            None
+            if context is None or context.observed_placement_evidence is None
+            else context.observed_placement_evidence.source
+        ),
+        cost_evidence_source=(
+            None
+            if context is None or context.observed_cost_evidence is None
+            else context.observed_cost_evidence.source
+        ),
+        notes=notes,
+    )
+
+
+def _confidence_notes_for_record(record: BenchmarkRequestRecord) -> list[str]:
+    notes: list[str] = []
+    context = record.hybrid_context
+    if context is None:
+        return notes
+    if (
+        context.predictor_condition is not None
+        and context.predictor_condition.confidence is not None
+    ):
+        notes.append(
+            f"predictor estimate confidence={context.predictor_condition.confidence.value}"
+        )
+    if (
+        context.injected_condition is not None
+        and context.injected_condition.confidence is not None
+    ):
+        notes.append(
+            f"injected condition confidence={context.injected_condition.confidence.value}"
+        )
+    if context.observed_execution_path is HybridExecutionPath.UNKNOWN:
+        notes.append("no observed execution path was captured")
+    return notes
+
+
+def _record_comparability_limitations(record: BenchmarkRequestRecord) -> list[str]:
+    limitations: list[str] = []
+    if record.evidence_class is BenchmarkEvidenceClass.MOCK:
+        limitations.append("record relies on mock backend or injected mock cloud conditions")
+    elif record.evidence_class is BenchmarkEvidenceClass.CONFIGURED:
+        limitations.append("record relies on configured cloud metadata without observed execution")
+    elif record.evidence_class is BenchmarkEvidenceClass.ESTIMATED:
+        limitations.append("record relies on predictor-based cloud estimates")
+    elif record.evidence_class is BenchmarkEvidenceClass.MIXED:
+        limitations.append("record mixes observed cloud evidence with non-observed evidence")
+    elif (
+        record.evidence_class is BenchmarkEvidenceClass.UNSUPPORTED
+        and _is_local_only_record(record)
+    ):
+        limitations.append("record stayed local-only and carries no cloud-worker evidence")
+    return limitations
+
+
+def _is_local_only_record(record: BenchmarkRequestRecord) -> bool:
+    context = record.hybrid_context
+    if context is not None and context.observed_execution_path is not HybridExecutionPath.UNKNOWN:
+        return context.observed_execution_path is HybridExecutionPath.LOCAL_ONLY
+    return not record.backend_name.startswith("remote-worker:")
 
 
 def _summarize_records_by_family(
@@ -1301,6 +1692,8 @@ def render_run_report_markdown(artifact: BenchmarkRunArtifact) -> str:
     topology_capture_source = (
         artifact.environment.topology_capture_source or "not_captured"
     )
+    evidence_summary = _resolved_evidence_summary_for_artifact(artifact)
+    run_kind = evidence_summary.run_kind if evidence_summary is not None else artifact.run_kind
     lines = [
         f"# Switchyard Benchmark Report: {artifact.run_id}",
         "",
@@ -1309,6 +1702,7 @@ def render_run_report_markdown(artifact: BenchmarkRunArtifact) -> str:
         f"- Timestamp: `{artifact.timestamp.isoformat()}`",
         f"- Git revision: `{artifact.git_revision or 'unavailable'}`",
         f"- Model alias: `{artifact.model_alias or artifact.scenario.model}`",
+        f"- Run kind: `{run_kind.value}`",
         "",
         "## Environment",
         f"- Benchmark mode: `{artifact.environment.benchmark_mode}`",
@@ -1364,6 +1758,70 @@ def render_run_report_markdown(artifact: BenchmarkRunArtifact) -> str:
         lines.append(
             f"| Average tokens/sec | `{artifact.summary.avg_tokens_per_second:.3f}` |"
         )
+    if evidence_summary is not None:
+        evidence_classes = _format_empty_distribution(
+            _enum_key_distribution(evidence_summary.evidence_class_counts),
+            empty_label="none",
+        )
+        cloud_identities = _format_empty_distribution(
+            evidence_summary.cloud_worker_identity_counts,
+            empty_label="none captured",
+        )
+        cloud_runtimes = _format_empty_distribution(
+            evidence_summary.cloud_runtime_counts,
+            empty_label="none captured",
+        )
+        cloud_runtime_versions = _format_empty_distribution(
+            evidence_summary.cloud_runtime_version_counts,
+            empty_label="none captured",
+        )
+        provider_tags = _format_empty_distribution(
+            evidence_summary.cloud_provider_counts,
+            empty_label="none",
+        )
+        region_tags = _format_empty_distribution(
+            evidence_summary.cloud_region_counts,
+            empty_label="none",
+        )
+        budget_outcomes = _format_empty_distribution(
+            evidence_summary.observed_budget_outcome_counts,
+            empty_label="none captured",
+        )
+        lines.extend(
+            [
+                "",
+                "## Evidence Posture",
+                f"- Evidence classes: {evidence_classes}",
+                (
+                    "- Cloud request mix: "
+                    f"observed=`{evidence_summary.observed_cloud_request_count}` "
+                    f"mock=`{evidence_summary.mock_request_count}` "
+                    f"configured=`{evidence_summary.configured_cloud_request_count}` "
+                    f"estimated=`{evidence_summary.estimated_request_count}` "
+                    f"mixed=`{evidence_summary.mixed_request_count}`"
+                ),
+                f"- Cloud worker identities: {cloud_identities}",
+                f"- Cloud runtimes: {cloud_runtimes}",
+                f"- Cloud runtime versions: {cloud_runtime_versions}",
+                (
+                    "- Cloud placement tags: "
+                    f"providers={provider_tags} regions={region_tags}"
+                ),
+                (
+                    "- Observed runtime signals: "
+                    f"avg_queue_delay_ms=`{evidence_summary.avg_observed_queue_delay_ms}` "
+                    f"avg_remote_latency_ms=`{evidence_summary.avg_observed_remote_latency_ms}` "
+                    f"observed_errors=`{evidence_summary.observed_error_count}`"
+                ),
+                f"- Observed budget outcomes: {budget_outcomes}",
+            ]
+        )
+        if evidence_summary.confidence_notes:
+            lines.append(f"- Confidence notes: {'; '.join(evidence_summary.confidence_notes)}")
+        if artifact.comparability_limitations:
+            lines.append(
+                f"- Comparability limitations: {'; '.join(artifact.comparability_limitations)}"
+            )
     if artifact.summary.hybrid_summary is not None:
         hybrid_summary = artifact.summary.hybrid_summary
         lines.extend(
@@ -1632,6 +2090,16 @@ def render_target_comparison_report_markdown(
         f"- Source name: `{artifact.source_name}`",
         f"- Request count: `{artifact.request_count}`",
         "",
+        "## Comparability",
+        f"- Directly comparable: `{artifact.comparability_assessment.directly_comparable}`",
+        f"- Left run kind: `{artifact.comparability_assessment.left_run_kind.value}`",
+        f"- Right run kind: `{artifact.comparability_assessment.right_run_kind.value}`",
+        "- Shared evidence classes: "
+        + _format_empty_distribution(
+            _enum_list_distribution(artifact.comparability_assessment.shared_evidence_classes),
+            empty_label="none",
+        ),
+        "",
         "## Targets",
         (
             f"- Left: `{artifact.left.execution_target.target_type.value}`"
@@ -1666,6 +2134,32 @@ def render_target_comparison_report_markdown(
             f"`{artifact.delta.p95_latency_delta_ms:.3f}` |"
         ),
     ]
+    if artifact.comparability_assessment.limitations:
+        lines.append(
+            "- Limitations: "
+            + "; ".join(artifact.comparability_assessment.limitations)
+        )
+    if artifact.left.evidence_summary is not None or artifact.right.evidence_summary is not None:
+        left_evidence = (
+            {}
+            if artifact.left.evidence_summary is None
+            else _enum_key_distribution(artifact.left.evidence_summary.evidence_class_counts)
+        )
+        right_evidence = (
+            {}
+            if artifact.right.evidence_summary is None
+            else _enum_key_distribution(artifact.right.evidence_summary.evidence_class_counts)
+        )
+        lines.extend(
+            [
+                "",
+                "## Evidence Posture",
+                "- Left evidence classes: "
+                + _format_empty_distribution(left_evidence, empty_label="none"),
+                "- Right evidence classes: "
+                + _format_empty_distribution(right_evidence, empty_label="none"),
+            ]
+        )
     if artifact.delta.avg_tokens_per_second_delta is not None:
         lines.append(
             f"| Avg tokens/sec | `{artifact.left.avg_tokens_per_second}` | "
@@ -1947,6 +2441,17 @@ def _format_empty_distribution(
     return _format_distribution(distribution)
 
 
+def _enum_key_distribution(distribution: Mapping[Any, int]) -> dict[str, int]:
+    return {
+        key.value if hasattr(key, "value") else str(key): value
+        for key, value in distribution.items()
+    }
+
+
+def _enum_list_distribution(values: Sequence[Any]) -> dict[str, int]:
+    return _enum_key_distribution(Counter(values))
+
+
 def default_output_path(base_dir: Path, artifact: BenchmarkRunArtifact) -> Path:
     """Return the default output path for an artifact."""
 
@@ -2014,7 +2519,95 @@ def _comparison_side_summary(
         route_distribution=_route_distribution(artifact.records),
         backend_distribution=dict(sorted(artifact.summary.chosen_backend_counts.items())),
         hybrid_summary=artifact.summary.hybrid_summary,
+        evidence_summary=_resolved_evidence_summary_for_artifact(artifact),
     )
+
+
+def _comparability_assessment(
+    *,
+    left_artifact: BenchmarkRunArtifact,
+    right_artifact: BenchmarkRunArtifact,
+) -> BenchmarkComparabilityAssessment:
+    left_summary = _resolved_evidence_summary_for_artifact(
+        left_artifact
+    ) or BenchmarkEvidenceSummary()
+    right_summary = _resolved_evidence_summary_for_artifact(
+        right_artifact
+    ) or BenchmarkEvidenceSummary()
+    shared_classes = sorted(
+        set(left_summary.evidence_class_counts) & set(right_summary.evidence_class_counts),
+        key=lambda item: item.value,
+    )
+    limitations: list[str] = []
+    directly_comparable = True
+    if left_summary.run_kind != right_summary.run_kind:
+        limitations.append(
+            "comparison spans different run kinds and is not apples-to-apples"
+        )
+        directly_comparable = False
+    if (
+        left_summary.observed_cloud_request_count > 0
+        and right_summary.observed_cloud_request_count == 0
+    ) or (
+        right_summary.observed_cloud_request_count > 0
+        and left_summary.observed_cloud_request_count == 0
+    ):
+        limitations.append(
+            "only one side contains direct observed cloud-worker execution"
+        )
+        directly_comparable = False
+    if (
+        left_summary.mock_request_count > 0
+        and right_summary.mock_request_count == 0
+    ) or (
+        right_summary.mock_request_count > 0
+        and left_summary.mock_request_count == 0
+    ):
+        limitations.append("comparison mixes mock-remote evidence with non-mock evidence")
+        directly_comparable = False
+    if (
+        left_summary.cloud_provider_counts
+        and right_summary.cloud_provider_counts
+        and set(left_summary.cloud_provider_counts) != set(right_summary.cloud_provider_counts)
+    ):
+        limitations.append("observed/configured cloud providers differ across the two sides")
+        directly_comparable = False
+    if (
+        left_summary.cloud_runtime_version_counts
+        and right_summary.cloud_runtime_version_counts
+        and set(left_summary.cloud_runtime_version_counts)
+        != set(right_summary.cloud_runtime_version_counts)
+    ):
+        limitations.append("cloud runtime versions differ across the two sides")
+        directly_comparable = False
+    for limitation in [
+        *left_artifact.comparability_limitations,
+        *right_artifact.comparability_limitations,
+    ]:
+        if limitation not in limitations:
+            limitations.append(limitation)
+    return BenchmarkComparabilityAssessment(
+        directly_comparable=directly_comparable,
+        left_run_kind=left_summary.run_kind,
+        right_run_kind=right_summary.run_kind,
+        shared_evidence_classes=shared_classes,
+        limitations=limitations,
+    )
+
+
+def _resolved_evidence_summary_for_artifact(
+    artifact: BenchmarkRunArtifact,
+) -> BenchmarkEvidenceSummary | None:
+    if artifact.summary.evidence_summary is not None:
+        return artifact.summary.evidence_summary
+    if not artifact.records:
+        return None
+    for record in artifact.records:
+        record.cloud_worker_evidence = _cloud_worker_evidence_for_record(record)
+        record.evidence_class = _classify_record_evidence(record)
+        record.confidence_notes = _confidence_notes_for_record(record)
+        record.comparability_limitations = _record_comparability_limitations(record)
+    return _summarize_record_evidence(artifact.records)
 
 
 def _route_distribution(records: list[BenchmarkRequestRecord]) -> dict[str, int]:

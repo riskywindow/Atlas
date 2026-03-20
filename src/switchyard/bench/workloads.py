@@ -54,6 +54,12 @@ _HYBRID_TOPICS = (
     "compare remote help against explicit budget guardrails",
 )
 
+_REAL_CLOUD_VALIDATION_TOPICS = (
+    "verify the first rented GPU worker path against the local baseline",
+    "capture provider and runtime identity without hiding mixed evidence",
+    "confirm queueing and spend posture before widening canaries",
+)
+
 
 def build_workload_manifest(
     *,
@@ -134,6 +140,15 @@ def _generation_config_for_family(
             seed=seed,
             shared_prefix=(
                 "Shared context: compare remote warm-path reuse against cold-start costs."
+            ),
+        )
+    if family is WorkloadScenarioFamily.REAL_CLOUD_VALIDATION:
+        return WorkloadGenerationConfig(
+            pattern=WorkloadPattern.REPEATED_PREFIX,
+            seed=seed,
+            shared_prefix=(
+                "Shared context: validate the first real cloud worker with explicit "
+                "observed-versus-configured evidence boundaries."
             ),
         )
     return WorkloadGenerationConfig(seed=seed)
@@ -469,6 +484,44 @@ def _build_item(
             },
         )
 
+    if family is WorkloadScenarioFamily.REAL_CLOUD_VALIDATION:
+        shared_prefix = (
+            "Shared context: confirm that the first real cloud worker run is honest, "
+            "bounded, and comparable to the local path."
+        )
+        topic = _REAL_CLOUD_VALIDATION_TOPICS[index % len(_REAL_CLOUD_VALIDATION_TOPICS)]
+        validation_phase = "baseline" if index == 0 else "cloud_probe"
+        prompt = (
+            f"Cloud validation request {index + 1}: {topic}. "
+            "Respond in two lines with the main operator takeaway."
+        )
+        return _workload_item(
+            family=family,
+            model_alias=model_alias,
+            index=index,
+            seed=seed,
+            prompt=f"{shared_prefix}\n{prompt}",
+            shared_prefix=shared_prefix,
+            metadata={
+                "family": family.value,
+                "variant": "real_cloud_validation",
+                "target_model_alias": model_alias,
+                "tenant_id": "tenant-cloud-validation",
+                "request_class": "latency_sensitive",
+                "expected_signal": "real_cloud_validation",
+                "validation_phase": validation_phase,
+                "comparison_baseline": "local_only",
+                "expected_evidence_class": (
+                    "unsupported" if validation_phase == "baseline" else "observed"
+                ),
+                "requires_observed_cloud": (
+                    "false" if validation_phase == "baseline" else "true"
+                ),
+                "observed_provider_hint": "aws",
+                "observed_region_hint": "us-east-1",
+            },
+        )
+
     burst_size = max(2, (seed % 3) + 2)
     burst_index = (index % burst_size) + 1
     burst_group = (index // burst_size) + 1
@@ -567,6 +620,7 @@ def _mixed_family_for_index(*, seed: int, index: int) -> WorkloadScenarioFamily:
         WorkloadScenarioFamily.CONCURRENCY_BURST,
         WorkloadScenarioFamily.HYBRID_SPILLOVER,
         WorkloadScenarioFamily.REMOTE_COLD_WARM,
+        WorkloadScenarioFamily.REAL_CLOUD_VALIDATION,
     )
     rng = random.Random(seed + index)
     return rng.choice(families)

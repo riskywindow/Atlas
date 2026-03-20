@@ -87,9 +87,12 @@ def test_operator_runtime_reports_estimated_cloud_evidence_from_selected_deploym
     assert summary.recent_cloud_evidence.estimated_placement_count == 1
     assert summary.recent_cloud_evidence.estimated_cost_count == 1
     assert summary.recent_cloud_evidence.remote_provider_counts == {"aws": 1}
+    assert summary.recent_cloud_evidence.estimated_budget_bucket_counts == {"gpu-staging": 1}
+    assert summary.recent_cloud_evidence.total_observed_relative_cost_index is None
     assert summary.recent_cloud_evidence.total_estimated_relative_cost_index == 0.42
     assert summary.recent_route_examples[0].placement_provider == "aws"
     assert summary.recent_route_examples[0].placement_region == "us-east-1"
+    assert summary.recent_route_examples[0].budget_bucket == "gpu-staging"
     assert summary.recent_route_examples[0].placement_evidence_source == (
         "deployment_metadata_estimate"
     )
@@ -170,7 +173,58 @@ def test_operator_runtime_prefers_observed_instance_cloud_evidence() -> None:
     assert summary.recent_cloud_evidence.observed_cost_count == 1
     assert summary.recent_cloud_evidence.estimated_placement_count == 0
     assert summary.recent_cloud_evidence.estimated_cost_count == 0
+    assert summary.recent_cloud_evidence.observed_budget_bucket_counts == {"gpu-canary": 1}
+    assert summary.recent_cloud_evidence.total_observed_relative_cost_index == 0.73
+    assert summary.recent_cloud_evidence.total_estimated_relative_cost_index is None
     assert summary.recent_route_examples[0].placement_zone == "us-east-1b"
+    assert summary.recent_route_examples[0].budget_bucket == "gpu-canary"
     assert summary.recent_route_examples[0].relative_cost_index == 0.73
     assert summary.recent_route_examples[0].placement_evidence_source == "observed_runtime"
     assert summary.recent_route_examples[0].cost_evidence_source == "observed_runtime"
+
+
+def test_operator_runtime_counts_budget_only_cost_metadata_as_estimated_spend() -> None:
+    service = HybridOperatorService()
+    decision = RouteDecision(
+        backend_name="remote-worker:cuda-b",
+        serving_target="chat-shared",
+        policy=RoutingPolicy.BURST_TO_REMOTE,
+        request_id="req-cloud-3",
+        workload_shape=WorkloadShape.INTERACTIVE,
+        rationale=["remote spillover selected"],
+        considered_backends=["remote-worker:cuda-b"],
+        selected_deployment=BackendDeployment(
+            name="remote-worker:cuda-b",
+            backend_type=BackendType.VLLM_CUDA,
+            engine_type=EngineType.VLLM,
+            model_identifier="meta-llama/Llama-3.1-8B-Instruct",
+            serving_targets=["chat-shared"],
+            deployment_profile=DeploymentProfile.REMOTE,
+            execution_mode=ExecutionModeLabel.REMOTE_WORKER,
+            environment="staging",
+            placement=CloudPlacementMetadata(provider="aws", region="us-west-2"),
+            cost_profile=CostBudgetProfile(
+                profile=CostProfileClass.STANDARD,
+                budget_bucket="gpu-dev",
+            ),
+        ),
+    )
+
+    service.record_route_example(
+        decision=decision,
+        executed_backend="remote-worker:cuda-b",
+        remote_candidate_count=1,
+        final_outcome="succeeded",
+        fallback_used=False,
+    )
+
+    summary = service.inspect_state(remote_effectively_enabled=True)
+
+    assert summary.recent_cloud_evidence.estimated_cost_count == 1
+    assert summary.recent_cloud_evidence.estimated_budget_bucket_counts == {"gpu-dev": 1}
+    assert summary.recent_cloud_evidence.total_estimated_relative_cost_index is None
+    assert summary.recent_route_examples[0].budget_bucket == "gpu-dev"
+    assert summary.recent_route_examples[0].relative_cost_index is None
+    assert summary.recent_route_examples[0].cost_evidence_source == (
+        "deployment_metadata_estimate"
+    )

@@ -271,8 +271,13 @@ async def test_hybrid_admin_reports_observed_cloud_evidence_for_remote_execution
     assert payload["recent_cloud_evidence"]["observed_cost_count"] == 1
     assert payload["recent_cloud_evidence"]["estimated_placement_count"] == 0
     assert payload["recent_cloud_evidence"]["estimated_cost_count"] == 0
+    assert payload["recent_cloud_evidence"]["observed_budget_bucket_counts"] == {
+        "gpu-canary": 1
+    }
+    assert payload["recent_cloud_evidence"]["total_observed_relative_cost_index"] == 0.73
     assert payload["recent_route_examples"][0]["placement_provider"] == "aws"
     assert payload["recent_route_examples"][0]["placement_zone"] == "us-east-1b"
+    assert payload["recent_route_examples"][0]["budget_bucket"] == "gpu-canary"
     assert payload["recent_route_examples"][0]["relative_cost_index"] == 0.73
     assert payload["recent_route_examples"][0]["placement_evidence_source"] == "observed_runtime"
     assert payload["recent_route_examples"][0]["cost_evidence_source"] == "observed_runtime"

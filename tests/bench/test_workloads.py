@@ -26,6 +26,7 @@ from switchyard.schemas.routing import WorkloadShape
         WorkloadScenarioFamily.HYBRID_SPILLOVER,
         WorkloadScenarioFamily.REMOTE_COLD_WARM,
         WorkloadScenarioFamily.REMOTE_BUDGET_GUARDRAIL,
+        WorkloadScenarioFamily.REAL_CLOUD_VALIDATION,
         WorkloadScenarioFamily.MIXED,
     ],
 )
@@ -242,6 +243,27 @@ def test_remote_budget_guardrail_manifest_marks_budget_exhaustion() -> None:
     )
     assert all(
         item.metadata["expected_signal"] == "remote_budget_guardrail"
+        for item in scenario.items
+    )
+
+
+def test_real_cloud_validation_manifest_marks_observed_cloud_expectations() -> None:
+    scenario = build_workload_manifest(
+        family=WorkloadScenarioFamily.REAL_CLOUD_VALIDATION,
+        model_alias="chat-shared",
+        request_count=4,
+        seed=12,
+    )
+
+    assert scenario.workload_generation.pattern.value == "repeated_prefix"
+    assert scenario.workload_generation.shared_prefix is not None
+    assert scenario.items[0].metadata["validation_phase"] == "baseline"
+    assert scenario.items[0].metadata["expected_evidence_class"] == "unsupported"
+    assert any(
+        item.metadata["requires_observed_cloud"] == "true" for item in scenario.items[1:]
+    )
+    assert all(
+        item.metadata["expected_signal"] == "real_cloud_validation"
         for item in scenario.items
     )
 

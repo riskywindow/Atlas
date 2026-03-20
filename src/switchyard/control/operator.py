@@ -84,6 +84,11 @@ class HybridOperatorService:
             if placement_zone is None:
                 placement_zone = deployment.placement.zone
         placement_evidence_source = _placement_evidence_source(decision=decision)
+        budget_bucket = (
+            None if observed_instance is None else observed_instance.cost_profile.budget_bucket
+        )
+        if budget_bucket is None and deployment is not None:
+            budget_bucket = deployment.cost_profile.budget_bucket
         relative_cost_index = (
             None
             if observed_instance is None
@@ -118,6 +123,7 @@ class HybridOperatorService:
                 placement_region=placement_region,
                 placement_zone=placement_zone,
                 placement_evidence_source=placement_evidence_source,
+                budget_bucket=budget_bucket,
                 relative_cost_index=relative_cost_index,
                 cost_evidence_source=cost_evidence_source,
                 notes=notes[:5],
@@ -154,6 +160,25 @@ class HybridOperatorService:
             for example in self._recent_route_examples
             if example.execution_path == "remote" and example.placement_provider is not None
         )
+        observed_budget_bucket_counts = Counter(
+            example.budget_bucket
+            for example in self._recent_route_examples
+            if example.budget_bucket is not None
+            and example.cost_evidence_source == CloudEvidenceSource.OBSERVED_RUNTIME.value
+        )
+        estimated_budget_bucket_counts = Counter(
+            example.budget_bucket
+            for example in self._recent_route_examples
+            if example.budget_bucket is not None
+            and example.cost_evidence_source is not None
+            and example.cost_evidence_source != CloudEvidenceSource.OBSERVED_RUNTIME.value
+        )
+        observed_costs = [
+            example.relative_cost_index
+            for example in self._recent_route_examples
+            if example.relative_cost_index is not None
+            and example.cost_evidence_source == CloudEvidenceSource.OBSERVED_RUNTIME.value
+        ]
         estimated_costs = [
             example.relative_cost_index
             for example in self._recent_route_examples
@@ -205,6 +230,11 @@ class HybridOperatorService:
                     != CloudEvidenceSource.OBSERVED_RUNTIME.value
                 ),
                 remote_provider_counts=dict(provider_counts),
+                observed_budget_bucket_counts=dict(observed_budget_bucket_counts),
+                estimated_budget_bucket_counts=dict(estimated_budget_bucket_counts),
+                total_observed_relative_cost_index=(
+                    None if not observed_costs else round(sum(observed_costs), 6)
+                ),
                 total_estimated_relative_cost_index=(
                     None if not estimated_costs else round(sum(estimated_costs), 6)
                 ),
@@ -288,7 +318,11 @@ def _cost_evidence_source(*, decision: RouteDecision) -> str | None:
     deployment = decision.selected_deployment
     if (
         deployment is None
-        or deployment.cost_profile.relative_cost_index is None
+        or (
+            deployment.cost_profile.relative_cost_index is None
+            and deployment.cost_profile.budget_bucket is None
+            and deployment.cost_profile.currency is None
+        )
     ):
         return None
     return CloudEvidenceSource.DEPLOYMENT_METADATA_ESTIMATE.value

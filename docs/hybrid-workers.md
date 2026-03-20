@@ -372,6 +372,14 @@ uv run switchyard-control-plane doctor --gateway-base-url http://127.0.0.1:8000
 uv run switchyard-control-plane export-optimization-profile | python -m json.tool
 ```
 
+`GET /admin/hybrid` is the operator-facing spend and placement snapshot. It keeps
+observed runtime evidence separate from deployment estimates, including:
+
+- `recent_cloud_evidence.observed_budget_bucket_counts`
+- `recent_cloud_evidence.estimated_budget_bucket_counts`
+- `recent_cloud_evidence.total_observed_relative_cost_index`
+- `recent_cloud_evidence.total_estimated_relative_cost_index`
+
 ### 6. Package The Remote Worker Runtime
 
 ```bash

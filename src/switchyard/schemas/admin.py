@@ -163,6 +163,7 @@ class HybridRouteExample(BaseModel):
     placement_region: str | None = Field(default=None, min_length=1, max_length=128)
     placement_zone: str | None = Field(default=None, min_length=1, max_length=128)
     placement_evidence_source: str | None = Field(default=None, min_length=1, max_length=64)
+    budget_bucket: str | None = Field(default=None, min_length=1, max_length=128)
     relative_cost_index: float | None = Field(default=None, ge=0.0)
     cost_evidence_source: str | None = Field(default=None, min_length=1, max_length=64)
     notes: list[str] = Field(default_factory=list)
@@ -203,6 +204,9 @@ class CloudRouteEvidenceRuntimeSummary(BaseModel):
     observed_cost_count: int = Field(default=0, ge=0)
     estimated_cost_count: int = Field(default=0, ge=0)
     remote_provider_counts: dict[str, int] = Field(default_factory=dict)
+    observed_budget_bucket_counts: dict[str, int] = Field(default_factory=dict)
+    estimated_budget_bucket_counts: dict[str, int] = Field(default_factory=dict)
+    total_observed_relative_cost_index: float | None = Field(default=None, ge=0.0)
     total_estimated_relative_cost_index: float | None = Field(default=None, ge=0.0)
 
 
