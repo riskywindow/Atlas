@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from switchyard.schemas.backend import (
@@ -38,6 +39,23 @@ from switchyard.schemas.routing import (
 
 _DEFAULT_POLICY_VERSION = "phase6.v1"
 _DEFAULT_TIE_BREAKER = "score, latency_ms, backend_name"
+_REMOTE_OBSERVED_EVIDENCE_TTL = timedelta(seconds=90)
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteEvidenceProfile:
+    """Observed-versus-configured remote evidence posture for one candidate."""
+
+    state: str
+    observed_at: datetime | None = None
+    ready: bool | None = None
+    latency_ms: float | None = None
+    queue_depth: int | None = None
+    active_requests: int | None = None
+    error_rate: float | None = None
+    load_state: BackendLoadState | None = None
+    canary_only: bool = False
+    quarantined: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -634,11 +652,19 @@ def rejection_reason(
     """Return a rejection reason when a backend should not be considered."""
 
     logical_model = snapshot.capabilities.resolve_logical_model(request.model)
+    remote_evidence = _remote_evidence_profile(snapshot)
     if logical_model is None:
         return CandidateRejection(
             reason=f"model alias '{request.model}' is not declared by this backend",
             category="capability",
             reason_codes=[RouteSelectionReasonCode.MODEL_ALIAS_UNSUPPORTED],
+        )
+    if remote_evidence is not None and remote_evidence.quarantined:
+        return CandidateRejection(
+            reason="remote candidate is quarantined",
+            category="health",
+            reason_codes=[RouteSelectionReasonCode.REMOTE_QUARANTINED],
+            logical_model=logical_model,
         )
     request_features = logical_model.resolved_request_features(
         snapshot.capabilities.request_features
@@ -738,6 +764,7 @@ def _score_snapshot(
     queue_delay_ms = _predicted_queue_delay_ms(snapshot)
     quality = float(_quality_tier(snapshot=snapshot, logical_model=logical_model))
     is_remote = _is_remote_snapshot(snapshot)
+    remote_evidence = _remote_evidence_profile(snapshot)
     local_bonus = 12.0 if not is_remote else 0.0
     health_bonus = 100.0 if snapshot.health.state is BackendHealthState.HEALTHY else 65.0
     warm_bonus = 8.0 if snapshot.health.load_state is BackendLoadState.READY else 0.0
@@ -754,6 +781,9 @@ def _score_snapshot(
     locality_bonus = _prefix_locality_bonus(snapshot=snapshot, context=context)
     evidence_bonus = _evidence_bonus(snapshot)
     tenant_bonus = _tenant_bonus(snapshot=snapshot, context=context)
+    observed_error_penalty = _remote_error_penalty(remote_evidence)
+    remote_state_penalty = _remote_state_penalty(remote_evidence)
+    canary_penalty = _remote_canary_penalty(remote_evidence)
 
     if policy is RoutingPolicy.LATENCY_FIRST:
         return (
@@ -763,6 +793,9 @@ def _score_snapshot(
             + weight_bonus
             + performance_bonus
             - latency_ms
+            - observed_error_penalty
+            - remote_state_penalty
+            - canary_penalty
         )
     if policy is RoutingPolicy.LOCAL_PREFERRED:
         return (
@@ -778,6 +811,9 @@ def _score_snapshot(
             - (queue_delay_ms / 2.0)
             - network_penalty
             - cost_penalty
+            - observed_error_penalty
+            - remote_state_penalty
+            - canary_penalty
         )
     if policy is RoutingPolicy.BURST_TO_REMOTE:
         burst_remote_bonus = (
@@ -797,6 +833,9 @@ def _score_snapshot(
             - queue_delay_ms
             - (network_penalty / 2.0)
             - cost_penalty
+            - observed_error_penalty
+            - remote_state_penalty
+            - canary_penalty
         )
     if policy is RoutingPolicy.LATENCY_SLO:
         target = 0 if context is None or context.max_latency_ms is None else context.max_latency_ms
@@ -815,6 +854,9 @@ def _score_snapshot(
             - network_penalty
             - misses_slo_penalty
             - (cost_penalty / 2.0)
+            - observed_error_penalty
+            - remote_state_penalty
+            - canary_penalty
         )
     if policy is RoutingPolicy.QUALITY_FIRST:
         return (
@@ -825,6 +867,9 @@ def _score_snapshot(
             + quality_hint_bonus
             + (weight_bonus / 2.0)
             - (latency_ms / 10.0)
+            - observed_error_penalty
+            - remote_state_penalty
+            - canary_penalty
         )
     if policy is RoutingPolicy.QUALITY_ON_DEMAND:
         demand_bonus = 0.0
@@ -846,6 +891,9 @@ def _score_snapshot(
             - (queue_delay_ms / 4.0)
             - (network_penalty / 3.0)
             - (cost_penalty / 2.0)
+            - observed_error_penalty
+            - remote_state_penalty
+            - canary_penalty
         )
     if policy is RoutingPolicy.LOCAL_ONLY:
         return (
@@ -856,6 +904,9 @@ def _score_snapshot(
             + (quality * 10.0)
             + quality_hint_bonus
             - (latency_ms / 8.0)
+            - observed_error_penalty
+            - remote_state_penalty
+            - canary_penalty
         )
     if policy is RoutingPolicy.REMOTE_PREFERRED_IF_LOCAL_UNHEALTHY:
         remote_bonus = (
@@ -876,6 +927,9 @@ def _score_snapshot(
             - (queue_delay_ms / 2.0)
             - (network_penalty / 2.0)
             - cost_penalty
+            - observed_error_penalty
+            - remote_state_penalty
+            - canary_penalty
         )
     return (
         health_bonus
@@ -887,6 +941,9 @@ def _score_snapshot(
         + quality_hint_bonus
         + performance_bonus
         - (latency_ms / 2.0)
+        - observed_error_penalty
+        - remote_state_penalty
+        - canary_penalty
     )
 
 
@@ -903,6 +960,7 @@ def _score_rationale(
     resolved_logical_model = logical_model or snapshot.capabilities.resolve_logical_model(
         snapshot.capabilities.default_model or snapshot.capabilities.model_ids[0]
     )
+    remote_evidence = _remote_evidence_profile(snapshot)
     return [
         f"policy={policy.value}",
         f"health={snapshot.health.state.value}",
@@ -931,6 +989,26 @@ def _score_rationale(
         f"device_class={snapshot.capabilities.device_class.value}",
         f"configured_priority={snapshot.capabilities.configured_priority}",
         f"configured_weight={snapshot.capabilities.configured_weight:.2f}",
+        (
+            "remote_evidence=not_remote"
+            if remote_evidence is None
+            else f"remote_evidence={remote_evidence.state}"
+        ),
+        (
+            "remote_ready=unknown"
+            if remote_evidence is None or remote_evidence.ready is None
+            else f"remote_ready={str(remote_evidence.ready).lower()}"
+        ),
+        (
+            "remote_error_rate=n/a"
+            if remote_evidence is None or remote_evidence.error_rate is None
+            else f"remote_error_rate={remote_evidence.error_rate:.3f}"
+        ),
+        (
+            "remote_canary_only=false"
+            if remote_evidence is None
+            else f"remote_canary_only={str(remote_evidence.canary_only).lower()}"
+        ),
         (
             "prefix_locality=preferred"
             if context is not None
@@ -1058,13 +1136,29 @@ def _reason_codes_for(
             if logical_model.equivalence is ModelEquivalenceKind.APPROXIMATE
             else RouteSelectionReasonCode.MODEL_EXACT_EQUIVALENCE
         )
+    remote_codes: list[RouteSelectionReasonCode] = []
+    if _is_remote_snapshot(snapshot):
+        remote_codes.append(RouteSelectionReasonCode.NETWORK_PENALTY)
+        remote_evidence = _remote_evidence_profile(snapshot)
+        if remote_evidence is None:
+            remote_codes.append(RouteSelectionReasonCode.REMOTE_CONFIGURED_ASSUMPTION)
+        elif remote_evidence.state == "observed":
+            remote_codes.append(RouteSelectionReasonCode.REMOTE_OBSERVED_EVIDENCE)
+        elif remote_evidence.state == "stale":
+            remote_codes.append(RouteSelectionReasonCode.REMOTE_STALE_EVIDENCE)
+        elif remote_evidence.state == "unavailable":
+            remote_codes.append(RouteSelectionReasonCode.REMOTE_EVIDENCE_UNAVAILABLE)
+        else:
+            remote_codes.append(RouteSelectionReasonCode.REMOTE_CONFIGURED_ASSUMPTION)
+        if remote_evidence is not None and remote_evidence.canary_only:
+            remote_codes.append(RouteSelectionReasonCode.REMOTE_CANARY_ONLY)
     if policy in {
         RoutingPolicy.LATENCY_FIRST,
         RoutingPolicy.BALANCED,
         RoutingPolicy.QUALITY_FIRST,
         RoutingPolicy.LOCAL_ONLY,
     }:
-        return [RouteSelectionReasonCode.POLICY_SCORE, *model_codes]
+        return [RouteSelectionReasonCode.POLICY_SCORE, *remote_codes, *model_codes]
     codes = [RouteSelectionReasonCode.POLICY_SCORE]
     if policy is RoutingPolicy.LOCAL_PREFERRED and not _is_remote_snapshot(snapshot):
         codes.append(RouteSelectionReasonCode.HYBRID_LOCAL_PREFERENCE)
@@ -1081,8 +1175,6 @@ def _reason_codes_for(
         and _is_remote_snapshot(snapshot)
     ):
         codes.append(RouteSelectionReasonCode.HYBRID_REMOTE_IF_LOCAL_UNHEALTHY)
-    if _is_remote_snapshot(snapshot):
-        codes.append(RouteSelectionReasonCode.NETWORK_PENALTY)
     if _predicted_queue_delay_ms(snapshot) > 0:
         codes.append(RouteSelectionReasonCode.QUEUE_PREDICTION)
     if _cost_penalty(snapshot) > 0:
@@ -1099,7 +1191,7 @@ def _reason_codes_for(
     )
     if context.tenant_tier.value == "priority" or context.request_class.value != "standard":
         codes.append(RouteSelectionReasonCode.TENANT_POLICY)
-    return [*codes, *model_codes]
+    return [*codes, *remote_codes, *model_codes]
 
 
 def _is_remote_snapshot(snapshot: BackendStatusSnapshot) -> bool:
@@ -1160,6 +1252,37 @@ def _network_penalty(snapshot: BackendStatusSnapshot) -> float:
     if profile is NetworkProfile.LAN:
         return 6.0
     return 12.0
+
+
+def _remote_error_penalty(remote_evidence: RemoteEvidenceProfile | None) -> float:
+    if remote_evidence is None or remote_evidence.error_rate is None:
+        return 0.0
+    multiplier = 180.0 if remote_evidence.state == "observed" else 90.0
+    return remote_evidence.error_rate * multiplier
+
+
+def _remote_state_penalty(remote_evidence: RemoteEvidenceProfile | None) -> float:
+    if remote_evidence is None:
+        return 0.0
+    penalty = 0.0
+    if remote_evidence.state == "stale":
+        penalty += 18.0
+    elif remote_evidence.state == "unavailable":
+        penalty += 10.0
+    if remote_evidence.state in {"observed", "stale"} and remote_evidence.ready is False:
+        penalty += 12.0
+    if (
+        remote_evidence.state in {"observed", "stale"}
+        and remote_evidence.load_state in {BackendLoadState.COLD, BackendLoadState.WARMING}
+    ):
+        penalty += 14.0
+    return penalty
+
+
+def _remote_canary_penalty(remote_evidence: RemoteEvidenceProfile | None) -> float:
+    if remote_evidence is None or not remote_evidence.canary_only:
+        return 0.0
+    return 16.0
 
 
 def _cost_penalty(snapshot: BackendStatusSnapshot) -> float:
@@ -1238,3 +1361,53 @@ def _local_capacity_pressure(candidates: Sequence[BackendStatusSnapshot]) -> boo
         or candidate.health.load_state in {BackendLoadState.COLD, BackendLoadState.WARMING}
         for candidate in local_candidates
     )
+
+
+def _remote_evidence_profile(
+    snapshot: BackendStatusSnapshot,
+) -> RemoteEvidenceProfile | None:
+    if not _is_remote_snapshot(snapshot):
+        return None
+    metadata = snapshot.metadata
+    observed_at = _parse_timestamp(metadata.get("remote_observed_at"))
+    state = metadata.get("remote_observation_state")
+    if observed_at is not None:
+        state = (
+            "stale"
+            if datetime.now(UTC) - observed_at > _REMOTE_OBSERVED_EVIDENCE_TTL
+            else "observed"
+        )
+    elif state not in {"observed", "stale", "unavailable"}:
+        state = "configured"
+    return RemoteEvidenceProfile(
+        state=state,
+        observed_at=observed_at,
+        ready=_parse_bool(metadata.get("remote_ready")),
+        latency_ms=snapshot.health.latency_ms,
+        queue_depth=snapshot.queue_depth,
+        active_requests=snapshot.active_requests,
+        error_rate=snapshot.health.error_rate,
+        load_state=snapshot.health.load_state,
+        canary_only=_parse_bool(metadata.get("remote_canary_only")) or False,
+        quarantined=_parse_bool(metadata.get("remote_quarantined")) or False,
+    )
+
+
+def _parse_bool(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    lowered = value.strip().lower()
+    if lowered in {"true", "1", "yes"}:
+        return True
+    if lowered in {"false", "0", "no"}:
+        return False
+    return None
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return None

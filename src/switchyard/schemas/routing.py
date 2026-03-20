@@ -217,6 +217,12 @@ class RouteSelectionReasonCode(StrEnum):
     REMOTE_COOLDOWN = "remote_cooldown"
     REMOTE_ESCALATION = "remote_escalation"
     LOCAL_ADMISSION_SPILLOVER = "local_admission_spillover"
+    REMOTE_OBSERVED_EVIDENCE = "remote_observed_evidence"
+    REMOTE_CONFIGURED_ASSUMPTION = "remote_configured_assumption"
+    REMOTE_STALE_EVIDENCE = "remote_stale_evidence"
+    REMOTE_EVIDENCE_UNAVAILABLE = "remote_evidence_unavailable"
+    REMOTE_QUARANTINED = "remote_quarantined"
+    REMOTE_CANARY_ONLY = "remote_canary_only"
     MODEL_EXACT_EQUIVALENCE = "model_exact_equivalence"
     MODEL_APPROXIMATE_EQUIVALENCE = "model_approximate_equivalence"
     MODEL_ALIAS_UNSUPPORTED = "model_alias_unsupported"
@@ -639,7 +645,10 @@ class RouteExplanation(BaseModel):
             parts.append(f"tie_breaker={self.tie_breaker}")
         if self.final_outcome is not None:
             parts.append(f"outcome={self.final_outcome}")
-        return " | ".join(parts)
+        rendered = " | ".join(parts)
+        if len(rendered) <= 512:
+            return rendered
+        return f"{rendered[:509]}..."
 
 
 class ShadowPolicyExplanation(BaseModel):

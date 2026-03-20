@@ -600,19 +600,7 @@ class RemoteWorkerAdapter:
             health=health,
             active_requests=active_requests,
             queue_depth=queue_depth,
-            metadata={
-                "adapter_kind": "remote_worker",
-                "execution_mode": "remote_worker",
-                "worker_transport": preferred_instance.instance.endpoint.transport.value
-                if preferred_instance is not None
-                else self._instance_configs[0].transport.value,
-                "model_identifier": self.model_config.model_identifier,
-                "preferred_instance_id": (
-                    preferred_instance.instance.instance_id
-                    if preferred_instance is not None
-                    else ""
-                ),
-            },
+            metadata=self._status_metadata_for_preferred_instance(preferred_instance),
         )
 
     async def warmup(self, model_id: str | None = None) -> None:
@@ -903,6 +891,85 @@ class RemoteWorkerAdapter:
                 status.instance.instance_id,
             ),
         )[0]
+
+    def _status_metadata_for_preferred_instance(
+        self,
+        preferred_instance: RemoteWorkerInstanceStatus | None,
+    ) -> dict[str, str]:
+        metadata = {
+            "adapter_kind": "remote_worker",
+            "execution_mode": "remote_worker",
+            "worker_transport": (
+                preferred_instance.instance.endpoint.transport.value
+                if preferred_instance is not None
+                else self._instance_configs[0].transport.value
+            ),
+            "model_identifier": self.model_config.model_identifier,
+            "preferred_instance_id": (
+                preferred_instance.instance.instance_id
+                if preferred_instance is not None
+                else ""
+            ),
+            "remote_observation_state": (
+                "observed"
+                if preferred_instance is not None
+                and preferred_instance.instance.last_seen_at is not None
+                else "unavailable"
+            ),
+            "remote_ready": (
+                str(preferred_instance.ready).lower()
+                if preferred_instance is not None
+                else "false"
+            ),
+            "remote_active_requests": (
+                str(preferred_instance.active_requests)
+                if preferred_instance is not None
+                else str(0)
+            ),
+            "remote_queue_depth": (
+                str(preferred_instance.queue_depth)
+                if preferred_instance is not None
+                else str(0)
+            ),
+            "remote_canary_only": (
+                str("canary-only" in preferred_instance.instance.tags).lower()
+                if preferred_instance is not None
+                else "false"
+            ),
+            "remote_quarantined": (
+                str("quarantined" in preferred_instance.instance.tags).lower()
+                if preferred_instance is not None
+                else "false"
+            ),
+        }
+        if (
+            preferred_instance is not None
+            and preferred_instance.instance.last_seen_at is not None
+        ):
+            metadata["remote_observed_at"] = preferred_instance.instance.last_seen_at.isoformat()
+        if (
+            preferred_instance is not None
+            and preferred_instance.instance.health is not None
+            and preferred_instance.instance.health.latency_ms is not None
+        ):
+            metadata["remote_latency_ms"] = str(preferred_instance.instance.health.latency_ms)
+        if (
+            preferred_instance is not None
+            and preferred_instance.instance.health is not None
+            and preferred_instance.instance.health.error_rate is not None
+        ):
+            metadata["remote_error_rate"] = str(preferred_instance.instance.health.error_rate)
+        if preferred_instance is not None and preferred_instance.instance.health is not None:
+            metadata["remote_load_state"] = preferred_instance.instance.health.load_state.value
+        if (
+            preferred_instance is not None
+            and preferred_instance.instance.observed_capacity is not None
+            and preferred_instance.instance.observed_capacity.tokens_per_second is not None
+        ):
+            metadata["remote_tokens_per_second"] = str(
+                preferred_instance.instance.observed_capacity.tokens_per_second
+            )
+        return metadata
 
     def _request_metadata(
         self,

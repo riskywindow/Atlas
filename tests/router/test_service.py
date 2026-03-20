@@ -39,6 +39,7 @@ from switchyard.schemas.backend import (
     CostProfileClass,
     DeviceClass,
     EngineType,
+    ExecutionModeLabel,
     LogicalModelTarget,
     ModelEquivalenceKind,
     NetworkCharacteristics,
@@ -214,6 +215,7 @@ def build_adapter(
     device_class: DeviceClass,
     backend_type: BackendType = BackendType.MOCK,
     engine_type: EngineType = EngineType.MOCK,
+    execution_mode: ExecutionModeLabel = ExecutionModeLabel.HOST_NATIVE,
     health_state: BackendHealthState = BackendHealthState.HEALTHY,
     model_ids: list[str] | None = None,
     serving_targets: list[str] | None = None,
@@ -250,6 +252,7 @@ def build_adapter(
         quality_tier=quality_tier,
         quality_hint=quality_hint,
         performance_hint=performance_hint,
+        execution_mode=execution_mode,
         network_characteristics=NetworkCharacteristics(profile=network_profile),
         request_features=RequestFeatureSupport(
             supports_streaming=supports_streaming,
@@ -470,6 +473,288 @@ async def test_router_hybrid_modes_score_local_and_remote_candidates_explainably
     )
     assert RouteSelectionReasonCode.NETWORK_PENALTY in remote_candidate.reason_codes
     assert RouteSelectionReasonCode.EVIDENCE_SUFFICIENT in remote_candidate.reason_codes
+
+
+@pytest.mark.asyncio
+async def test_router_prefers_fresh_observed_remote_evidence_when_policy_allows_it() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="local-safe",
+            latency_ms=26.0,
+            quality_tier=4,
+            device_class=DeviceClass.CPU,
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="remote-observed",
+            latency_ms=7.0,
+            quality_tier=5,
+            device_class=DeviceClass.NVIDIA_GPU,
+            backend_type=BackendType.VLLM_CUDA,
+            engine_type=EngineType.VLLM_CUDA,
+            execution_mode=ExecutionModeLabel.REMOTE_WORKER,
+            network_profile=NetworkProfile.WAN,
+            status_metadata={
+                "remote_observation_state": "observed",
+                "remote_observed_at": datetime.now(UTC).isoformat(),
+                "remote_ready": "true",
+                "evidence_sufficient": "true",
+                "confidence_score": "0.9",
+            },
+        )
+    )
+    router = RouterService(registry)
+
+    decision = await router.route(
+        build_request(),
+        RequestContext(
+            request_id="req-remote-observed",
+            policy=RoutingPolicy.LATENCY_SLO,
+            workload_shape=WorkloadShape.INTERACTIVE,
+            max_latency_ms=15,
+        ),
+    )
+
+    assert decision.backend_name == "remote-observed"
+    assert decision.explanation is not None
+    remote_candidate = next(
+        candidate
+        for candidate in decision.explanation.candidates
+        if candidate.backend_name == "remote-observed"
+    )
+    assert RouteSelectionReasonCode.REMOTE_OBSERVED_EVIDENCE in remote_candidate.reason_codes
+
+
+@pytest.mark.asyncio
+async def test_router_marks_stale_remote_observations_explicitly() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="local-preferred",
+            latency_ms=18.0,
+            quality_tier=4,
+            device_class=DeviceClass.CPU,
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="remote-stale",
+            latency_ms=6.0,
+            quality_tier=5,
+            device_class=DeviceClass.NVIDIA_GPU,
+            backend_type=BackendType.VLLM_CUDA,
+            engine_type=EngineType.VLLM_CUDA,
+            execution_mode=ExecutionModeLabel.REMOTE_WORKER,
+            network_profile=NetworkProfile.WAN,
+            status_metadata={
+                "remote_observation_state": "observed",
+                "remote_observed_at": (
+                    datetime.now(UTC) - timedelta(minutes=5)
+                ).isoformat(),
+                "remote_ready": "true",
+            },
+        )
+    )
+    router = RouterService(registry)
+
+    decision = await router.route(
+        build_request(),
+        build_context(RoutingPolicy.LOCAL_PREFERRED),
+    )
+
+    assert decision.backend_name == "local-preferred"
+    assert decision.explanation is not None
+    remote_candidate = next(
+        candidate
+        for candidate in decision.explanation.candidates
+        if candidate.backend_name == "remote-stale"
+    )
+    assert RouteSelectionReasonCode.REMOTE_STALE_EVIDENCE in remote_candidate.reason_codes
+
+
+@pytest.mark.asyncio
+async def test_router_distinguishes_configured_remote_assumptions_from_observed_evidence() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="local-safe",
+            latency_ms=14.0,
+            quality_tier=4,
+            device_class=DeviceClass.CPU,
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="remote-configured",
+            latency_ms=12.0,
+            quality_tier=5,
+            device_class=DeviceClass.NVIDIA_GPU,
+            backend_type=BackendType.VLLM_CUDA,
+            engine_type=EngineType.VLLM_CUDA,
+            execution_mode=ExecutionModeLabel.REMOTE_WORKER,
+            network_profile=NetworkProfile.WAN,
+        )
+    )
+    router = RouterService(registry)
+
+    decision = await router.route(
+        build_request(),
+        build_context(RoutingPolicy.LOCAL_PREFERRED),
+    )
+
+    assert decision.explanation is not None
+    remote_candidate = next(
+        candidate
+        for candidate in decision.explanation.candidates
+        if candidate.backend_name == "remote-configured"
+    )
+    assert RouteSelectionReasonCode.REMOTE_CONFIGURED_ASSUMPTION in (
+        remote_candidate.reason_codes
+    )
+
+
+@pytest.mark.asyncio
+async def test_router_marks_unavailable_remote_evidence_explicitly() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="local-safe",
+            latency_ms=16.0,
+            quality_tier=4,
+            device_class=DeviceClass.CPU,
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="remote-unavailable-evidence",
+            latency_ms=11.0,
+            quality_tier=5,
+            device_class=DeviceClass.NVIDIA_GPU,
+            backend_type=BackendType.VLLM_CUDA,
+            engine_type=EngineType.VLLM_CUDA,
+            execution_mode=ExecutionModeLabel.REMOTE_WORKER,
+            network_profile=NetworkProfile.WAN,
+            status_metadata={"remote_observation_state": "unavailable"},
+        )
+    )
+    router = RouterService(registry)
+
+    decision = await router.route(
+        build_request(),
+        build_context(RoutingPolicy.LOCAL_PREFERRED),
+    )
+
+    assert decision.explanation is not None
+    remote_candidate = next(
+        candidate
+        for candidate in decision.explanation.candidates
+        if candidate.backend_name == "remote-unavailable-evidence"
+    )
+    assert RouteSelectionReasonCode.REMOTE_EVIDENCE_UNAVAILABLE in (
+        remote_candidate.reason_codes
+    )
+
+
+@pytest.mark.asyncio
+async def test_router_rejects_quarantined_remote_candidate() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="local-safe",
+            latency_ms=22.0,
+            quality_tier=3,
+            device_class=DeviceClass.CPU,
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="remote-quarantined",
+            latency_ms=5.0,
+            quality_tier=5,
+            device_class=DeviceClass.NVIDIA_GPU,
+            backend_type=BackendType.VLLM_CUDA,
+            engine_type=EngineType.VLLM_CUDA,
+            execution_mode=ExecutionModeLabel.REMOTE_WORKER,
+            status_metadata={
+                "remote_observation_state": "observed",
+                "remote_observed_at": datetime.now(UTC).isoformat(),
+                "remote_ready": "false",
+                "remote_quarantined": "true",
+            },
+        )
+    )
+    router = RouterService(registry)
+
+    decision = await router.route(
+        build_request(),
+        build_context(RoutingPolicy.LATENCY_FIRST),
+    )
+
+    assert decision.backend_name == "local-safe"
+    assert decision.rejected_backends["remote-quarantined"] == "remote candidate is quarantined"
+    assert decision.explanation is not None
+    remote_candidate = next(
+        candidate
+        for candidate in decision.explanation.candidates
+        if candidate.backend_name == "remote-quarantined"
+    )
+    assert RouteSelectionReasonCode.REMOTE_QUARANTINED in remote_candidate.reason_codes
+
+
+@pytest.mark.asyncio
+async def test_router_keeps_canary_only_remote_candidate_eligible_for_explicit_canary_selection(
+) -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="stable-backend",
+            latency_ms=12.0,
+            quality_tier=4,
+            device_class=DeviceClass.CPU,
+            serving_targets=["chat-shared"],
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="canary-backend",
+            latency_ms=30.0,
+            quality_tier=5,
+            device_class=DeviceClass.NVIDIA_GPU,
+            backend_type=BackendType.VLLM_CUDA,
+            engine_type=EngineType.VLLM_CUDA,
+            execution_mode=ExecutionModeLabel.REMOTE_WORKER,
+            serving_targets=["chat-shared"],
+            status_metadata={
+                "remote_observation_state": "observed",
+                "remote_observed_at": datetime.now(UTC).isoformat(),
+                "remote_ready": "true",
+                "remote_canary_only": "true",
+            },
+        )
+    )
+    canary = build_canary_service()
+    router = RouterService(registry, canary_routing=canary)
+    request_id = find_canary_request_id(canary)
+
+    decision = await router.route(
+        build_request("chat-shared"),
+        RequestContext(
+            request_id=request_id,
+            policy=RoutingPolicy.BALANCED,
+            workload_shape=WorkloadShape.INTERACTIVE,
+        ),
+    )
+
+    assert decision.backend_name == "canary-backend"
+    assert decision.explanation is not None
+    canary_candidate = next(
+        candidate
+        for candidate in decision.explanation.candidates
+        if candidate.backend_name == "canary-backend"
+    )
+    assert RouteSelectionReasonCode.REMOTE_CANARY_ONLY in canary_candidate.reason_codes
 
 
 @pytest.mark.asyncio
