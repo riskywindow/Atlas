@@ -13,6 +13,8 @@ from switchyard.schemas.backend import (
     BackendStatusSnapshot,
     DeviceClass,
     ExecutionModeLabel,
+    LogicalModelTarget,
+    ModelEquivalenceKind,
     NetworkProfile,
     PerformanceHint,
     QualityHint,
@@ -45,6 +47,7 @@ class CandidateRejection:
     reason: str
     category: str
     reason_codes: list[RouteSelectionReasonCode] | None = None
+    logical_model: LogicalModelTarget | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +60,7 @@ class CandidateAssessment:
     rationale: list[str]
     reason_codes: list[RouteSelectionReasonCode]
     rejection_reason: str | None = None
+    logical_model: LogicalModelTarget | None = None
 
     def to_explanation(self, *, serving_target: str) -> RouteCandidateExplanation:
         """Convert the assessment into the stable route-explanation schema."""
@@ -75,6 +79,9 @@ class CandidateAssessment:
             rejection_reason=self.rejection_reason,
             deployment=self.snapshot.deployment,
             engine_type=self.snapshot.capabilities.engine_type,
+            logical_model=(
+                None if self.logical_model is None else self.logical_model.model_copy(deep=True)
+            ),
         )
 
 
@@ -626,38 +633,67 @@ def rejection_reason(
 ) -> CandidateRejection | None:
     """Return a rejection reason when a backend should not be considered."""
 
-    if not snapshot.capabilities.supports_model_target(request.model):
+    logical_model = snapshot.capabilities.resolve_logical_model(request.model)
+    if logical_model is None:
         return CandidateRejection(
-            reason=f"model '{request.model}' is not supported",
+            reason=f"model alias '{request.model}' is not declared by this backend",
             category="capability",
+            reason_codes=[RouteSelectionReasonCode.MODEL_ALIAS_UNSUPPORTED],
+        )
+    request_features = logical_model.resolved_request_features(
+        snapshot.capabilities.request_features
+    )
+    if request.stream and not request_features.supports_streaming:
+        return CandidateRejection(
+            reason="alias does not support streaming on this backend",
+            category="capability",
+            reason_codes=[RouteSelectionReasonCode.MODEL_FEATURE_UNSUPPORTED],
+            logical_model=logical_model,
+        )
+    if (
+        any(message.role.value == "system" for message in request.messages)
+        and not request_features.supports_system_messages
+    ):
+        return CandidateRejection(
+            reason="alias does not support system messages on this backend",
+            category="capability",
+            reason_codes=[RouteSelectionReasonCode.MODEL_FEATURE_UNSUPPORTED],
+            logical_model=logical_model,
+        )
+    if (
+        _estimated_request_tokens(request)
+        > logical_model.resolved_max_context_tokens(snapshot.capabilities.max_context_tokens)
+    ):
+        return CandidateRejection(
+            reason="request exceeds alias context window",
+            category="capability",
+            reason_codes=[RouteSelectionReasonCode.MODEL_CONTEXT_LIMIT],
+            logical_model=logical_model,
         )
     if snapshot.health.state is BackendHealthState.UNAVAILABLE:
         return CandidateRejection(
             reason="backend health is unavailable",
             category="health",
+            logical_model=logical_model,
         )
     if snapshot.health.load_state is BackendLoadState.FAILED:
         return CandidateRejection(
             reason="backend readiness is failed",
             category="health",
+            logical_model=logical_model,
         )
     if snapshot.health.circuit_open:
         detail = snapshot.health.circuit_reason or "backend circuit is open"
-        return CandidateRejection(reason=detail, category="protection")
+        return CandidateRejection(
+            reason=detail,
+            category="protection",
+            logical_model=logical_model,
+        )
     if snapshot.active_requests >= snapshot.capabilities.concurrency_limit:
         return CandidateRejection(
             reason="backend concurrency limit reached",
             category="admission",
-        )
-    if request.stream and not snapshot.capabilities.supports_streaming:
-        return CandidateRejection(
-            reason="backend does not support streaming",
-            category="capability",
-        )
-    if _estimated_request_tokens(request) > snapshot.capabilities.max_context_tokens:
-        return CandidateRejection(
-            reason="request exceeds backend max context",
-            category="capability",
+            logical_model=logical_model,
         )
     if policy in {RoutingPolicy.LOCAL_ONLY, RoutingPolicy.REMOTE_DISABLED} and _is_remote_snapshot(
         snapshot
@@ -669,12 +705,14 @@ def rejection_reason(
                 else "policy disables remote backends"
             ),
             category="policy",
+            logical_model=logical_model,
         )
     if context.force_remote_candidates_only and not _is_remote_snapshot(snapshot):
         return CandidateRejection(
             reason="local admission was saturated; request was forced to remote spillover",
             category="admission",
             reason_codes=[RouteSelectionReasonCode.LOCAL_ADMISSION_SPILLOVER],
+            logical_model=logical_model,
         )
     return None
 
@@ -689,6 +727,7 @@ def _score_snapshot(
     *,
     snapshot: BackendStatusSnapshot,
     policy: RoutingPolicy,
+    logical_model: LogicalModelTarget | None = None,
     request: ChatCompletionRequest | None = None,
     context: RequestContext | None = None,
     candidates: Sequence[BackendStatusSnapshot] | None = None,
@@ -697,15 +736,19 @@ def _score_snapshot(
     latency_ms = snapshot.health.latency_ms or 1000.0
     predicted_latency_ms = _predicted_latency_ms(snapshot)
     queue_delay_ms = _predicted_queue_delay_ms(snapshot)
-    quality = float(snapshot.capabilities.quality_tier)
+    quality = float(_quality_tier(snapshot=snapshot, logical_model=logical_model))
     is_remote = _is_remote_snapshot(snapshot)
     local_bonus = 12.0 if not is_remote else 0.0
     health_bonus = 100.0 if snapshot.health.state is BackendHealthState.HEALTHY else 65.0
     warm_bonus = 8.0 if snapshot.health.load_state is BackendLoadState.READY else 0.0
     priority_bonus = max(0.0, 30.0 - float(snapshot.capabilities.configured_priority) / 4.0)
     weight_bonus = min(snapshot.capabilities.configured_weight * 3.0, 15.0)
-    quality_hint_bonus = _quality_hint_bonus(snapshot)
-    performance_bonus = _performance_hint_bonus(snapshot, policy=policy)
+    quality_hint_bonus = _quality_hint_bonus(snapshot=snapshot, logical_model=logical_model)
+    performance_bonus = _performance_hint_bonus(
+        snapshot=snapshot,
+        policy=policy,
+        logical_model=logical_model,
+    )
     network_penalty = _network_penalty(snapshot)
     cost_penalty = _cost_penalty(snapshot)
     locality_bonus = _prefix_locality_bonus(snapshot=snapshot, context=context)
@@ -851,11 +894,15 @@ def _score_rationale(
     *,
     snapshot: BackendStatusSnapshot,
     policy: RoutingPolicy,
+    logical_model: LogicalModelTarget | None = None,
     context: RequestContext | None = None,
 ) -> list[str]:
     latency_ms = snapshot.health.latency_ms or 1000.0
     predicted_latency_ms = _predicted_latency_ms(snapshot)
     predicted_queue_delay_ms = _predicted_queue_delay_ms(snapshot)
+    resolved_logical_model = logical_model or snapshot.capabilities.resolve_logical_model(
+        snapshot.capabilities.default_model or snapshot.capabilities.model_ids[0]
+    )
     return [
         f"policy={policy.value}",
         f"health={snapshot.health.state.value}",
@@ -863,9 +910,24 @@ def _score_rationale(
         f"latency_ms={latency_ms:.1f}",
         f"predicted_latency_ms={predicted_latency_ms:.1f}",
         f"predicted_queue_delay_ms={predicted_queue_delay_ms:.1f}",
-        f"quality_tier={snapshot.capabilities.quality_tier}",
-        f"quality_hint={snapshot.capabilities.quality_hint.value}",
-        f"performance_hint={snapshot.capabilities.performance_hint.value}",
+        f"quality_tier={_quality_tier(snapshot=snapshot, logical_model=logical_model)}",
+        (
+            "model_equivalence=unknown"
+            if resolved_logical_model is None
+            else f"model_equivalence={resolved_logical_model.equivalence.value}"
+        ),
+        (
+            "model_identifier=unknown"
+            if resolved_logical_model is None or resolved_logical_model.model_identifier is None
+            else f"model_identifier={resolved_logical_model.model_identifier}"
+        ),
+        (
+            f"quality_hint={_quality_hint(snapshot=snapshot, logical_model=logical_model).value}"
+        ),
+        (
+            "performance_hint="
+            f"{_performance_hint(snapshot=snapshot, logical_model=logical_model).value}"
+        ),
         f"device_class={snapshot.capabilities.device_class.value}",
         f"configured_priority={snapshot.capabilities.configured_priority}",
         f"configured_weight={snapshot.capabilities.configured_weight:.2f}",
@@ -879,10 +941,44 @@ def _score_rationale(
     ]
 
 
-def _quality_hint_bonus(snapshot: BackendStatusSnapshot) -> float:
-    if snapshot.capabilities.quality_hint is QualityHint.PREMIUM:
+def _quality_tier(
+    *,
+    snapshot: BackendStatusSnapshot,
+    logical_model: LogicalModelTarget | None,
+) -> int:
+    if logical_model is None:
+        return snapshot.capabilities.quality_tier
+    return logical_model.resolved_quality_tier(snapshot.capabilities.quality_tier)
+
+
+def _quality_hint(
+    *,
+    snapshot: BackendStatusSnapshot,
+    logical_model: LogicalModelTarget | None,
+) -> QualityHint:
+    if logical_model is None:
+        return snapshot.capabilities.quality_hint
+    return logical_model.resolved_quality_hint(snapshot.capabilities.quality_hint)
+
+
+def _performance_hint(
+    *,
+    snapshot: BackendStatusSnapshot,
+    logical_model: LogicalModelTarget | None,
+) -> PerformanceHint:
+    if logical_model is None:
+        return snapshot.capabilities.performance_hint
+    return logical_model.resolved_performance_hint(snapshot.capabilities.performance_hint)
+
+
+def _quality_hint_bonus(
+    *,
+    snapshot: BackendStatusSnapshot,
+    logical_model: LogicalModelTarget | None = None,
+) -> float:
+    if _quality_hint(snapshot=snapshot, logical_model=logical_model) is QualityHint.PREMIUM:
         return 12.0
-    if snapshot.capabilities.quality_hint is QualityHint.BALANCED:
+    if _quality_hint(snapshot=snapshot, logical_model=logical_model) is QualityHint.BALANCED:
         return 6.0
     return 0.0
 
@@ -891,17 +987,17 @@ def _performance_hint_bonus(
     snapshot: BackendStatusSnapshot,
     *,
     policy: RoutingPolicy,
+    logical_model: LogicalModelTarget | None = None,
 ) -> float:
+    performance_hint = _performance_hint(snapshot=snapshot, logical_model=logical_model)
     if policy is RoutingPolicy.LATENCY_FIRST and (
-        snapshot.capabilities.performance_hint is PerformanceHint.LATENCY_OPTIMIZED
+        performance_hint is PerformanceHint.LATENCY_OPTIMIZED
     ):
         return 15.0
-    if policy is RoutingPolicy.BALANCED and (
-        snapshot.capabilities.performance_hint is PerformanceHint.BALANCED
-    ):
+    if policy is RoutingPolicy.BALANCED and performance_hint is PerformanceHint.BALANCED:
         return 8.0
     if policy is RoutingPolicy.QUALITY_FIRST and (
-        snapshot.capabilities.performance_hint is PerformanceHint.THROUGHPUT_OPTIMIZED
+        performance_hint is PerformanceHint.THROUGHPUT_OPTIMIZED
     ):
         return 4.0
     if policy is RoutingPolicy.LOCAL_ONLY and (
@@ -919,9 +1015,11 @@ def _compatibility_assessment(
     request: ChatCompletionRequest,
     context: RequestContext,
 ) -> CandidateAssessment:
+    logical_model = snapshot.capabilities.resolve_logical_model(request.model)
     score = _score_snapshot(
         snapshot=snapshot,
         policy=policy,
+        logical_model=logical_model,
         request=request,
         context=context,
         candidates=candidates,
@@ -930,8 +1028,19 @@ def _compatibility_assessment(
         snapshot=snapshot,
         score=score,
         eligible=True,
-        rationale=_score_rationale(snapshot=snapshot, policy=policy, context=context),
-        reason_codes=_reason_codes_for(snapshot=snapshot, policy=policy, context=context),
+        rationale=_score_rationale(
+            snapshot=snapshot,
+            policy=policy,
+            logical_model=logical_model,
+            context=context,
+        ),
+        reason_codes=_reason_codes_for(
+            snapshot=snapshot,
+            policy=policy,
+            context=context,
+            logical_model=logical_model,
+        ),
+        logical_model=logical_model,
     )
 
 
@@ -940,14 +1049,22 @@ def _reason_codes_for(
     snapshot: BackendStatusSnapshot,
     policy: RoutingPolicy,
     context: RequestContext,
+    logical_model: LogicalModelTarget | None = None,
 ) -> list[RouteSelectionReasonCode]:
+    model_codes: list[RouteSelectionReasonCode] = []
+    if logical_model is not None:
+        model_codes.append(
+            RouteSelectionReasonCode.MODEL_APPROXIMATE_EQUIVALENCE
+            if logical_model.equivalence is ModelEquivalenceKind.APPROXIMATE
+            else RouteSelectionReasonCode.MODEL_EXACT_EQUIVALENCE
+        )
     if policy in {
         RoutingPolicy.LATENCY_FIRST,
         RoutingPolicy.BALANCED,
         RoutingPolicy.QUALITY_FIRST,
         RoutingPolicy.LOCAL_ONLY,
     }:
-        return [RouteSelectionReasonCode.POLICY_SCORE]
+        return [RouteSelectionReasonCode.POLICY_SCORE, *model_codes]
     codes = [RouteSelectionReasonCode.POLICY_SCORE]
     if policy is RoutingPolicy.LOCAL_PREFERRED and not _is_remote_snapshot(snapshot):
         codes.append(RouteSelectionReasonCode.HYBRID_LOCAL_PREFERENCE)
@@ -982,7 +1099,7 @@ def _reason_codes_for(
     )
     if context.tenant_tier.value == "priority" or context.request_class.value != "standard":
         codes.append(RouteSelectionReasonCode.TENANT_POLICY)
-    return codes
+    return [*codes, *model_codes]
 
 
 def _is_remote_snapshot(snapshot: BackendStatusSnapshot) -> bool:

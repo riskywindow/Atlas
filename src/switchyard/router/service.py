@@ -171,6 +171,11 @@ class RouterService:
                         rejection_reason=rejection.reason,
                         deployment=snapshot.deployment,
                         engine_type=snapshot.capabilities.engine_type,
+                        logical_model=(
+                            None
+                            if rejection.logical_model is None
+                            else rejection.logical_model.model_copy(deep=True)
+                        ),
                     )
                 )
                 continue

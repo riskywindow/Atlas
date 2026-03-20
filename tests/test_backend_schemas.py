@@ -24,6 +24,7 @@ from switchyard.schemas.backend import (
     ExecutionModeLabel,
     GPUDeviceMetadata,
     LogicalModelTarget,
+    ModelEquivalenceKind,
     NetworkProfile,
     PerformanceHint,
     QualityHint,
@@ -226,6 +227,43 @@ def test_backend_capabilities_support_logical_serving_targets() -> None:
     assert capabilities.supports_model_target("chat-default") is True
     assert capabilities.supports_model_target("mlx-community/Qwen") is True
     assert capabilities.supports_model_target("missing-model") is False
+
+
+def test_backend_capabilities_resolve_explicit_logical_model_metadata() -> None:
+    capabilities = BackendCapabilities(
+        backend_type=BackendType.VLLM_CUDA,
+        engine_type=EngineType.VLLM_CUDA,
+        device_class=DeviceClass.NVIDIA_GPU,
+        model_ids=["chat-shared", "meta-llama/Llama-3.1-8B-Instruct"],
+        serving_targets=["chat-shared"],
+        logical_models=[
+            LogicalModelTarget(
+                alias="chat-shared",
+                model_identifier="meta-llama/Llama-3.1-8B-Instruct",
+                equivalence=ModelEquivalenceKind.APPROXIMATE,
+                max_context_tokens=16384,
+                request_features=RequestFeatureSupport(
+                    supports_streaming=True,
+                    supports_system_messages=False,
+                ),
+                quality_tier=5,
+                quality_hint=QualityHint.PREMIUM,
+                performance_hint=PerformanceHint.THROUGHPUT_OPTIMIZED,
+                notes=["tokenizer differs slightly from local Metal path"],
+            )
+        ],
+        max_context_tokens=32768,
+    )
+
+    logical_model = capabilities.resolve_logical_model("chat-shared")
+
+    assert logical_model is not None
+    assert logical_model.equivalence is ModelEquivalenceKind.APPROXIMATE
+    assert logical_model.max_context_tokens == 16384
+    assert logical_model.request_features is not None
+    assert logical_model.request_features.supports_system_messages is False
+    assert logical_model.quality_tier == 5
+    assert logical_model.notes == ["tokenizer differs slightly from local Metal path"]
 
 
 def test_backend_capabilities_infer_runtime_identity_and_request_feature_defaults() -> None:

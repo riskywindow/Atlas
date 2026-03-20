@@ -406,12 +406,12 @@ async def _resolve_shadow_labels(
     requested_model: str,
 ) -> BackendLabels:
     status = await adapter.status()
-    default_model = status.capabilities.default_model or requested_model
+    logical_model = status.capabilities.resolve_logical_model(requested_model)
     model_identifier = (
-        status.capabilities.model_aliases.get(requested_model)
-        or status.capabilities.model_aliases.get(default_model)
+        (None if logical_model is None else logical_model.model_identifier)
         or status.metadata.get("model_identifier")
-        or default_model
+        or status.capabilities.default_model
+        or requested_model
     )
     return BackendLabels(
         backend_name=adapter.name,

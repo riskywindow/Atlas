@@ -157,6 +157,13 @@ class PerformanceHint(StrEnum):
     BALANCED = "balanced"
 
 
+class ModelEquivalenceKind(StrEnum):
+    """Explicit honesty level for one logical alias to one concrete model."""
+
+    EXACT = "exact"
+    APPROXIMATE = "approximate"
+
+
 class CacheCapabilityFlags(BaseModel):
     """Cache-related features exposed by a backend deployment."""
 
@@ -521,9 +528,53 @@ class BackendInstance(BaseModel):
 class LogicalModelTarget(BaseModel):
     """Client-visible logical serving target that may map to several deployments."""
 
+    model_config = ConfigDict(extra="forbid")
+
     alias: str = Field(min_length=1, max_length=128)
     model_identifier: str | None = Field(default=None, min_length=1, max_length=512)
+    equivalence: ModelEquivalenceKind = ModelEquivalenceKind.EXACT
+    max_context_tokens: int | None = Field(default=None, ge=1)
+    request_features: RequestFeatureSupport | None = None
+    quality_tier: int | None = Field(default=None, ge=1, le=5)
+    quality_hint: QualityHint | None = None
+    performance_hint: PerformanceHint | None = None
+    notes: list[str] = Field(default_factory=list)
     deployments: list[str] = Field(default_factory=list)
+
+    def resolved_request_features(
+        self,
+        default: RequestFeatureSupport,
+    ) -> RequestFeatureSupport:
+        """Return alias-specific request features with backend defaults as fallback."""
+
+        return (
+            default.model_copy(deep=True)
+            if self.request_features is None
+            else self.request_features.model_copy(deep=True)
+        )
+
+    def resolved_max_context_tokens(self, default: int) -> int:
+        """Return alias-specific context ceiling with backend fallback."""
+
+        return self.max_context_tokens or default
+
+    def resolved_quality_tier(self, default: int) -> int:
+        """Return alias-specific quality tier with backend fallback."""
+
+        return default if self.quality_tier is None else self.quality_tier
+
+    def resolved_quality_hint(self, default: QualityHint) -> QualityHint:
+        """Return alias-specific quality hint with backend fallback."""
+
+        return default if self.quality_hint is None else self.quality_hint
+
+    def resolved_performance_hint(
+        self,
+        default: PerformanceHint,
+    ) -> PerformanceHint:
+        """Return alias-specific performance hint with backend fallback."""
+
+        return default if self.performance_hint is None else self.performance_hint
 
 
 class BackendDeployment(BaseModel):
@@ -597,6 +648,7 @@ class BackendCapabilities(BaseModel):
     quality_hint: QualityHint = QualityHint.BALANCED
     performance_hint: PerformanceHint = PerformanceHint.BALANCED
     model_aliases: dict[str, str] = Field(default_factory=dict)
+    logical_models: list[LogicalModelTarget] = Field(default_factory=list)
     default_model: str | None = Field(default=None, min_length=1, max_length=256)
     supports_tools: bool = False
     warmup_required: bool = False
@@ -612,8 +664,16 @@ class BackendCapabilities(BaseModel):
 
     @model_validator(mode="after")
     def validate_serving_targets(self) -> BackendCapabilities:
+        self.request_features.supports_streaming = self.supports_streaming
+        if self.supports_tools:
+            self.request_features.supports_tools = True
         if not self.serving_targets:
             default_targets: list[str] = []
+            default_targets.extend(
+                logical_model.alias
+                for logical_model in self.logical_models
+                if logical_model.alias not in default_targets
+            )
             if self.default_model is not None:
                 default_targets.append(self.default_model)
             default_targets.extend(
@@ -622,14 +682,25 @@ class BackendCapabilities(BaseModel):
             if not default_targets:
                 default_targets.append(self.model_ids[0])
             self.serving_targets = default_targets
+        if not self.logical_models:
+            self.logical_models = [
+                LogicalModelTarget(
+                    alias=target,
+                    model_identifier=self.model_aliases.get(target) or self.model_ids[-1],
+                    equivalence=ModelEquivalenceKind.EXACT,
+                    max_context_tokens=self.max_context_tokens,
+                    request_features=self.request_features.model_copy(deep=True),
+                    quality_tier=self.quality_tier,
+                    quality_hint=self.quality_hint,
+                    performance_hint=self.performance_hint,
+                )
+                for target in self.serving_targets
+            ]
         if self.execution_mode is ExecutionModeLabel.HOST_NATIVE:
             if self.backend_type is BackendType.REMOTE_OPENAI_LIKE:
                 self.execution_mode = ExecutionModeLabel.EXTERNAL_SERVICE
             elif self.device_class in {DeviceClass.REMOTE, DeviceClass.REMOTE_UNKNOWN}:
                 self.execution_mode = ExecutionModeLabel.REMOTE_WORKER
-        self.request_features.supports_streaming = self.supports_streaming
-        if self.supports_tools:
-            self.request_features.supports_tools = True
         if self.runtime is None:
             runtime_label = (
                 self.backend_type.value if self.backend_type is not None else self.engine_type.value
@@ -645,11 +716,37 @@ class BackendCapabilities(BaseModel):
     def supports_model_target(self, target: str) -> bool:
         """Return whether the capability set can serve the requested logical target."""
 
-        return (
-            target in self.serving_targets
-            or target in self.model_ids
-            or target in self.model_aliases
-        )
+        return self.resolve_logical_model(target) is not None
+
+    def resolve_logical_model(self, target: str) -> LogicalModelTarget | None:
+        """Resolve one requested alias or identifier to explicit logical-model metadata."""
+
+        for logical_model in self.logical_models:
+            if target in {logical_model.alias, logical_model.model_identifier}:
+                return logical_model.model_copy(deep=True)
+        if target in self.model_aliases:
+            return LogicalModelTarget(
+                alias=target,
+                model_identifier=self.model_aliases[target],
+                equivalence=ModelEquivalenceKind.EXACT,
+                max_context_tokens=self.max_context_tokens,
+                request_features=self.request_features.model_copy(deep=True),
+                quality_tier=self.quality_tier,
+                quality_hint=self.quality_hint,
+                performance_hint=self.performance_hint,
+            )
+        if target in self.model_ids:
+            return LogicalModelTarget(
+                alias=self.default_model or target,
+                model_identifier=target,
+                equivalence=ModelEquivalenceKind.EXACT,
+                max_context_tokens=self.max_context_tokens,
+                request_features=self.request_features.model_copy(deep=True),
+                quality_tier=self.quality_tier,
+                quality_hint=self.quality_hint,
+                performance_hint=self.performance_hint,
+            )
+        return None
 
 
 class BackendHealth(BaseModel):
@@ -702,12 +799,11 @@ class BackendStatusSnapshot(BaseModel):
             self.deployment.instances = list(self.instance_inventory)
         if not self.logical_targets:
             targets: list[LogicalModelTarget] = []
-            for target in self.capabilities.serving_targets:
+            for logical_model in self.capabilities.logical_models:
                 targets.append(
-                    LogicalModelTarget(
-                        alias=target,
-                        model_identifier=self.capabilities.model_aliases.get(target),
-                        deployments=[self.name],
+                    logical_model.model_copy(
+                        update={"deployments": [self.name]},
+                        deep=True,
                     )
                 )
             self.logical_targets = targets

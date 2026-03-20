@@ -2206,6 +2206,8 @@ def test_admin_runtime_endpoint_reports_phase4_runtime_state() -> None:
     assert runtime.status_code == 200
     payload = runtime.json()
     assert payload["backends"][0]["backend_name"] == "mock-admin"
+    assert payload["backends"][0]["logical_targets"][0]["alias"] == "chat-shared"
+    assert payload["backends"][0]["logical_targets"][0]["equivalence"] == "exact"
     assert payload["backends"][0]["queue_depth"] == 2
     assert payload["admission"]["enabled"] is True
     assert payload["admission"]["global_concurrency_cap"] == 8

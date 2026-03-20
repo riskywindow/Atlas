@@ -12,6 +12,7 @@ from switchyard.schemas.backend import (
     CapacitySnapshot,
     DeploymentProfile,
     GPUDeviceMetadata,
+    LogicalModelTarget,
     RequestFeatureSupport,
     RuntimeIdentity,
 )
@@ -50,6 +51,7 @@ class BackendRuntimeSummary(BaseModel):
     active_requests: int = Field(default=0, ge=0)
     queue_depth: int = Field(default=0, ge=0)
     request_features: RequestFeatureSupport = Field(default_factory=RequestFeatureSupport)
+    logical_targets: list[LogicalModelTarget] = Field(default_factory=list)
     observed_capacity: CapacitySnapshot | None = None
     circuit_open: bool = False
     circuit_reason: str | None = Field(default=None, min_length=1, max_length=256)

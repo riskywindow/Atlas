@@ -38,10 +38,14 @@ from switchyard.schemas.backend import (
     CostBudgetProfile,
     CostProfileClass,
     DeviceClass,
+    EngineType,
+    LogicalModelTarget,
+    ModelEquivalenceKind,
     NetworkCharacteristics,
     NetworkProfile,
     PerformanceHint,
     QualityHint,
+    RequestFeatureSupport,
 )
 from switchyard.schemas.benchmark import (
     CandidateRouteEstimateContext,
@@ -208,10 +212,14 @@ def build_adapter(
     latency_ms: float,
     quality_tier: int,
     device_class: DeviceClass,
+    backend_type: BackendType = BackendType.MOCK,
+    engine_type: EngineType = EngineType.MOCK,
     health_state: BackendHealthState = BackendHealthState.HEALTHY,
     model_ids: list[str] | None = None,
     serving_targets: list[str] | None = None,
+    logical_models: list[LogicalModelTarget] | None = None,
     supports_streaming: bool = False,
+    supports_system_messages: bool = True,
     configured_priority: int = 100,
     configured_weight: float = 1.0,
     quality_hint: QualityHint = QualityHint.BALANCED,
@@ -228,10 +236,12 @@ def build_adapter(
     status_metadata: dict[str, str] | None = None,
 ) -> MockBackendAdapter:
     capabilities = BackendCapabilities(
-        backend_type=BackendType.MOCK,
+        backend_type=backend_type,
+        engine_type=engine_type,
         device_class=device_class,
         model_ids=model_ids or ["mock-chat"],
         serving_targets=serving_targets or ["mock-chat"],
+        logical_models=logical_models or [],
         max_context_tokens=max_context_tokens,
         supports_streaming=supports_streaming,
         concurrency_limit=concurrency_limit,
@@ -241,6 +251,10 @@ def build_adapter(
         quality_hint=quality_hint,
         performance_hint=performance_hint,
         network_characteristics=NetworkCharacteristics(profile=network_profile),
+        request_features=RequestFeatureSupport(
+            supports_streaming=supports_streaming,
+            supports_system_messages=supports_system_messages,
+        ),
         cost_profile=CostBudgetProfile(
             profile=cost_profile_name,
             relative_cost_index=relative_cost_index,
@@ -857,6 +871,272 @@ async def test_router_resolves_only_backends_for_logical_target() -> None:
 
 
 @pytest.mark.asyncio
+async def test_router_resolves_logical_alias_across_local_and_remote_targets() -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="mlx-local",
+            latency_ms=12.0,
+            quality_tier=4,
+            device_class=DeviceClass.APPLE_GPU,
+            backend_type=BackendType.MLX_LM,
+            engine_type=EngineType.MLX,
+            serving_targets=["chat-shared"],
+            logical_models=[
+                LogicalModelTarget(
+                    alias="chat-shared",
+                    model_identifier="meta-llama/Llama-3.1-8B-Instruct",
+                    equivalence=ModelEquivalenceKind.EXACT,
+                    max_context_tokens=16384,
+                    quality_tier=4,
+                    quality_hint=QualityHint.PREMIUM,
+                )
+            ],
+            supports_streaming=True,
+            configured_priority=10,
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="metal-local",
+            latency_ms=20.0,
+            quality_tier=4,
+            device_class=DeviceClass.APPLE_GPU,
+            backend_type=BackendType.VLLM_METAL,
+            engine_type=EngineType.VLLM,
+            serving_targets=["chat-shared"],
+            logical_models=[
+                LogicalModelTarget(
+                    alias="chat-shared",
+                    model_identifier="NousResearch/Meta-Llama-3-8B-Instruct",
+                    equivalence=ModelEquivalenceKind.APPROXIMATE,
+                    max_context_tokens=32768,
+                    quality_tier=4,
+                    performance_hint=PerformanceHint.THROUGHPUT_OPTIMIZED,
+                    notes=["weights differ from MLX deployment"],
+                )
+            ],
+            supports_streaming=True,
+            configured_priority=20,
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="cuda-remote",
+            latency_ms=18.0,
+            quality_tier=5,
+            device_class=DeviceClass.NVIDIA_GPU,
+            backend_type=BackendType.VLLM_CUDA,
+            engine_type=EngineType.VLLM_CUDA,
+            serving_targets=["chat-shared"],
+            logical_models=[
+                LogicalModelTarget(
+                    alias="chat-shared",
+                    model_identifier="meta-llama/Llama-3.1-8B-Instruct",
+                    equivalence=ModelEquivalenceKind.EXACT,
+                    max_context_tokens=65536,
+                    quality_tier=5,
+                    quality_hint=QualityHint.PREMIUM,
+                    performance_hint=PerformanceHint.THROUGHPUT_OPTIMIZED,
+                )
+            ],
+            supports_streaming=True,
+            configured_priority=30,
+        )
+    )
+    router = RouterService(registry)
+
+    decision = await router.route(
+        build_request("chat-shared"),
+        build_context(RoutingPolicy.BALANCED),
+    )
+
+    assert decision.backend_name == "mlx-local"
+    assert decision.explanation is not None
+    by_backend = {
+        candidate.backend_name: candidate for candidate in decision.explanation.candidates
+    }
+    assert by_backend["mlx-local"].logical_model is not None
+    assert by_backend["mlx-local"].logical_model.alias == "chat-shared"
+    assert RouteSelectionReasonCode.MODEL_EXACT_EQUIVALENCE in by_backend[
+        "mlx-local"
+    ].reason_codes
+    assert by_backend["metal-local"].logical_model is not None
+    assert by_backend["metal-local"].logical_model.equivalence is ModelEquivalenceKind.APPROXIMATE
+    assert RouteSelectionReasonCode.MODEL_APPROXIMATE_EQUIVALENCE in by_backend[
+        "metal-local"
+    ].reason_codes
+
+
+@pytest.mark.asyncio
+async def test_router_rejects_alias_candidates_with_explicit_context_and_feature_mismatches(
+) -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="mlx-ineligible",
+            latency_ms=10.0,
+            quality_tier=4,
+            device_class=DeviceClass.APPLE_GPU,
+            backend_type=BackendType.MLX_LM,
+            engine_type=EngineType.MLX,
+            serving_targets=["chat-shared"],
+            logical_models=[
+                LogicalModelTarget(
+                    alias="chat-shared",
+                    model_identifier="meta-llama/Llama-3.1-8B-Instruct",
+                    equivalence=ModelEquivalenceKind.EXACT,
+                    max_context_tokens=128,
+                    request_features=RequestFeatureSupport(
+                        supports_streaming=False,
+                        supports_system_messages=True,
+                    ),
+                )
+            ],
+            supports_streaming=False,
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="metal-context-limited",
+            latency_ms=14.0,
+            quality_tier=4,
+            device_class=DeviceClass.APPLE_GPU,
+            backend_type=BackendType.VLLM_METAL,
+            engine_type=EngineType.VLLM,
+            serving_targets=["chat-shared"],
+            logical_models=[
+                LogicalModelTarget(
+                    alias="chat-shared",
+                    model_identifier="meta-llama/Llama-3.1-8B-Instruct",
+                    equivalence=ModelEquivalenceKind.APPROXIMATE,
+                    max_context_tokens=200,
+                    request_features=RequestFeatureSupport(
+                        supports_streaming=True,
+                        supports_system_messages=True,
+                    ),
+                )
+            ],
+            supports_streaming=True,
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="cuda-eligible",
+            latency_ms=18.0,
+            quality_tier=5,
+            device_class=DeviceClass.NVIDIA_GPU,
+            backend_type=BackendType.VLLM_CUDA,
+            engine_type=EngineType.VLLM_CUDA,
+            serving_targets=["chat-shared"],
+            logical_models=[
+                LogicalModelTarget(
+                    alias="chat-shared",
+                    model_identifier="meta-llama/Llama-3.1-8B-Instruct",
+                    equivalence=ModelEquivalenceKind.EXACT,
+                    max_context_tokens=8192,
+                    request_features=RequestFeatureSupport(
+                        supports_streaming=True,
+                        supports_system_messages=True,
+                    ),
+                )
+            ],
+            supports_streaming=True,
+        )
+    )
+    router = RouterService(registry)
+    request = ChatCompletionRequest(
+        model="chat-shared",
+        stream=True,
+        max_output_tokens=256,
+        messages=[ChatMessage(role=ChatRole.USER, content="stream this alias request")],
+    )
+
+    decision = await router.route(request, build_context(RoutingPolicy.BALANCED))
+
+    assert decision.backend_name == "cuda-eligible"
+    assert decision.explanation is not None
+    local_candidate = next(
+        candidate
+        for candidate in decision.explanation.candidates
+        if candidate.backend_name == "mlx-ineligible"
+    )
+    assert local_candidate.rejection_reason == "alias does not support streaming on this backend"
+    assert RouteSelectionReasonCode.MODEL_FEATURE_UNSUPPORTED in local_candidate.reason_codes
+    context_limited = next(
+        candidate
+        for candidate in decision.explanation.candidates
+        if candidate.backend_name == "metal-context-limited"
+    )
+    assert context_limited.rejection_reason == "request exceeds alias context window"
+    assert RouteSelectionReasonCode.MODEL_CONTEXT_LIMIT in context_limited.reason_codes
+
+
+@pytest.mark.asyncio
+async def test_router_falls_back_to_remote_for_shared_alias_when_local_candidate_is_ineligible(
+) -> None:
+    registry = AdapterRegistry()
+    registry.register(
+        build_adapter(
+            name="mlx-local-unavailable",
+            latency_ms=8.0,
+            quality_tier=4,
+            device_class=DeviceClass.APPLE_GPU,
+            backend_type=BackendType.MLX_LM,
+            engine_type=EngineType.MLX,
+            health_state=BackendHealthState.UNAVAILABLE,
+            serving_targets=["chat-shared"],
+            logical_models=[
+                LogicalModelTarget(
+                    alias="chat-shared",
+                    model_identifier="meta-llama/Llama-3.1-8B-Instruct",
+                    equivalence=ModelEquivalenceKind.EXACT,
+                    max_context_tokens=32768,
+                )
+            ],
+        )
+    )
+    registry.register(
+        build_adapter(
+            name="cuda-remote-fallback",
+            latency_ms=16.0,
+            quality_tier=5,
+            device_class=DeviceClass.NVIDIA_GPU,
+            backend_type=BackendType.VLLM_CUDA,
+            engine_type=EngineType.VLLM_CUDA,
+            serving_targets=["chat-shared"],
+            logical_models=[
+                LogicalModelTarget(
+                    alias="chat-shared",
+                    model_identifier="meta-llama/Llama-3.1-8B-Instruct",
+                    equivalence=ModelEquivalenceKind.EXACT,
+                    max_context_tokens=65536,
+                    quality_tier=5,
+                )
+            ],
+            supports_streaming=True,
+        )
+    )
+    router = RouterService(registry)
+
+    decision = await router.route(
+        build_request("chat-shared"),
+        build_context(RoutingPolicy.BALANCED),
+    )
+
+    assert decision.backend_name == "cuda-remote-fallback"
+    assert decision.rejected_backends["mlx-local-unavailable"] == "backend health is unavailable"
+    assert decision.explanation is not None
+    rejected_local = next(
+        candidate
+        for candidate in decision.explanation.candidates
+        if candidate.backend_name == "mlx-local-unavailable"
+    )
+    assert rejected_local.logical_model is not None
+    assert rejected_local.logical_model.alias == "chat-shared"
+
+
+@pytest.mark.asyncio
 async def test_router_rejects_non_streaming_backend_for_stream_request() -> None:
     registry = AdapterRegistry()
     registry.register(
@@ -887,7 +1167,10 @@ async def test_router_rejects_non_streaming_backend_for_stream_request() -> None
     decision = await router.route(request, build_context(RoutingPolicy.BALANCED))
 
     assert decision.backend_name == "streaming"
-    assert decision.rejected_backends["non-streaming"] == "backend does not support streaming"
+    assert (
+        decision.rejected_backends["non-streaming"]
+        == "alias does not support streaming on this backend"
+    )
 
 
 @pytest.mark.asyncio
@@ -1514,7 +1797,10 @@ async def test_router_rejects_backend_when_request_exceeds_context_window() -> N
     decision = await router.route(request, build_context(RoutingPolicy.BALANCED))
 
     assert decision.backend_name == "large-context"
-    assert decision.rejected_backends["small-context"] == "request exceeds backend max context"
+    assert (
+        decision.rejected_backends["small-context"]
+        == "request exceeds alias context window"
+    )
 
 
 @pytest.mark.asyncio

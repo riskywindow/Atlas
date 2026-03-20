@@ -13,6 +13,8 @@ from switchyard.schemas.backend import (
     DeploymentProfile,
     DeviceClass,
     ExecutionModeLabel,
+    LogicalModelTarget,
+    ModelEquivalenceKind,
     WorkerLocalityClass,
 )
 from switchyard.schemas.benchmark import (
@@ -207,6 +209,12 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
                     eligibility_state=RouteEligibilityState.ELIGIBLE,
                     score=10.0,
                     rationale=["lowest latency"],
+                    logical_model=LogicalModelTarget(
+                        alias="mock-chat",
+                        model_identifier="mock-chat",
+                        equivalence=ModelEquivalenceKind.EXACT,
+                        max_context_tokens=8192,
+                    ),
                 )
             ],
             selected_backend="mock-a",
@@ -358,6 +366,10 @@ def test_benchmark_artifact_serializes_with_phase3_defaults() -> None:
     assert payload["records"][0]["route_candidate_count"] == 2
     assert payload["records"][0]["route_decision"]["request_features"]["feature_version"] == (
         "phase6.v2"
+    )
+    assert (
+        payload["records"][0]["route_explanation"]["candidates"][0]["logical_model"]["equivalence"]
+        == "exact"
     )
     assert "repeated_prefix" in payload["records"][0]["route_decision"]["request_features"][
         "workload_tags"

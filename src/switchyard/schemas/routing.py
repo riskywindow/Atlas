@@ -7,7 +7,13 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from switchyard.schemas.backend import BackendDeployment, EngineType, TopologySchemaVersion
+from switchyard.schemas.backend import (
+    BackendDeployment,
+    EngineType,
+    LogicalModelTarget,
+    ModelEquivalenceKind,
+    TopologySchemaVersion,
+)
 
 
 class RoutingPolicy(StrEnum):
@@ -211,6 +217,11 @@ class RouteSelectionReasonCode(StrEnum):
     REMOTE_COOLDOWN = "remote_cooldown"
     REMOTE_ESCALATION = "remote_escalation"
     LOCAL_ADMISSION_SPILLOVER = "local_admission_spillover"
+    MODEL_EXACT_EQUIVALENCE = "model_exact_equivalence"
+    MODEL_APPROXIMATE_EQUIVALENCE = "model_approximate_equivalence"
+    MODEL_ALIAS_UNSUPPORTED = "model_alias_unsupported"
+    MODEL_CONTEXT_LIMIT = "model_context_limit"
+    MODEL_FEATURE_UNSUPPORTED = "model_feature_unsupported"
 
 
 class TenantIdentity(BaseModel):
@@ -577,6 +588,7 @@ class RouteCandidateExplanation(BaseModel):
     deployment: BackendDeployment | None = None
     engine_type: EngineType | None = None
     backend_instance_id: str | None = Field(default=None, min_length=1, max_length=128)
+    logical_model: LogicalModelTarget | None = None
 
     @model_validator(mode="after")
     def validate_state_reason(self) -> RouteCandidateExplanation:
@@ -586,6 +598,13 @@ class RouteCandidateExplanation(BaseModel):
         ):
             msg = "rejected candidates must include a rejection_reason"
             raise ValueError(msg)
+        if (
+            self.logical_model is not None
+            and self.logical_model.equivalence is ModelEquivalenceKind.APPROXIMATE
+            and RouteSelectionReasonCode.MODEL_APPROXIMATE_EQUIVALENCE not in self.reason_codes
+            and self.eligibility_state is not RouteEligibilityState.REJECTED
+        ):
+            self.reason_codes.append(RouteSelectionReasonCode.MODEL_APPROXIMATE_EQUIVALENCE)
         return self
 
 

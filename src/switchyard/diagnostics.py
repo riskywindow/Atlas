@@ -153,6 +153,10 @@ async def collect_runtime_backend_summaries(
                 request_features=status_snapshot.capabilities.request_features.model_copy(
                     deep=True
                 ),
+                logical_targets=[
+                    logical_target.model_copy(deep=True)
+                    for logical_target in status_snapshot.logical_targets
+                ],
                 observed_capacity=(
                     deployment.observed_capacity.model_copy(deep=True)
                     if deployment is not None and deployment.observed_capacity is not None
