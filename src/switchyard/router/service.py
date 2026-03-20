@@ -18,7 +18,7 @@ from switchyard.router.policies import (
 from switchyard.router.policies import (
     _is_remote_snapshot as _is_remote_candidate,
 )
-from switchyard.schemas.backend import BackendHealthState
+from switchyard.schemas.backend import BackendHealthState, BackendStatusSnapshot
 from switchyard.schemas.chat import ChatCompletionRequest
 from switchyard.schemas.routing import (
     AffinityDisposition,
@@ -73,7 +73,7 @@ class RouterService:
         rejected_backends: dict[str, str] = {}
         admission_limited_backends: dict[str, str] = {}
         protected_backends: dict[str, str] = {}
-        eligible_snapshots = []
+        eligible_snapshots: list[BackendStatusSnapshot] = []
         explanations: list[RouteCandidateExplanation] = []
         degraded_backends: list[str] = []
         annotations = RouteAnnotations()
@@ -113,6 +113,27 @@ class RouterService:
         spillover_guardrail_triggers: list[str] = []
 
         for snapshot in target_snapshot.deployments:
+            if snapshot.name in context.blocked_backends:
+                blocked_rejection = CandidateRejection(
+                    reason="operator disabled backend for this serving target",
+                    category="protection",
+                )
+                rejected_backends[snapshot.name] = blocked_rejection.reason
+                protected_backends[snapshot.name] = blocked_rejection.reason
+                explanations.append(
+                    RouteCandidateExplanation(
+                        backend_name=snapshot.name,
+                        serving_target=request.model,
+                        eligibility_state=RouteEligibilityState.REJECTED,
+                        reason_codes=[],
+                        rationale=[f"policy={context.policy.value}"],
+                        rejection_reason=blocked_rejection.reason,
+                        deployment=snapshot.deployment,
+                        engine_type=snapshot.capabilities.engine_type,
+                        logical_model=None,
+                    )
+                )
+                continue
             breaker_state = None
             breaker_reason = None
             if self._circuit_breaker is not None:
@@ -125,7 +146,7 @@ class RouterService:
             if snapshot.health.state is BackendHealthState.DEGRADED:
                 degraded_backends.append(snapshot.name)
 
-            rejection = rejection_reason(
+            rejection: CandidateRejection | None = rejection_reason(
                 snapshot=snapshot,
                 request=request,
                 context=context,

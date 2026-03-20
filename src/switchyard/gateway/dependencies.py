@@ -13,6 +13,7 @@ from switchyard.adapters.registry import AdapterRegistry
 from switchyard.config import Settings
 from switchyard.control.admission import AdmissionControlService
 from switchyard.control.affinity import SessionAffinityService
+from switchyard.control.alias_overrides import AliasRoutingOverrideService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
 from switchyard.control.locality import PrefixLocalityService
@@ -46,6 +47,7 @@ class GatewayServices:
     policy_rollout: PolicyRolloutService
     remote_workers: RemoteWorkerRegistryService
     spillover: RemoteSpilloverControlService
+    alias_overrides: AliasRoutingOverrideService
     telemetry: Telemetry
     trace_capture: TraceCaptureService
 

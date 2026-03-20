@@ -17,6 +17,7 @@ from switchyard.adapters.registry import AdapterRegistry
 from switchyard.config import Settings
 from switchyard.control.admission import AdmissionControlService, AdmissionRejectedError
 from switchyard.control.affinity import SessionAffinityService
+from switchyard.control.alias_overrides import AliasRoutingOverrideService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
 from switchyard.control.locality import PrefixLocalityService
@@ -78,6 +79,7 @@ def create_app(
     resolved_spillover = RemoteSpilloverControlService(
         resolved_settings.phase7.hybrid_execution
     )
+    resolved_alias_overrides = AliasRoutingOverrideService()
     resolved_policy_rollout = policy_rollout or PolicyRolloutService(
         resolved_settings.phase4.policy_rollout
     )
@@ -111,6 +113,7 @@ def create_app(
         policy_rollout=resolved_policy_rollout,
         remote_workers=resolved_remote_workers,
         spillover=resolved_spillover,
+        alias_overrides=resolved_alias_overrides,
         telemetry=resolved_telemetry,
         trace_capture=build_trace_capture_service(
             mode=resolved_settings.trace_capture_mode,

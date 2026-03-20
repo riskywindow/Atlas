@@ -9,7 +9,16 @@ from datetime import UTC, datetime
 from time import perf_counter
 from typing import Protocol, cast
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import StreamingResponse
 
 from switchyard.adapters.base import BackendAdapter
@@ -29,8 +38,13 @@ from switchyard.gateway.dependencies import GatewayServices, get_services
 from switchyard.logging import bind_request_context, get_logger
 from switchyard.router.features import routing_feature_runtime_summary
 from switchyard.schemas.admin import (
+    AliasCompatibilityRuntimeEntry,
+    AliasRoutingOverrideRequest,
+    AliasRoutingOverrideState,
+    BackendRuntimeSummary,
     DeploymentDiagnosticsResponse,
     HybridBudgetResetResponse,
+    HybridBudgetRuntimeSummary,
     HybridOperatorRuntimeSummary,
     HybridRemoteToggleRequest,
     HybridRouteExample,
@@ -147,6 +161,12 @@ async def admin_runtime(
     """Return a lightweight read-only snapshot of runtime control-plane state."""
 
     runtime_backends = await collect_runtime_backend_summaries(services.registry)
+    remote_worker_snapshot = services.remote_workers.snapshot()
+    hybrid_operator = _hybrid_operator_summary(
+        services=services,
+        runtime_backends=runtime_backends,
+        remote_worker_snapshot=remote_worker_snapshot,
+    )
     return RuntimeInspectionResponse(
         backends=runtime_backends,
         admission=await services.admission.inspect_state(),
@@ -160,15 +180,13 @@ async def admin_runtime(
             runtime_backends=runtime_backends,
             spillover_runtime=services.spillover.inspect_state(),
         ),
-        hybrid_operator=services.operator.inspect_state(
-            remote_effectively_enabled=services.spillover.enabled
-        ),
+        hybrid_operator=hybrid_operator,
         remote_workers=summarize_remote_worker_lifecycle(
             settings=services.settings,
             runtime_backends=runtime_backends,
-            remote_worker_registry=services.remote_workers.snapshot(),
+            remote_worker_registry=remote_worker_snapshot,
         ),
-        remote_worker_registry=services.remote_workers.snapshot(),
+        remote_worker_registry=remote_worker_snapshot,
         routing_features=routing_feature_runtime_summary(),
         prefix_locality=services.prefix_locality.inspect_state(),
     )
@@ -249,9 +267,7 @@ async def admin_hybrid(
 ) -> HybridOperatorRuntimeSummary:
     """Return recent operator-facing hybrid routing state."""
 
-    return services.operator.inspect_state(
-        remote_effectively_enabled=services.spillover.enabled
-    )
+    return _hybrid_operator_summary(services=services)
 
 
 @router.post("/admin/hybrid/remote-enabled", response_model=HybridOperatorRuntimeSummary)
@@ -263,9 +279,61 @@ async def update_hybrid_remote_enabled(
 
     services.spillover.set_remote_enabled(update.enabled, reason=update.reason)
     services.operator.set_remote_enabled_override(update.enabled)
-    return services.operator.inspect_state(
-        remote_effectively_enabled=services.spillover.enabled
-    )
+    return _hybrid_operator_summary(services=services)
+
+
+@router.get("/admin/hybrid/budget", response_model=HybridBudgetRuntimeSummary)
+async def admin_hybrid_budget(
+    services: GatewayServices = Depends(get_services),
+) -> HybridBudgetRuntimeSummary:
+    """Return remote budget, spend bucket, and cooldown posture."""
+
+    return _hybrid_operator_summary(services=services).budget_state
+
+
+@router.get("/admin/hybrid/aliases", response_model=list[AliasCompatibilityRuntimeEntry])
+async def admin_hybrid_aliases(
+    services: GatewayServices = Depends(get_services),
+) -> list[AliasCompatibilityRuntimeEntry]:
+    """Return alias compatibility and operator override posture for remote routing."""
+
+    return _hybrid_operator_summary(services=services).alias_compatibility
+
+
+@router.post(
+    "/admin/hybrid/aliases/{serving_target}/override",
+    response_model=AliasRoutingOverrideState,
+)
+async def update_hybrid_alias_override(
+    serving_target: str,
+    update: AliasRoutingOverrideRequest,
+    services: GatewayServices = Depends(get_services),
+) -> AliasRoutingOverrideState:
+    """Pin or disable remote backends for one logical serving target."""
+
+    try:
+        return services.alias_overrides.update(
+            serving_target=serving_target,
+            pinned_backend=update.pinned_backend,
+            disabled_backends=update.disabled_backends,
+            reason=update.reason,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post(
+    "/admin/hybrid/aliases/{serving_target}/override/reset",
+    response_model=HybridOperatorRuntimeSummary,
+)
+async def reset_hybrid_alias_override(
+    serving_target: str,
+    services: GatewayServices = Depends(get_services),
+) -> HybridOperatorRuntimeSummary:
+    """Clear the alias-scoped routing override for one serving target."""
+
+    services.alias_overrides.clear(serving_target)
+    return _hybrid_operator_summary(services=services)
 
 
 @router.post("/admin/hybrid/budget/reset", response_model=HybridBudgetResetResponse)
@@ -289,9 +357,7 @@ async def admin_hybrid_routes(
 ) -> list[HybridRouteExample]:
     """Return recent operator-facing hybrid route examples wrapped for consistency."""
 
-    return services.operator.inspect_state(
-        remote_effectively_enabled=services.spillover.enabled
-    ).recent_route_examples
+    return _hybrid_operator_summary(services=services).recent_route_examples
 
 
 @router.post(
@@ -419,6 +485,12 @@ async def create_chat_completion(
 
     request_id = request.state.request_id
     request_timestamp = datetime.now(UTC)
+    explicit_backend_pin = _resolve_internal_backend_pin(request)
+    alias_override = (
+        None
+        if explicit_backend_pin is not None
+        else services.alias_overrides.get(chat_request.model)
+    )
     route_context = RequestContext(
         request_id=request_id,
         policy=_resolve_request_policy(
@@ -427,7 +499,16 @@ async def create_chat_completion(
         ),
         workload_shape=_resolve_workload_shape(request),
         request_class=_resolve_request_class(request),
-        internal_backend_pin=_resolve_internal_backend_pin(request),
+        internal_backend_pin=(
+            explicit_backend_pin
+            if explicit_backend_pin is not None
+            else (None if alias_override is None else alias_override.pinned_backend)
+        ),
+        blocked_backends=(
+            []
+            if explicit_backend_pin is not None or alias_override is None
+            else list(alias_override.disabled_backends)
+        ),
         tenant_id=_resolve_tenant_id(request),
         tenant_tier=_resolve_tenant_tier(request),
         session_id=_resolve_session_id(request),
@@ -1580,6 +1661,48 @@ def _route_metadata_headers(decision: RouteDecision) -> dict[str, str]:
         "x-switchyard-route-decision": payload,
         "x-switchyard-route-selected-backend": decision.backend_name,
     }
+
+
+def _hybrid_operator_summary(
+    *,
+    services: GatewayServices,
+    runtime_backends: list[BackendRuntimeSummary] | None = None,
+    remote_worker_snapshot: RegisteredRemoteWorkerSnapshot | None = None,
+) -> HybridOperatorRuntimeSummary:
+    resolved_runtime_backends = [] if runtime_backends is None else runtime_backends
+    resolved_remote_worker_snapshot = (
+        services.remote_workers.snapshot()
+        if remote_worker_snapshot is None
+        else remote_worker_snapshot
+    )
+    return services.operator.inspect_state(
+        remote_effectively_enabled=services.spillover.enabled,
+        spillover_runtime=services.spillover.inspect_state(),
+        remote_worker_snapshot=resolved_remote_worker_snapshot,
+        known_serving_targets=_known_serving_targets(
+            services=services,
+            runtime_backends=resolved_runtime_backends,
+            remote_worker_snapshot=resolved_remote_worker_snapshot,
+        ),
+        alias_overrides=services.alias_overrides.list_overrides(),
+    )
+
+
+def _known_serving_targets(
+    *,
+    services: GatewayServices,
+    runtime_backends: list[BackendRuntimeSummary],
+    remote_worker_snapshot: RegisteredRemoteWorkerSnapshot,
+) -> list[str]:
+    targets: set[str] = set()
+    for model in services.settings.local_models:
+        targets.add(model.serving_target or model.alias)
+    for backend in runtime_backends:
+        for logical_target in backend.logical_targets:
+            targets.add(logical_target.alias)
+    for worker in remote_worker_snapshot.workers:
+        targets.update(worker.serving_targets)
+    return sorted(targets)
 
 
 async def _remote_candidate_snapshots(

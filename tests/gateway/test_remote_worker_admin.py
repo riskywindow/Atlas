@@ -44,10 +44,12 @@ from switchyard.schemas.worker import RemoteWorkerAuthMode, RemoteWorkerRegistra
 def _app(
     *,
     remote_worker_settings: RemoteWorkerLifecycleSettings,
+    hybrid_execution_settings: HybridExecutionSettings | None = None,
 ) -> TestClient:
     app = create_app(
         settings=Settings(
             phase7=Phase7ControlPlaneSettings(
+                hybrid_execution=hybrid_execution_settings or HybridExecutionSettings(),
                 remote_workers=remote_worker_settings,
             )
         )
@@ -375,6 +377,105 @@ def test_remote_worker_admin_operator_controls_mutate_worker_posture() -> None:
     assert "quarantined" in tags
     assert "canary-only" in tags
 
+    hybrid = client.get("/admin/hybrid")
+    assert hybrid.status_code == 200
+    cloud_worker = hybrid.json()["cloud_workers"][0]
+    assert cloud_worker["backend_name"] == "remote-worker:remote-a"
+    assert cloud_worker["runtime"]["runtime_version"] == "0.6.5"
+    assert cloud_worker["gpu"]["model"] == "L4"
+    assert cloud_worker["provider"] == "aws"
+    assert cloud_worker["region"] == "us-east-1"
+    assert cloud_worker["quarantined"] is True
+    assert cloud_worker["canary_only"] is True
+    assert cloud_worker["lifecycle_state"] == "unhealthy"
+
+
+def test_admin_hybrid_exposes_budget_and_alias_override_controls() -> None:
+    client = _app(
+        remote_worker_settings=RemoteWorkerLifecycleSettings(
+            dynamic_registration_enabled=True,
+        ),
+        hybrid_execution_settings=HybridExecutionSettings(
+            enabled=True,
+            spillover_enabled=True,
+            remote_request_budget_per_minute=5,
+            remote_concurrency_cap=2,
+        ),
+    )
+    register = client.post(
+        "/internal/control-plane/remote-workers/register",
+        json=_registration_payload(),
+    )
+    assert register.status_code == 200
+    lease_token = register.json()["lease_token"]
+
+    ready = client.post(
+        "/internal/control-plane/remote-workers/heartbeat",
+        headers={"x-switchyard-lease-token": lease_token},
+        json={
+            "worker_id": "worker-1",
+            "lifecycle_state": "ready",
+            "ready": True,
+            "active_requests": 1,
+            "queue_depth": 2,
+            "health": {
+                "state": "healthy",
+                "load_state": "ready",
+                "latency_ms": 9.0,
+            },
+        },
+    )
+    assert ready.status_code == 200
+
+    override = client.post(
+        "/admin/hybrid/aliases/chat-shared/override",
+        json={
+            "pinned_backend": "remote-worker:remote-a",
+            "reason": "canary remote worker for this alias",
+        },
+    )
+    assert override.status_code == 200
+    assert override.json()["pinned_backend"] == "remote-worker:remote-a"
+
+    aliases = client.get("/admin/hybrid/aliases")
+    assert aliases.status_code == 200
+    alias_entry = aliases.json()[0]
+    assert alias_entry["serving_target"] == "chat-shared"
+    assert alias_entry["eligible_remote_backends"] == ["remote-worker:remote-a"]
+    assert alias_entry["pinned_backend"] == "remote-worker:remote-a"
+
+    budget = client.get("/admin/hybrid/budget")
+    assert budget.status_code == 200
+    assert budget.json()["remote_request_budget_per_minute"] == 5
+    assert budget.json()["remote_budget_requests_remaining"] == 5
+    assert budget.json()["remote_concurrency_cap"] == 2
+    assert budget.json()["cooldown_active"] is False
+
+    hybrid = client.get("/admin/hybrid")
+    assert hybrid.status_code == 200
+    payload = hybrid.json()
+    assert payload["alias_overrides"][0]["serving_target"] == "chat-shared"
+    assert payload["alias_overrides"][0]["pinned_backend"] == "remote-worker:remote-a"
+    assert payload["cloud_workers"][0]["usable"] is True
+    assert payload["cloud_workers"][0]["active_requests"] == 1
+    assert payload["cloud_workers"][0]["queue_depth"] == 2
+    assert payload["alias_compatibility"][0]["eligible_remote_backends"] == [
+        "remote-worker:remote-a"
+    ]
+
+    invalid = client.post(
+        "/admin/hybrid/aliases/chat-shared/override",
+        json={
+            "pinned_backend": "remote-worker:remote-a",
+            "disabled_backends": ["remote-worker:remote-a"],
+        },
+    )
+    assert invalid.status_code == 422
+
+    reset = client.post("/admin/hybrid/aliases/chat-shared/override/reset")
+    assert reset.status_code == 200
+    assert reset.json()["alias_overrides"] == []
+
 
 @pytest.mark.asyncio
 async def test_admin_hybrid_endpoints_expose_remote_controls_and_transport_errors() -> None:
@@ -422,6 +523,7 @@ async def test_admin_hybrid_endpoints_expose_remote_controls_and_transport_error
             },
         )
         hybrid = await gateway_client.get("/admin/hybrid")
+        budget = await gateway_client.get("/admin/hybrid/budget")
         routes = await gateway_client.get("/admin/hybrid/routes")
         disabled = await gateway_client.post(
             "/admin/hybrid/remote-enabled",
@@ -451,8 +553,15 @@ async def test_admin_hybrid_endpoints_expose_remote_controls_and_transport_error
     assert hybrid_payload["recent_route_examples"][0]["placement_evidence_source"] is None
     assert hybrid_payload["recent_route_examples"][0]["budget_bucket"] is None
     assert hybrid_payload["recent_route_examples"][0]["relative_cost_index"] is None
+    assert hybrid_payload["budget_state"]["remote_request_budget_per_minute"] == 2
+    assert hybrid_payload["budget_state"]["remote_budget_requests_used"] == 1
+    assert hybrid_payload["budget_state"]["remote_budget_requests_remaining"] == 1
     assert hybrid_payload["recent_remote_transport_errors"][0]["request_id"] == "req-remote-failure"
     assert hybrid_payload["recent_remote_transport_errors"][0]["cooldown_triggered"] is False
+
+    assert budget.status_code == 200
+    assert budget.json()["remote_budget_requests_used"] == 1
+    assert budget.json()["remote_budget_requests_remaining"] == 1
 
     assert routes.status_code == 200
     assert routes.json()[0]["request_id"] == "req-remote-failure"

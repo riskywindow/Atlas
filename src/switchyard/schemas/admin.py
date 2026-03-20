@@ -142,6 +142,87 @@ class HybridBudgetResetResponse(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class HybridBudgetRuntimeSummary(BaseModel):
+    """Operator-facing remote budget, spend bucket, and cooldown posture."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    remote_request_budget_per_minute: int | None = Field(default=None, ge=1)
+    remote_budget_window_started_at: datetime | None = None
+    remote_budget_requests_used: int = Field(default=0, ge=0)
+    remote_budget_requests_remaining: int | None = Field(default=None, ge=0)
+    remote_in_flight_requests: int = Field(default=0, ge=0)
+    remote_concurrency_cap: int | None = Field(default=None, ge=1)
+    cooldown_active: bool = False
+    cooldown_until: datetime | None = None
+    recent_observed_budget_bucket_counts: dict[str, int] = Field(default_factory=dict)
+    recent_estimated_budget_bucket_counts: dict[str, int] = Field(default_factory=dict)
+    total_observed_relative_cost_index: float | None = Field(default=None, ge=0.0)
+    total_estimated_relative_cost_index: float | None = Field(default=None, ge=0.0)
+    notes: list[str] = Field(default_factory=list)
+
+
+class CloudWorkerControlRuntimeEntry(BaseModel):
+    """Compact operator-facing control and runtime view for one cloud worker."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    worker_id: str = Field(min_length=1, max_length=128)
+    backend_name: str = Field(min_length=1, max_length=128)
+    serving_targets: list[str] = Field(default_factory=list)
+    lifecycle_state: str = Field(min_length=1, max_length=64)
+    last_heartbeat_at: datetime | None = None
+    runtime: RuntimeIdentity | None = None
+    gpu: GPUDeviceMetadata | None = None
+    provider: str | None = Field(default=None, min_length=1, max_length=128)
+    region: str | None = Field(default=None, min_length=1, max_length=128)
+    zone: str | None = Field(default=None, min_length=1, max_length=128)
+    ready: bool = False
+    usable: bool = False
+    quarantined: bool = False
+    canary_only: bool = False
+    draining: bool = False
+    active_requests: int = Field(default=0, ge=0)
+    queue_depth: int = Field(default=0, ge=0)
+    eligibility_reasons: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+
+
+class AliasRoutingOverrideState(BaseModel):
+    """Current operator override for one logical alias or serving target."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    serving_target: str = Field(min_length=1, max_length=128)
+    pinned_backend: str | None = Field(default=None, min_length=1, max_length=128)
+    disabled_backends: list[str] = Field(default_factory=list)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    reason: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+class AliasRoutingOverrideRequest(BaseModel):
+    """Operator mutation request for one alias-scoped routing override."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pinned_backend: str | None = Field(default=None, min_length=1, max_length=128)
+    disabled_backends: list[str] = Field(default_factory=list)
+    reason: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+class AliasCompatibilityRuntimeEntry(BaseModel):
+    """Remote-worker eligibility and override posture for one logical alias."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    serving_target: str = Field(min_length=1, max_length=128)
+    eligible_remote_backends: list[str] = Field(default_factory=list)
+    ineligible_remote_backends: dict[str, list[str]] = Field(default_factory=dict)
+    pinned_backend: str | None = Field(default=None, min_length=1, max_length=128)
+    disabled_backends: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
 class HybridRouteExample(BaseModel):
     """Recent operator-facing route example for hybrid placement decisions."""
 
@@ -225,6 +306,10 @@ class HybridOperatorRuntimeSummary(BaseModel):
     recent_cloud_evidence: CloudRouteEvidenceRuntimeSummary = Field(
         default_factory=CloudRouteEvidenceRuntimeSummary
     )
+    budget_state: HybridBudgetRuntimeSummary = Field(default_factory=HybridBudgetRuntimeSummary)
+    cloud_workers: list[CloudWorkerControlRuntimeEntry] = Field(default_factory=list)
+    alias_compatibility: list[AliasCompatibilityRuntimeEntry] = Field(default_factory=list)
+    alias_overrides: list[AliasRoutingOverrideState] = Field(default_factory=list)
     recent_remote_transport_errors: list[RemoteTransportErrorRuntimeEntry] = Field(
         default_factory=list
     )

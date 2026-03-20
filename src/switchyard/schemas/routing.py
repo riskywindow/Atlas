@@ -676,6 +676,7 @@ class RequestContext(BaseModel):
     max_latency_ms: int | None = Field(default=None, ge=1)
     trace_id: str | None = Field(default=None, min_length=1, max_length=128)
     internal_backend_pin: str | None = Field(default=None, min_length=1, max_length=128)
+    blocked_backends: list[str] = Field(default_factory=list)
     tenant_id: str = Field(default="default", min_length=1, max_length=128)
     tenant_tier: TenantTier = TenantTier.STANDARD
     session_id: str | None = Field(default=None, min_length=1, max_length=128)

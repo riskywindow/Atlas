@@ -6,6 +6,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from switchyard.adapters.mock import MockBackendAdapter
 from switchyard.adapters.registry import AdapterRegistry
 from switchyard.adapters.remote_worker import RemoteWorkerAdapter
 from switchyard.config import (
@@ -151,6 +152,25 @@ def _build_worker_app() -> FastAPI:
     return app
 
 
+def _build_local_adapter() -> MockBackendAdapter:
+    return MockBackendAdapter(
+        name="local-chat",
+        simulated_latency_ms=1.0,
+        capability_metadata=BackendCapabilities(
+            backend_type=BackendType.MOCK,
+            engine_type=EngineType.MOCK,
+            device_class=DeviceClass.CPU,
+            model_ids=["chat-shared"],
+            serving_targets=["chat-shared"],
+            max_context_tokens=8192,
+            supports_streaming=False,
+            concurrency_limit=4,
+            default_model="chat-shared",
+            model_aliases={"chat-shared": "chat-shared"},
+        ),
+    )
+
+
 @pytest.mark.asyncio
 async def test_gateway_routes_to_remote_worker_adapter() -> None:
     worker_app = _build_worker_app()
@@ -225,6 +245,67 @@ async def test_admin_runtime_includes_instance_inventory_for_remote_workers() ->
     assert payload["hybrid_execution"]["remote_capable_backends"] == 1
     assert payload["hybrid_execution"]["healthy_remote_backends"] == 1
     assert payload["remote_workers"]["static_instance_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_alias_override_controls_can_pin_or_disable_remote_backend() -> None:
+    worker_app = _build_worker_app()
+    worker_client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=worker_app),
+        base_url="http://worker.internal",
+    )
+    registry = AdapterRegistry()
+    registry.register(_build_local_adapter())
+    registry.register(RemoteWorkerAdapter(_build_remote_model_config(), client=worker_client))
+    app = create_app(
+        registry=registry,
+        telemetry=configure_telemetry("switchyard-alias-override-test"),
+        settings=Settings(env=AppEnvironment.TEST, log_level="INFO"),
+    )
+    gateway_client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    )
+
+    try:
+        pin = await gateway_client.post(
+            "/admin/hybrid/aliases/chat-shared/override",
+            json={
+                "pinned_backend": "remote-worker:remote-chat",
+                "reason": "exercise the real cloud path",
+            },
+        )
+        pinned = await gateway_client.post(
+            "/v1/chat/completions",
+            json=ChatCompletionRequest(
+                model="chat-shared",
+                messages=[ChatMessage(role=ChatRole.USER, content="hello")],
+            ).model_dump(mode="json"),
+        )
+        disable = await gateway_client.post(
+            "/admin/hybrid/aliases/chat-shared/override",
+            json={
+                "disabled_backends": ["remote-worker:remote-chat"],
+                "reason": "rollback the cloud worker for this alias",
+            },
+        )
+        disabled = await gateway_client.post(
+            "/v1/chat/completions",
+            json=ChatCompletionRequest(
+                model="chat-shared",
+                messages=[ChatMessage(role=ChatRole.USER, content="hello again")],
+            ).model_dump(mode="json"),
+        )
+    finally:
+        await gateway_client.aclose()
+        await worker_client.aclose()
+
+    assert pin.status_code == 200
+    assert disable.status_code == 200
+    assert pinned.status_code == 200
+    assert pinned.json()["backend_name"] == "remote-worker:remote-chat"
+    assert disabled.status_code == 200
+    assert disabled.json()["backend_name"] == "local-chat"
 
 
 @pytest.mark.asyncio
