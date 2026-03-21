@@ -152,6 +152,9 @@ implementation even when local development and CI do not have CUDA.
   contract into typed request, capability, health, and deployment behavior.
 - `switchyard.runtime.vllm_cuda` is the only place that should know about direct
   vLLM-CUDA runtime imports.
+- `infra/docker/Dockerfile.remote-worker` now exposes a concrete `runtime-vllm-cuda`
+  target and the worker CLI exposes a preflight check so rented-GPU bring-up can fail
+  fast on missing `vllm`, missing NVIDIA runtime exposure, or invalid worker settings.
 
 The intentionally abstracted or feature-gated parts of this first slice are:
 

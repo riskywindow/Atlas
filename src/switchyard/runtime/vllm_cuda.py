@@ -71,7 +71,15 @@ class VLLMCUDAProvider(Protocol):
     def ensure_available(self) -> None:
         """Verify that vLLM can be imported."""
 
-    def load(self, model_identifier: str) -> LoadedEngine:
+    def load(
+        self,
+        model_identifier: str,
+        *,
+        tensor_parallel_size: int = 1,
+        gpu_memory_utilization: float | None = None,
+        max_model_len: int | None = None,
+        trust_remote_code: bool = False,
+    ) -> LoadedEngine:
         """Load a vLLM engine."""
 
     def declare_capabilities(self) -> VLLMCUDARuntimeCapabilities:
@@ -110,12 +118,36 @@ class ImportedVLLMCUDAProvider:
     def ensure_available(self) -> None:
         self._get_vllm_module()
 
-    def load(self, model_identifier: str) -> LoadedEngine:
+    def load(
+        self,
+        model_identifier: str,
+        *,
+        tensor_parallel_size: int = 1,
+        gpu_memory_utilization: float | None = None,
+        max_model_len: int | None = None,
+        trust_remote_code: bool = False,
+    ) -> LoadedEngine:
         llm_class = getattr(self._get_vllm_module(), "LLM", None)
         if not callable(llm_class):
             msg = "vllm.LLM is unavailable in the installed vLLM package"
             raise VLLMCUDAConfigurationError(msg)
-        return LoadedEngine(engine=llm_class(model=model_identifier))
+        kwargs: dict[str, object] = {
+            "model": model_identifier,
+            "tensor_parallel_size": tensor_parallel_size,
+            "trust_remote_code": trust_remote_code,
+        }
+        if gpu_memory_utilization is not None:
+            kwargs["gpu_memory_utilization"] = gpu_memory_utilization
+        if max_model_len is not None:
+            kwargs["max_model_len"] = max_model_len
+        try:
+            return LoadedEngine(engine=llm_class(**kwargs))
+        except Exception as exc:
+            msg = _describe_engine_load_failure(
+                exc=exc,
+                model_identifier=model_identifier,
+            )
+            raise VLLMCUDAConfigurationError(msg) from exc
 
     def declare_capabilities(self) -> VLLMCUDARuntimeCapabilities:
         module = self._get_vllm_module()
@@ -271,6 +303,10 @@ class VLLMCUDAChatRuntime:
         model_config: LocalModelConfig,
         *,
         provider: VLLMCUDAProvider | None = None,
+        tensor_parallel_size: int = 1,
+        gpu_memory_utilization: float | None = None,
+        max_model_len: int | None = None,
+        trust_remote_code: bool = False,
     ) -> None:
         if model_config.backend_type is not BackendType.VLLM_CUDA:
             msg = (
@@ -283,21 +319,31 @@ class VLLMCUDAChatRuntime:
         self._provider = provider or ImportedVLLMCUDAProvider()
         self._loaded_engine: LoadedEngine | None = None
         self._last_error: str | None = None
+        self._tensor_parallel_size = tensor_parallel_size
+        self._gpu_memory_utilization = gpu_memory_utilization
+        self._max_model_len = max_model_len
+        self._trust_remote_code = trust_remote_code
 
     def load_model(self) -> None:
         if self._loaded_engine is not None:
             return
 
         try:
-            self._loaded_engine = self._provider.load(self.model_config.model_identifier)
+            self._loaded_engine = self._provider.load(
+                self.model_config.model_identifier,
+                tensor_parallel_size=self._tensor_parallel_size,
+                gpu_memory_utilization=self._gpu_memory_utilization,
+                max_model_len=self._max_model_len,
+                trust_remote_code=self._trust_remote_code,
+            )
             self._last_error = None
         except VLLMCUDARuntimeError as exc:
             self._last_error = str(exc)
             raise
         except Exception as exc:
-            msg = (
-                "unexpected vLLM-CUDA runtime error while loading model "
-                f"{self.model_config.model_identifier!r}: {exc}"
+            msg = _describe_engine_load_failure(
+                exc=exc,
+                model_identifier=self.model_config.model_identifier,
             )
             self._last_error = msg
             raise VLLMCUDARuntimeError(msg) from exc
@@ -437,3 +483,24 @@ class VLLMCUDAChatRuntime:
             temperature=request.temperature if request.temperature != 0.7 else defaults.temperature,
             top_p=request.top_p if request.top_p != 1.0 else defaults.top_p,
         )
+
+
+def _describe_engine_load_failure(*, exc: Exception, model_identifier: str) -> str:
+    rendered = str(exc).strip() or exc.__class__.__name__
+    normalized = rendered.lower()
+    if any(token in normalized for token in ("cuda", "nvidia", "driver", "gpu")):
+        return (
+            "vLLM engine initialization failed; verify NVIDIA drivers, GPU visibility, "
+            "and the container GPU runtime on the rented host. "
+            f"model_identifier={model_identifier!r}; original_error={rendered}"
+        )
+    if any(token in normalized for token in ("model", "tokenizer", "huggingface", "repo")):
+        return (
+            "vLLM engine initialization failed while resolving model assets; verify "
+            "model_identifier, remote-code policy, and model access credentials. "
+            f"model_identifier={model_identifier!r}; original_error={rendered}"
+        )
+    return (
+        "vLLM engine initialization failed during worker startup. "
+        f"model_identifier={model_identifier!r}; original_error={rendered}"
+    )

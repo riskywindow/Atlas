@@ -94,6 +94,10 @@ class RemoteWorkerRuntimeSettings(BaseSettings):
     performance_hint: PerformanceHint = PerformanceHint.THROUGHPUT_OPTIMIZED
     supports_prefix_cache: bool = True
     supports_kv_cache_reuse: bool = True
+    tensor_parallel_size: int = Field(default=1, ge=1, le=4096)
+    gpu_memory_utilization: float | None = Field(default=None, gt=0.0, le=1.0)
+    max_model_len: int | None = Field(default=None, ge=1, le=10_000_000)
+    trust_remote_code: bool = False
     cold_start_likely: bool = False
     warm_pool_enabled: bool = False
     estimated_cold_start_ms: float | None = Field(default=None, ge=0.0)
@@ -123,6 +127,25 @@ class RemoteWorkerRuntimeSettings(BaseSettings):
             msg = "enrollment_token is required when auth_mode=signed_enrollment"
             raise ValueError(msg)
         return self
+
+    def validate_vllm_cuda_contract(self) -> None:
+        """Validate settings required for the concrete rented-GPU worker path."""
+
+        if self.backend_type is not BackendType.VLLM_CUDA:
+            msg = "the concrete remote worker path requires backend_type='vllm_cuda'"
+            raise ValueError(msg)
+        if self.device_class is not DeviceClass.NVIDIA_GPU:
+            msg = "the concrete remote worker path requires device_class='nvidia_gpu'"
+            raise ValueError(msg)
+        if self.engine_type not in {EngineType.VLLM, EngineType.VLLM_CUDA}:
+            msg = "the concrete remote worker path requires engine_type='vllm' or 'vllm_cuda'"
+            raise ValueError(msg)
+        if self.gpu_count < 1:
+            msg = "gpu_count must be at least 1 for the concrete vllm_cuda worker path"
+            raise ValueError(msg)
+        if self.tensor_parallel_size > self.gpu_count:
+            msg = "tensor_parallel_size must not exceed gpu_count for the rented-GPU worker"
+            raise ValueError(msg)
 
     def to_fake_worker_config(self) -> FakeRemoteWorkerConfig:
         """Project the environment contract into the deterministic fake worker app."""

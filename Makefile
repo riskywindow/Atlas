@@ -1,4 +1,4 @@
-.PHONY: setup setup-mlx setup-vllm-metal lint typecheck test check serve serve-metrics warmup bench-smoke bench-gateway container-build-control-plane container-check-control-plane compose-config compose-up compose-up-observability compose-down kind-render-smoke kind-render-m4pro kind-bootstrap kind-push-control-plane kind-deploy-smoke kind-deploy-m4pro kind-smoke
+.PHONY: setup setup-mlx setup-vllm-metal lint typecheck test check serve serve-metrics warmup bench-smoke bench-gateway container-build-control-plane container-build-remote-worker container-build-vllm-cuda-worker container-check-control-plane container-check-vllm-cuda-worker compose-config compose-up compose-up-observability compose-down compose-up-vllm-cuda-worker kind-render-smoke kind-render-m4pro kind-bootstrap kind-push-control-plane kind-deploy-smoke kind-deploy-m4pro kind-smoke
 
 setup:
 	uv sync --dev
@@ -40,14 +40,26 @@ bench-gateway:
 container-build-control-plane:
 	docker build -f infra/docker/Dockerfile.control-plane -t switchyard/control-plane:dev .
 
+container-build-remote-worker:
+	docker build -f infra/docker/Dockerfile.remote-worker -t switchyard/remote-worker:dev .
+
+container-build-vllm-cuda-worker:
+	docker build -f infra/docker/Dockerfile.remote-worker --target runtime-vllm-cuda -t switchyard/remote-worker-vllm-cuda:dev .
+
 container-check-control-plane:
 	uv run switchyard-control-plane check-config
+
+container-check-vllm-cuda-worker:
+	uv run switchyard-vllm-cuda-worker check-config --verify-runtime-import --no-require-nvidia-smi
 
 compose-config:
 	docker compose -f infra/compose/compose.yaml config
 
 compose-up:
 	docker compose -f infra/compose/compose.yaml up -d
+
+compose-up-vllm-cuda-worker:
+	docker compose -f infra/compose/compose.yaml -f infra/compose/compose.vllm-cuda-worker.yaml up -d
 
 compose-up-observability:
 	docker compose -f infra/compose/compose.yaml --profile observability up -d

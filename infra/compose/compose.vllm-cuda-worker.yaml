@@ -1,0 +1,30 @@
+services:
+  remote-worker:
+    image: switchyard/remote-worker-vllm-cuda:dev
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.remote-worker
+      target: runtime-vllm-cuda
+    env_file:
+      - ${SWITCHYARD_REMOTE_WORKER_ENV_FILE:-../../docs/examples/phase8_vllm_cuda_worker.env}
+      - ${SWITCHYARD_REMOTE_WORKER_SECRET_ENV_FILE:-../../docs/examples/phase8_vllm_cuda_worker.secrets.env.example}
+    ports:
+      - "8090:8090"
+    gpus: all
+    volumes:
+      - huggingface-cache:/home/switchyard/.cache/huggingface
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/internal/worker/ready', timeout=3).read()",
+        ]
+      interval: 20s
+      timeout: 5s
+      retries: 6
+      start_period: 45s
+
+volumes:
+  huggingface-cache:

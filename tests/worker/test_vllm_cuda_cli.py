@@ -31,6 +31,17 @@ def test_vllm_cuda_worker_settings_project_runtime_identity() -> None:
     assert request_features.supports_streaming is True
     assert model_config.backend_type is BackendType.VLLM_CUDA
     assert model_config.execution_mode.value == "remote_worker"
+    settings.validate_vllm_cuda_contract()
+
+
+def test_vllm_cuda_worker_settings_reject_inconsistent_parallelism() -> None:
+    settings = RemoteWorkerRuntimeSettings(
+        gpu_count=1,
+        tensor_parallel_size=2,
+    )
+
+    with pytest.raises(ValueError, match="tensor_parallel_size"):
+        settings.validate_vllm_cuda_contract()
 
 
 def test_vllm_cuda_worker_cli_invokes_server(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -53,6 +64,7 @@ def test_vllm_cuda_worker_cli_invokes_server(monkeypatch: pytest.MonkeyPatch) ->
     result = runner.invoke(
         vllm_cuda_cli.app,
         [
+            "serve",
             "--host",
             "0.0.0.0",
             "--port",
@@ -64,6 +76,31 @@ def test_vllm_cuda_worker_cli_invokes_server(monkeypatch: pytest.MonkeyPatch) ->
     assert called["settings"] == settings
     assert called["host"] == "0.0.0.0"
     assert called["port"] == 9400
+
+
+def test_vllm_cuda_worker_check_config_reports_issues(monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = CliRunner()
+    settings = RemoteWorkerRuntimeSettings(worker_name="cuda-check", gpu_count=1)
+
+    monkeypatch.setattr(vllm_cuda_cli, "RemoteWorkerRuntimeSettings", lambda: settings)
+
+    def fake_report(**_: object) -> dict[str, object]:
+        return {
+            "status": "error",
+            "worker_name": "cuda-check",
+            "issues": ["nvidia-smi was not found"],
+            "notes": [],
+        }
+
+    monkeypatch.setattr(vllm_cuda_cli, "build_vllm_cuda_preflight_report", fake_report)
+
+    result = runner.invoke(
+        vllm_cuda_cli.app,
+        ["check-config", "--fail-on-issues"],
+    )
+
+    assert result.exit_code == 1
+    assert '"status": "error"' in result.stdout
 
 
 def test_concrete_vllm_cuda_worker_process_runs_server() -> None:

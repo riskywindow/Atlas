@@ -6,7 +6,6 @@ from fastapi import FastAPI
 
 from switchyard.adapters.vllm_cuda import VLLMCUDAAdapter, VLLMCUDARuntime
 from switchyard.runtime.vllm_cuda import VLLMCUDAChatRuntime
-from switchyard.schemas.backend import BackendType, DeviceClass
 from switchyard.worker.app import create_worker_app
 from switchyard.worker.config import RemoteWorkerRuntimeSettings
 
@@ -18,17 +17,19 @@ def create_vllm_cuda_worker_app(
 ) -> FastAPI:
     """Build a concrete vLLM-CUDA worker around the shared worker protocol."""
 
-    if settings.backend_type is not BackendType.VLLM_CUDA:
-        msg = "the concrete remote worker path requires backend_type='vllm_cuda'"
-        raise ValueError(msg)
-    if settings.device_class is not DeviceClass.NVIDIA_GPU:
-        msg = "the concrete remote worker path requires device_class='nvidia_gpu'"
-        raise ValueError(msg)
+    settings.validate_vllm_cuda_contract()
 
     model_config = settings.to_local_model_config()
     adapter = VLLMCUDAAdapter(
         model_config,
-        runtime=runtime or VLLMCUDAChatRuntime(model_config),
+        runtime=runtime
+        or VLLMCUDAChatRuntime(
+            model_config,
+            tensor_parallel_size=settings.tensor_parallel_size,
+            gpu_memory_utilization=settings.gpu_memory_utilization,
+            max_model_len=settings.max_model_len,
+            trust_remote_code=settings.trust_remote_code,
+        ),
     )
     return create_worker_app(
         adapter,

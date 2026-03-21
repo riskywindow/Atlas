@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM python:3.12-slim AS builder
+FROM python:3.12-slim AS builder-base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -16,7 +16,11 @@ COPY src ./src
 
 RUN uv sync --frozen --no-dev
 
-FROM python:3.12-slim AS runtime
+FROM builder-base AS builder-vllm-cuda
+
+RUN uv sync --frozen --no-dev --extra vllm-cuda
+
+FROM python:3.12-slim AS runtime-base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -29,7 +33,6 @@ WORKDIR /app
 
 RUN useradd --create-home --uid 10002 switchyard
 
-COPY --from=builder /app/.venv /app/.venv
 COPY src ./src
 COPY scripts/remote-worker-entrypoint.sh /app/scripts/remote-worker-entrypoint.sh
 
@@ -42,3 +45,13 @@ EXPOSE 8090
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD python -c "import os, urllib.request; port = os.getenv('SWITCHYARD_REMOTE_WORKER_PORT', '8090'); urllib.request.urlopen(f'http://127.0.0.1:{port}/healthz', timeout=3).read()"
 
 ENTRYPOINT ["/app/scripts/remote-worker-entrypoint.sh"]
+
+FROM runtime-base AS runtime-vllm-cuda
+
+ENV SWITCHYARD_REMOTE_WORKER_START_MODE=vllm_cuda
+
+COPY --from=builder-vllm-cuda /app/.venv /app/.venv
+
+FROM runtime-base AS runtime
+
+COPY --from=builder-base /app/.venv /app/.venv
