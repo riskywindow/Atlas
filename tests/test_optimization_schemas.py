@@ -858,3 +858,308 @@ def test_candidate_optimization_config_profile_tracks_declared_supported_diffs()
     assert profile.diff.changed_knob_ids == ["hybrid_max_remote_share_percent"]
     assert profile.diff.mutable_runtime_knob_ids == ["hybrid_max_remote_share_percent"]
     assert profile.changes[0].candidate_value == 20.0
+
+
+def test_campaign_artifact_rejects_stale_without_reason() -> None:
+    artifact = _campaign_artifact()
+    payload = artifact.model_dump(mode="python")
+
+    try:
+        OptimizationCampaignArtifact(
+            **(payload | {"result_status": OptimizationArtifactStatus.STALE, "stale_reason": None})
+        )
+    except ValidationError as exc:
+        assert "stale campaign artifacts require stale_reason" in str(exc)
+    else:
+        raise AssertionError("stale campaign artifacts should require stale_reason")
+
+    try:
+        OptimizationCampaignArtifact(
+            **(
+                payload
+                | {
+                    "result_status": OptimizationArtifactStatus.INVALIDATED,
+                    "invalidation_reason": None,
+                }
+            )
+        )
+    except ValidationError as exc:
+        assert "invalidated campaign artifacts require invalidation_reason" in str(exc)
+    else:
+        raise AssertionError(
+            "invalidated campaign artifacts should require invalidation_reason"
+        )
+
+
+def test_trial_artifact_rejects_campaign_id_mismatch() -> None:
+    candidate_configuration = _candidate_trial_configuration()
+    trial = _trial_artifact(candidate_configuration)
+    payload = trial.model_dump(mode="python")
+
+    try:
+        OptimizationTrialArtifact(**(payload | {"campaign_id": "different-campaign"}))
+    except ValidationError as exc:
+        assert "campaign_id" in str(exc)
+    else:
+        raise AssertionError("trial artifacts should reject campaign_id mismatch")
+
+
+def test_trial_artifact_rejects_candidate_identity_mismatch() -> None:
+    candidate_configuration = _candidate_trial_configuration()
+    mismatched_identity = _baseline_trial_identity()
+    trial_payload = _trial_artifact(candidate_configuration).model_dump(mode="python")
+
+    try:
+        OptimizationTrialArtifact(
+            **(trial_payload | {"trial_identity": mismatched_identity.model_dump(mode="python")})
+        )
+    except ValidationError as exc:
+        assert "trial_identity" in str(exc)
+    else:
+        raise AssertionError("trial artifacts should reject mismatched trial_identity")
+
+
+def test_candidate_configuration_rejects_duplicate_knob_changes() -> None:
+    try:
+        OptimizationCandidateConfigurationArtifact(
+            candidate_configuration_id="candidate-dup-knobs",
+            campaign_id="campaign-phase9-001",
+            candidate=_baseline_trial_identity(),
+            baseline_config_profile_id="phase9-baseline",
+            config_profile_id="phase9-baseline",
+            knob_changes=[
+                OptimizationKnobChange(
+                    knob_id="shadow_sampling_rate",
+                    config_path="routing.shadow_policy.sample_rate",
+                    baseline_value=0.0,
+                    candidate_value=0.1,
+                ),
+                OptimizationKnobChange(
+                    knob_id="shadow_sampling_rate",
+                    config_path="routing.shadow_policy.sample_rate",
+                    baseline_value=0.0,
+                    candidate_value=0.2,
+                ),
+            ],
+        )
+    except ValidationError as exc:
+        assert "duplicate knob_id" in str(exc)
+    else:
+        raise AssertionError(
+            "candidate configurations should reject duplicate knob_id values"
+        )
+
+
+def test_candidate_configuration_rejects_duplicate_objectives() -> None:
+    objective = _objective_target()
+    try:
+        OptimizationCandidateConfigurationArtifact(
+            candidate_configuration_id="candidate-dup-objectives",
+            campaign_id="campaign-phase9-001",
+            candidate=_baseline_trial_identity(),
+            baseline_config_profile_id="phase9-baseline",
+            config_profile_id="phase9-baseline",
+            objectives_in_scope=[objective, objective],
+        )
+    except ValidationError as exc:
+        assert "duplicate objective_id" in str(exc)
+    else:
+        raise AssertionError(
+            "candidate configurations should reject duplicate objective_id values"
+        )
+
+
+def test_candidate_configuration_rejects_duplicate_constraints() -> None:
+    constraint = _constraint()
+    try:
+        OptimizationCandidateConfigurationArtifact(
+            candidate_configuration_id="candidate-dup-constraints",
+            campaign_id="campaign-phase9-001",
+            candidate=_baseline_trial_identity(),
+            baseline_config_profile_id="phase9-baseline",
+            config_profile_id="phase9-baseline",
+            constraints_in_scope=[constraint, constraint],
+        )
+    except ValidationError as exc:
+        assert "duplicate constraint_id" in str(exc)
+    else:
+        raise AssertionError(
+            "candidate configurations should reject duplicate constraint_id values"
+        )
+
+
+def test_trial_artifact_rejects_promotion_decision_referencing_wrong_candidate() -> None:
+    candidate_configuration = _candidate_trial_configuration()
+    trial_payload = _trial_artifact(candidate_configuration).model_dump(mode="python")
+    wrong_promotion = _promotion_decision(
+        candidate_configuration_id="candidate-config-wrong",
+        config_profile_id="phase9-wrong",
+    )
+
+    try:
+        OptimizationTrialArtifact(
+            **(
+                trial_payload
+                | {"promotion_decision": wrong_promotion.model_dump(mode="python")}
+            )
+        )
+    except ValidationError as exc:
+        assert "promotion_decision must reference candidate_configuration" in str(exc)
+    else:
+        raise AssertionError(
+            "trial artifacts should reject promotion decisions referencing wrong candidate"
+        )
+
+
+def test_campaign_artifact_rejects_duplicate_trial_ids() -> None:
+    candidate_configuration = _candidate_trial_configuration()
+    trial = _trial_artifact(candidate_configuration)
+
+    try:
+        OptimizationCampaignArtifact(
+            campaign_artifact_id="campaign-artifact-dup-trials",
+            campaign=OptimizationCampaignMetadata(
+                campaign_id="campaign-phase9-001",
+                optimization_profile_id="phase9-stage-a-baseline",
+            ),
+            baseline_candidate_configuration=_baseline_candidate_configuration(),
+            candidate_configurations=[candidate_configuration],
+            trials=[trial, trial],
+        )
+    except ValidationError as exc:
+        assert "duplicate trial_artifact_id" in str(exc)
+    else:
+        raise AssertionError("campaign artifacts should reject duplicate trial_artifact_id values")
+
+
+def test_campaign_artifact_rejects_candidate_campaign_id_mismatch() -> None:
+    wrong_campaign_candidate = OptimizationCandidateConfigurationArtifact(
+        candidate_configuration_id="candidate-wrong-campaign",
+        campaign_id="wrong-campaign-id",
+        candidate=_candidate_trial_identity(),
+        baseline_config_profile_id="phase9-baseline",
+        config_profile_id="phase9-latency",
+    )
+
+    try:
+        OptimizationCampaignArtifact(
+            campaign_artifact_id="campaign-artifact-mismatch",
+            campaign=OptimizationCampaignMetadata(
+                campaign_id="campaign-phase9-001",
+                optimization_profile_id="phase9-stage-a-baseline",
+            ),
+            baseline_candidate_configuration=_baseline_candidate_configuration(),
+            candidate_configurations=[wrong_campaign_candidate],
+        )
+    except ValidationError as exc:
+        assert "campaign_id" in str(exc).lower() or "campaign.campaign_id" in str(exc)
+    else:
+        raise AssertionError(
+            "campaign artifacts should reject candidate_configurations with mismatched campaign_id"
+        )
+
+
+def test_campaign_artifact_rejects_recommendation_referencing_unknown_candidate() -> None:
+    recommendation = _recommendation_summary(
+        candidate_configuration_id="candidate-config-nonexistent",
+        config_profile_id="phase9-nonexistent",
+    )
+
+    try:
+        OptimizationCampaignArtifact(
+            campaign_artifact_id="campaign-artifact-bad-rec",
+            campaign=OptimizationCampaignMetadata(
+                campaign_id="campaign-phase9-001",
+                optimization_profile_id="phase9-stage-a-baseline",
+            ),
+            baseline_candidate_configuration=_baseline_candidate_configuration(),
+            candidate_configurations=[_candidate_trial_configuration()],
+            recommendation_summaries=[recommendation],
+        )
+    except ValidationError as exc:
+        assert "present in the campaign artifact" in str(exc)
+    else:
+        raise AssertionError(
+            "campaign artifacts should reject recommendations referencing unknown candidates"
+        )
+
+
+def test_campaign_artifact_rejects_promotion_referencing_unknown_candidate() -> None:
+    promotion = _promotion_decision(
+        candidate_configuration_id="candidate-config-nonexistent",
+        config_profile_id="phase9-nonexistent",
+    )
+
+    try:
+        OptimizationCampaignArtifact(
+            campaign_artifact_id="campaign-artifact-bad-promo",
+            campaign=OptimizationCampaignMetadata(
+                campaign_id="campaign-phase9-001",
+                optimization_profile_id="phase9-stage-a-baseline",
+            ),
+            baseline_candidate_configuration=_baseline_candidate_configuration(),
+            candidate_configurations=[_candidate_trial_configuration()],
+            promotion_decisions=[promotion],
+        )
+    except ValidationError as exc:
+        assert "present in the campaign artifact" in str(exc)
+    else:
+        raise AssertionError(
+            "campaign artifacts should reject promotions referencing unknown candidates"
+        )
+
+
+def test_evidence_record_deduplicates_source_ids() -> None:
+    record = OptimizationEvidenceRecord(
+        evidence_id="evidence-dedup",
+        evidence_kind=OptimizationArtifactEvidenceKind.OBSERVED,
+        source_type=OptimizationArtifactSourceType.BENCHMARK_RUN,
+        source_artifact_id="benchmark-run-001",
+        source_run_ids=["run-b", "run-a", "run-b"],
+        source_trace_ids=["trace-c", "trace-c"],
+        source_simulation_ids=["sim-2", "sim-1", "sim-2"],
+    )
+
+    assert record.source_run_ids == ["run-a", "run-b"]
+    assert record.source_trace_ids == ["trace-c"]
+    assert record.source_simulation_ids == ["sim-1", "sim-2"]
+
+
+def test_knob_change_tracks_changed_flag() -> None:
+    changed = OptimizationKnobChange(
+        knob_id="shadow_sampling_rate",
+        config_path="routing.shadow_policy.sample_rate",
+        baseline_value=0.0,
+        candidate_value=0.1,
+    )
+    unchanged = OptimizationKnobChange(
+        knob_id="shadow_sampling_rate",
+        config_path="routing.shadow_policy.sample_rate",
+        baseline_value=0.0,
+        candidate_value=0.0,
+    )
+
+    assert changed.changed is True
+    assert unchanged.changed is False
+
+
+def test_trial_artifact_carries_all_four_evidence_kinds_through_round_trip() -> None:
+    trial = _trial_artifact()
+    evidence_kinds = {record.evidence_kind for record in trial.evidence_records}
+
+    assert evidence_kinds == {
+        OptimizationArtifactEvidenceKind.OBSERVED,
+        OptimizationArtifactEvidenceKind.REPLAYED,
+        OptimizationArtifactEvidenceKind.SIMULATED,
+        OptimizationArtifactEvidenceKind.ESTIMATED,
+    }
+
+    round_tripped = OptimizationTrialArtifact.model_validate_json(
+        trial.model_dump_json()
+    )
+    round_tripped_kinds = {record.evidence_kind for record in round_tripped.evidence_records}
+    assert round_tripped_kinds == evidence_kinds
+
+    payload = round_tripped.model_dump(mode="json")
+    serialized_kinds = {record["evidence_kind"] for record in payload["evidence_records"]}
+    assert serialized_kinds == {"observed", "replayed", "simulated", "estimated"}
