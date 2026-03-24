@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 
@@ -8,14 +9,18 @@ import pytest
 from fastapi import FastAPI, Response
 from fastapi.testclient import TestClient
 
+from switchyard.adapters.mock import MockBackendAdapter
 from switchyard.adapters.registry import AdapterRegistry
 from switchyard.adapters.remote_worker import RemoteWorkerAdapter
 from switchyard.config import (
     AppEnvironment,
     BackendInstanceConfig,
+    CanaryRoutingSettings,
+    CloudTrafficRolloutSettings,
     GenerationDefaults,
     HybridExecutionSettings,
     LocalModelConfig,
+    Phase4ControlPlaneSettings,
     Phase7ControlPlaneSettings,
     RemoteWorkerLifecycleSettings,
     Settings,
@@ -37,7 +42,7 @@ from switchyard.schemas.backend import (
     WorkerLifecycleState,
     WorkerTransportType,
 )
-from switchyard.schemas.routing import RoutingPolicy
+from switchyard.schemas.routing import CanaryPolicy, RoutingPolicy, WeightedBackendAllocation
 from switchyard.schemas.worker import RemoteWorkerAuthMode, RemoteWorkerRegistrationRequest
 
 
@@ -57,15 +62,19 @@ def _app(
     return TestClient(app)
 
 
-def _registration_payload() -> dict[str, Any]:
+def _registration_payload(
+    *,
+    worker_name: str = "remote-a",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
     return {
         "worker_id": "worker-1",
-        "worker_name": "remote-a",
+        "worker_name": worker_name,
         "backend_type": "vllm_cuda",
         "model_identifier": "meta-llama/Llama-3.1-8B-Instruct",
         "serving_targets": ["chat-shared"],
         "endpoint": {
-            "base_url": "https://remote-a.internal",
+            "base_url": f"https://{worker_name}.internal",
             "transport": "https",
         },
         "capabilities": {
@@ -114,7 +123,7 @@ def _registration_payload() -> dict[str, Any]:
         "cost_profile": {"profile": "premium", "budget_bucket": "gpu-staging"},
         "lifecycle_state": "registering",
         "ready": False,
-        "tags": ["remote", "gpu"],
+        "tags": ["remote", "gpu"] if tags is None else tags,
         "metadata": {"instance_type": "g6e.xlarge"},
     }
 
@@ -135,6 +144,25 @@ def _remote_model_config() -> LocalModelConfig:
         ),
         generation_defaults=GenerationDefaults(),
         warmup=WarmupSettings(),
+    )
+
+
+def _local_adapter() -> MockBackendAdapter:
+    return MockBackendAdapter(
+        name="local-chat",
+        simulated_latency_ms=1.0,
+        capability_metadata=BackendCapabilities(
+            backend_type=BackendType.MOCK,
+            engine_type=EngineType.MOCK,
+            device_class=DeviceClass.CPU,
+            model_ids=["chat-shared"],
+            serving_targets=["chat-shared"],
+            max_context_tokens=8192,
+            supports_streaming=False,
+            concurrency_limit=4,
+            default_model="chat-shared",
+            model_aliases={"chat-shared": "chat-shared"},
+        ),
     )
 
 
@@ -549,6 +577,7 @@ async def test_admin_hybrid_endpoints_expose_remote_controls_and_transport_error
     assert hybrid_payload["recent_route_examples"][0]["request_id"] == "req-remote-failure"
     assert hybrid_payload["recent_route_examples"][0]["execution_path"] == "remote"
     assert hybrid_payload["recent_route_examples"][0]["remote_candidate_count"] == 1
+    assert hybrid_payload["recent_route_examples"][0]["cloud_routing_reason"] == "spillover"
     assert hybrid_payload["recent_route_examples"][0]["placement_provider"] is None
     assert hybrid_payload["recent_route_examples"][0]["placement_evidence_source"] is None
     assert hybrid_payload["recent_route_examples"][0]["budget_bucket"] is None
@@ -591,6 +620,201 @@ async def test_admin_hybrid_endpoints_expose_remote_controls_and_transport_error
         ]
         == "remote-worker:remote-chat"
     )
+
+
+@pytest.mark.asyncio
+async def test_registered_canary_only_cloud_worker_rolls_out_then_fails_back() -> None:
+    worker_app = _worker_app(failing_generate=True)
+    worker_client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=worker_app),
+        base_url="http://worker.internal",
+    )
+    registry = AdapterRegistry()
+    registry.register(_local_adapter())
+    registry.register(RemoteWorkerAdapter(_remote_model_config(), client=worker_client))
+    app = create_app(
+        registry=registry,
+        settings=Settings(
+            env=AppEnvironment.TEST,
+            log_level="INFO",
+            phase4=Phase4ControlPlaneSettings(
+                canary_routing=CanaryRoutingSettings(
+                    enabled=True,
+                    policies=(
+                        CanaryPolicy(
+                            policy_name="registered-cloud-rollout",
+                            serving_target="chat-shared",
+                            enabled=True,
+                            baseline_backend="local-chat",
+                            allocations=[
+                                WeightedBackendAllocation(
+                                    backend_name="remote-worker:remote-chat",
+                                    percentage=100.0,
+                                ),
+                            ],
+                        ),
+                    ),
+                )
+            ),
+            phase7=Phase7ControlPlaneSettings(
+                hybrid_execution=HybridExecutionSettings(
+                    enabled=True,
+                    spillover_enabled=True,
+                    remote_request_budget_per_minute=10,
+                ),
+                cloud_rollout=CloudTrafficRolloutSettings(
+                    auto_quarantine_failure_threshold=2,
+                ),
+                remote_workers=RemoteWorkerLifecycleSettings(
+                    dynamic_registration_enabled=True,
+                ),
+            ),
+        ),
+    )
+    gateway_client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+    )
+
+    try:
+        register = await gateway_client.post(
+            "/internal/control-plane/remote-workers/register",
+            json=_registration_payload(worker_name="remote-chat"),
+        )
+        assert register.status_code == 200
+        lease_token = register.json()["lease_token"]
+
+        ready = await gateway_client.post(
+            "/internal/control-plane/remote-workers/heartbeat",
+            headers={"x-switchyard-lease-token": lease_token},
+            json={
+                "worker_id": "worker-1",
+                "lifecycle_state": "ready",
+                "ready": True,
+                "active_requests": 0,
+                "queue_depth": 0,
+                "health": {
+                    "state": "healthy",
+                    "load_state": "ready",
+                    "latency_ms": 8.0,
+                },
+            },
+        )
+        assert ready.status_code == 200
+
+        canary_only = await gateway_client.post(
+            "/admin/remote-workers/worker-1/canary-only",
+            json={"enabled": True, "reason": "limit first real cloud worker to rollout"},
+        )
+        assert canary_only.status_code == 200
+
+        baseline = await gateway_client.post(
+            "/v1/chat/completions",
+            headers={
+                "x-request-id": "req-registered-canary-baseline",
+                "x-switchyard-routing-policy": "burst_to_remote",
+            },
+            json={
+                "model": "chat-shared",
+                "messages": [{"role": "user", "content": "baseline local only"}],
+            },
+        )
+        rollout = await gateway_client.post(
+            "/admin/hybrid/cloud-rollout",
+            json={"enabled": True, "canary_percentage": 100.0},
+        )
+        first_failure = await gateway_client.post(
+            "/v1/chat/completions",
+            headers={
+                "x-request-id": "req-registered-canary-failure-1",
+                "x-switchyard-routing-policy": "burst_to_remote",
+            },
+            json={
+                "model": "chat-shared",
+                "messages": [{"role": "user", "content": "canary once"}],
+            },
+        )
+        second_failure = await gateway_client.post(
+            "/v1/chat/completions",
+            headers={
+                "x-request-id": "req-registered-canary-failure-2",
+                "x-switchyard-routing-policy": "burst_to_remote",
+            },
+            json={
+                "model": "chat-shared",
+                "messages": [{"role": "user", "content": "canary twice"}],
+            },
+        )
+        remote_workers = await gateway_client.get("/admin/remote-workers")
+        failed_back = await gateway_client.post(
+            "/v1/chat/completions",
+            headers={
+                "x-request-id": "req-registered-canary-failed-back",
+                "x-switchyard-routing-policy": "burst_to_remote",
+            },
+            json={
+                "model": "chat-shared",
+                "messages": [{"role": "user", "content": "stay local after quarantine"}],
+            },
+        )
+        hybrid = await gateway_client.get("/admin/hybrid")
+    finally:
+        await gateway_client.aclose()
+        await worker_client.aclose()
+
+    assert baseline.status_code == 200
+    assert baseline.json()["backend_name"] == "local-chat"
+    baseline_route = json.loads(baseline.headers["x-switchyard-route-decision"])
+    assert baseline_route["protected_backends"] == {
+        "remote-worker:remote-chat": "cloud rollout is disabled for canary-only backend"
+    }
+    assert baseline_route["annotations"]["cloud_rollout_disposition"] == "disabled"
+
+    assert rollout.status_code == 200
+    assert rollout.json()["enabled"] is True
+    assert rollout.json()["canary_percentage"] == 100.0
+
+    assert first_failure.status_code == 200
+    assert first_failure.json()["backend_name"] == "local-chat"
+    first_failure_route = json.loads(first_failure.headers["x-switchyard-route-decision"])
+    assert first_failure_route["backend_name"] == "remote-worker:remote-chat"
+    assert first_failure_route["execution_observation"]["executed_backend"] == "local-chat"
+    assert first_failure_route["annotations"]["cloud_rollout_disposition"] == "selected"
+    assert first_failure_route["annotations"]["cloud_routing_reason"] == "canary"
+
+    assert second_failure.status_code == 200
+    assert second_failure.json()["backend_name"] == "local-chat"
+    second_failure_route = json.loads(second_failure.headers["x-switchyard-route-decision"])
+    assert second_failure_route["backend_name"] == "remote-worker:remote-chat"
+    assert second_failure_route["execution_observation"]["executed_backend"] == "local-chat"
+    assert second_failure_route["annotations"]["cloud_rollout_disposition"] == "selected"
+    assert second_failure_route["annotations"]["cloud_routing_reason"] == "canary"
+
+    assert remote_workers.status_code == 200
+    remote_worker_payload = remote_workers.json()
+    assert remote_worker_payload["quarantined_worker_count"] == 1
+    assert remote_worker_payload["workers"][0]["backend_name"] == "remote-worker:remote-chat"
+    assert remote_worker_payload["workers"][0]["quarantined"] is True
+
+    assert failed_back.status_code == 200
+    assert failed_back.json()["backend_name"] == "local-chat"
+    failed_back_route = json.loads(failed_back.headers["x-switchyard-route-decision"])
+    assert failed_back_route["protected_backends"] == {
+        "remote-worker:remote-chat": "registered cloud worker is quarantined"
+    }
+
+    assert hybrid.status_code == 200
+    hybrid_payload = hybrid.json()
+    assert hybrid_payload["recent_remote_transport_errors"][0]["request_id"] == (
+        "req-registered-canary-failure-2"
+    )
+    assert hybrid_payload["recent_remote_transport_errors"][0]["quarantine_triggered"] is True
+    route_examples = {
+        example["request_id"]: example for example in hybrid_payload["recent_route_examples"]
+    }
+    assert route_examples["req-registered-canary-failure-2"]["cloud_routing_reason"] == "canary"
+    assert route_examples["req-registered-canary-failure-2"]["fallback_used"] is True
+    assert route_examples["req-registered-canary-failed-back"]["execution_path"] == "local"
 
 
 def test_remote_worker_registration_returns_400_for_invalid_token(

@@ -226,7 +226,7 @@ def summarize_hybrid_execution(
     runtime_backends: list[BackendRuntimeSummary],
     spillover_runtime: HybridExecutionRuntimeSummary | None = None,
 ) -> HybridExecutionRuntimeSummary:
-    """Summarize Phase 7 hybrid execution posture from config and runtime truth."""
+    """Summarize hybrid execution posture from config and runtime truth."""
 
     local_capable_backends = 0
     remote_capable_backends = 0
@@ -338,7 +338,7 @@ def summarize_remote_worker_lifecycle(
     runtime_backends: list[BackendRuntimeSummary],
     remote_worker_registry: RegisteredRemoteWorkerSnapshot | None = None,
 ) -> RemoteWorkerLifecycleRuntimeSummary:
-    """Summarize Phase 7 registration posture from config and runtime inventory."""
+    """Summarize remote-worker registration posture from config and runtime inventory."""
 
     static_instance_count = sum(
         len(model_config.instances)

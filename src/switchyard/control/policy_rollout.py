@@ -199,6 +199,20 @@ class PolicyRolloutService:
         self._last_policy_update_at = datetime.now(UTC)
         return self.inspect_state()
 
+    def register_candidate_policy(self, scorer: RoutingPolicyScorer) -> None:
+        """Register or replace one runtime candidate scorer."""
+
+        self._candidate_by_id[scorer.policy_reference.policy_id] = scorer
+
+    def unregister_candidate_policy(self, policy_id: str) -> None:
+        """Remove one runtime candidate scorer when a promotion is reset."""
+
+        self._candidate_by_id.pop(policy_id, None)
+        if self._candidate_policy_id == policy_id:
+            self._candidate_policy_id = None
+        if self._shadow_policy_id == policy_id:
+            self._shadow_policy_id = None
+
     def record_learning_event(self, description: str) -> bool:
         """Record a future adaptive-learning event unless learning is frozen."""
 

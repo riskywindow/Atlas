@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import monotonic
-from typing import Protocol
+from typing import Protocol, cast
 
 from switchyard.config import HybridExecutionSettings
 from switchyard.schemas.admin import HybridExecutionRuntimeSummary
@@ -55,6 +55,20 @@ class RemotePermit:
 
     request_id: str
     backend_name: str
+
+
+_UNSET = object()
+
+
+@dataclass(frozen=True, slots=True)
+class HybridMutableRuntimeSettings:
+    """Mutable hybrid guardrails that may be overridden at runtime."""
+
+    spillover_enabled: bool
+    max_remote_share_percent: float
+    remote_request_budget_per_minute: int | None
+    remote_concurrency_cap: int | None
+    remote_cooldown_seconds: float
 
 
 class SpilloverPermitRejectedError(RuntimeError):
@@ -111,6 +125,58 @@ class RemoteSpilloverControlService:
         self._budget_window_started_at = self._clock.now()
         self._budget_requests_used = 0
         return self.inspect_state()
+
+    def export_mutable_settings(self) -> HybridMutableRuntimeSettings:
+        """Return mutable hybrid guardrails for later rollback."""
+
+        return HybridMutableRuntimeSettings(
+            spillover_enabled=self._settings.spillover_enabled,
+            max_remote_share_percent=self._settings.max_remote_share_percent,
+            remote_request_budget_per_minute=(
+                self._settings.remote_request_budget_per_minute
+            ),
+            remote_concurrency_cap=self._settings.remote_concurrency_cap,
+            remote_cooldown_seconds=self._settings.remote_cooldown_seconds,
+        )
+
+    def restore_mutable_settings(self, snapshot: HybridMutableRuntimeSettings) -> None:
+        """Restore a previous mutable hybrid guardrail snapshot."""
+
+        self.apply_mutable_settings(
+            spillover_enabled=snapshot.spillover_enabled,
+            max_remote_share_percent=snapshot.max_remote_share_percent,
+            remote_request_budget_per_minute=snapshot.remote_request_budget_per_minute,
+            remote_concurrency_cap=snapshot.remote_concurrency_cap,
+            remote_cooldown_seconds=snapshot.remote_cooldown_seconds,
+        )
+
+    def apply_mutable_settings(
+        self,
+        *,
+        spillover_enabled: bool | None = None,
+        max_remote_share_percent: float | None = None,
+        remote_request_budget_per_minute: int | None | object = _UNSET,
+        remote_concurrency_cap: int | None | object = _UNSET,
+        remote_cooldown_seconds: float | None = None,
+    ) -> None:
+        """Update the bounded runtime-mutable hybrid guardrails."""
+
+        if spillover_enabled is not None:
+            self._settings.spillover_enabled = spillover_enabled
+        if max_remote_share_percent is not None:
+            self._settings.max_remote_share_percent = max_remote_share_percent
+        if remote_request_budget_per_minute is not _UNSET:
+            self._settings.remote_request_budget_per_minute = cast(
+                int | None,
+                remote_request_budget_per_minute,
+            )
+        if remote_concurrency_cap is not _UNSET:
+            self._settings.remote_concurrency_cap = cast(
+                int | None,
+                remote_concurrency_cap,
+            )
+        if remote_cooldown_seconds is not None:
+            self._settings.remote_cooldown_seconds = remote_cooldown_seconds
 
     def remote_policy_enabled(self, policy: RoutingPolicy) -> bool:
         if policy in {RoutingPolicy.LOCAL_ONLY, RoutingPolicy.REMOTE_DISABLED}:

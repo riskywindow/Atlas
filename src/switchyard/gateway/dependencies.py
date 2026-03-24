@@ -16,6 +16,8 @@ from switchyard.control.affinity import SessionAffinityService
 from switchyard.control.alias_overrides import AliasRoutingOverrideService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
+from switchyard.control.cloud_rollout import CloudTrafficRolloutService
+from switchyard.control.forge_promotion import ForgePromotionService
 from switchyard.control.locality import PrefixLocalityService
 from switchyard.control.operator import HybridOperatorService
 from switchyard.control.policy_rollout import PolicyRolloutService
@@ -43,8 +45,10 @@ class GatewayServices:
     prefix_locality: PrefixLocalityService
     operator: HybridOperatorService
     canary: CanaryRoutingService
+    cloud_rollout: CloudTrafficRolloutService
     shadow: ShadowTrafficService
     policy_rollout: PolicyRolloutService
+    forge_promotion: ForgePromotionService
     remote_workers: RemoteWorkerRegistryService
     spillover: RemoteSpilloverControlService
     alias_overrides: AliasRoutingOverrideService

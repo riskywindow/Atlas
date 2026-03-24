@@ -1,12 +1,16 @@
 # Architecture
 
-Switchyard is in Phase 7 on top of the Phase 6 control-plane foundation: two real
-backend families, logical alias routing, explicit worker inventory, conservative
-health-aware fallback, reproducible benchmark and trace workflows, typed
-routing-intelligence, remote-worker lifecycle posture, hybrid local/remote guardrails,
-and operator-visible budget state. The core design goal is still portability:
-Apple-specific runtime details stop at the adapter/runtime boundary so the same
-contracts can later host CUDA or remote workers.
+Switchyard is in Phase 9 on top of the Phase 6, Phase 7, and Phase 8 control-plane
+foundation: two real Mac-native backend families, logical alias routing, explicit
+worker inventory, conservative health-aware fallback, reproducible benchmark and trace
+workflows, typed routing intelligence, remote-worker lifecycle posture, hybrid
+local/remote guardrails, operator-visible budget state, and the first real
+Linux/NVIDIA worker path. Phase 9 adds Forge Stage A evidence-driven autotuning
+surfaces on top of that base while keeping observed evidence distinct from replayed,
+simulated, or estimated evidence and keeping promotion bounded, explainable, and
+reversible. The core design goal is still portability: Apple-specific and CUDA-specific
+runtime details stop at the adapter/runtime boundary so the same contracts can host
+local Apple workers and real cloud workers.
 
 ## Core Terms
 
@@ -97,7 +101,12 @@ failing over across multiple concrete implementations.
 - `switchyard.bench`
   Synthetic and live gateway benchmarks that serialize route choices, overload
   outcomes, rollout decisions, and performance outcomes into reproducible artifacts and
-  derived reports.
+  derived reports.  Also includes the Forge Stage A offline campaign executor,
+  multi-objective candidate ranking, candidate generation, and campaign honesty
+  assessment.
+- `switchyard.optimization`
+  Profile builder that resolves current settings into a serializable optimization
+  profile of knobs, objectives, constraints, and promotion guardrails.
 
 ## Control-Plane To Worker Boundary
 
@@ -236,6 +245,90 @@ This keeps later optimization work reviewable and reproducible:
 - local-first and spillover constraints remain explicit,
 - operator review is still required before promotion.
 
+## Forge Stage A: Evidence-Driven Autotuning
+
+Phase 9 activates Forge Stage A on top of the optimization-ready surface.  Forge Stage A
+does not generate code, synthesize kernels, or auto-promote untested configurations.
+Instead it provides a structured, artifact-backed workflow for generating candidate
+configurations, evaluating them offline, ranking them with explicit tradeoffs, and
+promoting reviewed candidates through bounded canary rollout.
+
+### Three-Layer Model
+
+1. **Offline Campaign Evaluation** — campaigns generate, prune, and evaluate candidates
+   against benchmark and replay evidence without touching live routing.  The output is a
+   set of typed artifacts: `OptimizationCampaignArtifact`, comparison rankings, and
+   per-trial recommendation summaries.
+
+2. **Honesty Assessment** — before acting on recommendations, the system validates them
+   against current environment state: budget bounds, topology drift, evidence staleness,
+   workload coverage, and evidence consistency.  Warnings are typed and surfaced in
+   operator inspection views.
+
+3. **Bounded Promotion Lifecycle** — promotion follows an explicit multi-step lifecycle
+   (`PROPOSED -> APPROVED -> CANARY_ACTIVE -> COMPARED -> PROMOTED_DEFAULT`) with
+   rollback at every stage.
+
+### Evidence Semantics
+
+Evidence kinds are explicitly separate in every surface:
+
+- **Observed**: real request executed and outcome directly measured.
+- **Replayed**: captured trace replayed through the gateway.
+- **Simulated**: offline simulation projected what would happen.
+- **Estimated**: predictor or heuristic filled in a value.
+
+These labels appear in campaign trials, recommendation summaries, comparison outputs,
+and honesty warnings.  They are never collapsed into a single score.
+
+### Campaign Honesty
+
+The honesty assessment (`assess_campaign_honesty`) checks for:
+
+- budget bounds exceeded (campaign assumed higher remote budget than currently configured),
+- topology drift (workers from campaign evidence are missing or new workers appeared),
+- stale evidence (evidence older than the configured staleness threshold),
+- narrow workload coverage (campaign covers too few workload families),
+- evidence inconsistency (estimated evidence outweighs observed evidence),
+- observed evidence missing (promotion recommendations with no observed runtime backing).
+
+These warnings appear in `ForgeCampaignInspectionSummary` and must be reviewed before
+acting on any recommendation.
+
+### Promotion Lifecycle
+
+```text
+PROPOSED -> APPROVED -> CANARY_ACTIVE -> COMPARED -> PROMOTED_DEFAULT
+    |           |            |              |
+    +-----------+------------+--------------+---> REJECTED
+                             |              |
+                             +--------------+---> ROLLED_BACK
+```
+
+Key properties:
+
+- promotion requires explicit operator review by default,
+- canary percentage is capped by the optimization profile,
+- runtime rollback restores the pre-promotion state atomically,
+- hybrid guardrail knobs (spillover, budget, concurrency) can be part of the promoted
+  profile and are also rolled back,
+- every lifecycle transition is recorded as an auditable event.
+
+### Key Source Files
+
+| File | Purpose |
+|---|---|
+| `schemas/optimization.py` | Typed schemas for profiles, campaigns, trials, recommendations |
+| `schemas/forge.py` | Promotion lifecycle, inspection, and honesty warning schemas |
+| `optimization.py` | Profile builder and config-profile materializer |
+| `bench/campaigns.py` | Offline campaign executor and inspection |
+| `bench/campaign_comparison.py` | Multi-objective candidate ranking |
+| `bench/candidate_generation.py` | Candidate generation and pruning |
+| `bench/campaign_honesty.py` | Honesty assessment and staleness marking |
+| `control/forge_promotion.py` | Bounded promotion lifecycle service |
+
+For the full Forge Stage A runbook, see [docs/forge-stage-a.md](forge-stage-a.md).
+
 ## Request And Routing Flow
 
 1. A request enters the gateway.
@@ -284,6 +377,83 @@ The important rule is that remote execution remains attributable:
 - if remote execution was chosen, the route decision can explain why,
 - if it was blocked, the reason code is serializable,
 - if a remote worker failed in transport, the operator surface retains that event.
+
+## Phase 8 Real Cloud Worker Path
+
+Phase 8 adds one concrete real-cloud runtime path without changing the generic worker
+contract.
+
+The split is intentional:
+
+- logical alias remains the client-facing contract,
+- `remote-worker:<worker_name>` remains the control-plane deployment identity,
+- `vllm_cuda` remains the concrete Linux/NVIDIA runtime label at the worker boundary.
+
+That gives Switchyard one honest real-cloud path while keeping the control plane
+portable:
+
+- the worker/runtime layer knows about `vllm`, CUDA, GPU count, and Linux bring-up,
+- the router and gateway still only consume typed capability, health, placement, spend,
+  and lifecycle signals,
+- packaging for the rented-GPU worker stays isolated from the default Mac-first control
+  plane workspace.
+
+## Phase 8 Alias Resolution Flow
+
+Phase 8 makes the local-plus-remote alias story explicit.
+
+1. The client sends one logical alias such as `chat-shared`.
+2. The registry resolves every compatible deployment for that alias:
+   - `mlx-lm:...`
+   - `vllm-metal:...`
+   - `remote-worker:...`
+3. Registered worker lifecycle state further constrains whether a remote deployment is
+   usable:
+   - ready,
+   - quarantined,
+   - draining,
+   - canary-only,
+   - stale or lost.
+4. The router scores only the remaining eligible candidates.
+5. Hybrid guardrails then bound whether remote execution is actually allowed:
+   - cloud rollout,
+   - remote enabled/disabled posture,
+   - spillover budget,
+   - remote concurrency,
+   - cooldown,
+   - tenant/environment restrictions.
+6. The gateway executes the chosen path and records why remote routing happened or why it
+   was blocked.
+
+The important property is that alias compatibility is explicit:
+
+- one alias can span local and remote implementations,
+- adding a real cloud worker does not require client API changes,
+- a blocked or quarantined cloud worker still remains visible in topology truth.
+
+## Phase 8 Observed Cloud Signal Path
+
+Phase 8 keeps the observed-cloud path explicit from worker runtime to artifacts.
+
+1. The real remote worker reports or registers typed runtime identity, GPU metadata,
+   placement, readiness, and cost-profile metadata.
+2. The control plane stores that data in runtime inventory and operator views.
+3. Routing and execution consume the observed signals when present:
+   - health/readiness,
+   - queue depth and active requests,
+   - placement and network posture,
+   - budget bucket and relative cost metadata.
+4. Route examples and execution observations record whether cloud execution really
+   happened.
+5. Benchmark and replay artifacts preserve evidence source rather than flattening
+   observed and estimated cloud metadata together.
+
+This is why Phase 8 can answer different questions honestly:
+
+- "was a remote cloud worker eligible?"
+- "did a remote cloud worker actually serve this request?"
+- "was the placement or spend metadata directly observed, configured, mocked, or
+  estimated?"
 
 ## Phase 6 Route-Decision Path
 
@@ -439,7 +609,11 @@ The local-friendly default is still enough for development:
 - `/metrics`,
 - `/admin/runtime`,
 - `/admin/hybrid`,
+- `/admin/hybrid/cloud-rollout`,
 - `/admin/remote-workers`,
+- `/admin/forge/stage-a`,
+- `/admin/forge/stage-a/promotion`,
+- `/admin/forge/stage-a/campaigns/inspect`,
 - JSON benchmark artifacts,
 - optional markdown reports derived from those artifacts.
 

@@ -237,6 +237,13 @@ class HybridRouteExample(BaseModel):
     execution_path: str = Field(min_length=1, max_length=64)
     fallback_used: bool = False
     final_outcome: str | None = Field(default=None, min_length=1, max_length=128)
+    affinity_disposition: str | None = Field(default=None, min_length=1, max_length=64)
+    operator_override_applied: bool = False
+    cloud_routing_reason: str | None = Field(default=None, min_length=1, max_length=64)
+    cloud_rollout_disposition: str | None = Field(default=None, min_length=1, max_length=64)
+    cloud_rollout_bucket_percentage: float | None = Field(default=None, ge=0.0, le=100.0)
+    shadow_disposition: str | None = Field(default=None, min_length=1, max_length=64)
+    shadow_target_backend: str | None = Field(default=None, min_length=1, max_length=128)
     route_reason_codes: list[str] = Field(default_factory=list)
     admission_reason_code: str | None = Field(default=None, min_length=1, max_length=128)
     remote_candidate_count: int = Field(default=0, ge=0)
@@ -272,6 +279,7 @@ class RemoteTransportErrorRuntimeEntry(BaseModel):
     backend_name: str = Field(min_length=1, max_length=128)
     error: str = Field(min_length=1, max_length=512)
     cooldown_triggered: bool = False
+    quarantine_triggered: bool = False
 
 
 class CloudRouteEvidenceRuntimeSummary(BaseModel):
@@ -291,6 +299,48 @@ class CloudRouteEvidenceRuntimeSummary(BaseModel):
     total_estimated_relative_cost_index: float | None = Field(default=None, ge=0.0)
 
 
+class CloudRolloutDecisionRuntimeEntry(BaseModel):
+    """Bounded recent decision entry for canary-only cloud rollout gating."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=1, max_length=128)
+    recorded_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    serving_target: str = Field(min_length=1, max_length=128)
+    backend_name: str = Field(min_length=1, max_length=128)
+    allowed: bool
+    disposition: str = Field(min_length=1, max_length=64)
+    bucket_percentage: float | None = Field(default=None, ge=0.0, le=100.0)
+    notes: list[str] = Field(default_factory=list)
+
+
+class CloudRolloutRuntimeSummary(BaseModel):
+    """Runtime control posture for real cloud traffic rollout."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    canary_percentage: float = Field(default=0.0, ge=0.0, le=100.0)
+    kill_switch_enabled: bool = False
+    auto_quarantine_failure_threshold: int | None = Field(default=None, ge=1)
+    recent_decisions: list[CloudRolloutDecisionRuntimeEntry] = Field(default_factory=list)
+    recent_allowed_count: int = Field(default=0, ge=0)
+    recent_blocked_count: int = Field(default=0, ge=0)
+    consecutive_failures_by_backend: dict[str, int] = Field(default_factory=dict)
+    last_updated_at: datetime | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
+class CloudRolloutUpdateRequest(BaseModel):
+    """Runtime mutation request for real cloud rollout controls."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    canary_percentage: float | None = Field(default=None, ge=0.0, le=100.0)
+    kill_switch_enabled: bool | None = None
+
+
 class HybridOperatorRuntimeSummary(BaseModel):
     """Operator-facing recent hybrid-routing decisions and controls."""
 
@@ -298,6 +348,7 @@ class HybridOperatorRuntimeSummary(BaseModel):
 
     remote_enabled_override: bool | None = None
     remote_effectively_enabled: bool = True
+    cloud_rollout: CloudRolloutRuntimeSummary = Field(default_factory=CloudRolloutRuntimeSummary)
     recent_route_examples: list[HybridRouteExample] = Field(default_factory=list)
     recent_route_example_count: int = Field(default=0, ge=0)
     recent_placement_distribution: PlacementDistributionRuntimeSummary = Field(

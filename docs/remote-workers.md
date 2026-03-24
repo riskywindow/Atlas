@@ -3,11 +3,18 @@
 For the broader Phase 7 hybrid operator/developer guide, start with
 [hybrid-workers.md](/Users/rishivinodkumar/Atlas/docs/hybrid-workers.md).
 
+For the Phase 8 real-cloud operator/developer guide, start with
+[real-cloud-workers.md](/Users/rishivinodkumar/Atlas/docs/real-cloud-workers.md).
+
 This document now covers both:
 
 - the Phase 7 CI-safe stub path, and
 - the Phase 8 first practical bring-up path for a real rented Linux/NVIDIA
   `vllm_cuda` worker.
+
+Treat this file as the packaging and discovery appendix. The new real-cloud guide is the
+better entry point when you need rollout, evidence, alias, and operator-context
+explained together.
 
 ## Goals
 
@@ -259,6 +266,83 @@ curl -s http://127.0.0.1:8090/internal/worker/ready | python -m json.tool
 ```bash
 curl -s http://127.0.0.1:8000/admin/remote-workers | python -m json.tool
 curl -s http://127.0.0.1:8000/admin/hybrid | python -m json.tool
+```
+
+## Safe Real-Cloud Rollout Runbook
+
+The first rented GPU should not go straight from "registered" to "fully serving."
+Switchyard now exposes an explicit runtime gate for `canary-only` cloud workers so the
+primary path can stay bounded and reversible.
+
+1. Mark the new worker `canary-only` before widening traffic:
+
+```bash
+curl -sS http://127.0.0.1:8000/admin/remote-workers/worker-1/canary-only \
+  -H 'content-type: application/json' \
+  -d '{"enabled":true,"reason":"phase8 first rented GPU canary"}' \
+  | python -m json.tool
+```
+
+2. Inspect current rollout posture:
+
+```bash
+curl -s http://127.0.0.1:8000/admin/hybrid/cloud-rollout | python -m json.tool
+curl -s http://127.0.0.1:8000/admin/hybrid | python -m json.tool
+```
+
+3. Open a small deterministic rollout window:
+
+```bash
+curl -sS http://127.0.0.1:8000/admin/hybrid/cloud-rollout \
+  -H 'content-type: application/json' \
+  -d '{"enabled":true,"canary_percentage":5.0,"kill_switch_enabled":false}' \
+  | python -m json.tool
+```
+
+4. Observe whether the worker is merely eligible or actually wins routing under the
+current policy:
+
+```bash
+curl -i -sS http://127.0.0.1:8000/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -H 'x-request-id: phase8-rollout-check-001' \
+  -H 'x-switchyard-routing-policy: burst_to_remote' \
+  -d '{
+    "model": "chat-shared",
+    "messages": [{"role": "user", "content": "Summarize the cloud rollout posture."}],
+    "max_output_tokens": 64
+  }'
+```
+
+Inspect `x-switchyard-route-decision`:
+
+- `protected_backends` still listing the cloud worker means the rollout gate blocked it,
+- `considered_backends` including the cloud worker means it was eligible for primary
+  routing,
+- the final `backend_name` still depends on the active policy and observed scores.
+
+5. Roll back immediately if transport, spend, or correctness looks wrong:
+
+```bash
+curl -sS http://127.0.0.1:8000/admin/hybrid/cloud-rollout \
+  -H 'content-type: application/json' \
+  -d '{"kill_switch_enabled":true}' \
+  | python -m json.tool
+
+curl -sS http://127.0.0.1:8000/admin/hybrid/remote-enabled \
+  -H 'content-type: application/json' \
+  -d '{"enabled":false,"reason":"phase8 rollback"}' \
+  | python -m json.tool
+```
+
+6. Once the worker is proven healthy, either widen the deterministic percentage in small
+steps or clear the `canary-only` tag after an operator review:
+
+```bash
+curl -sS http://127.0.0.1:8000/admin/remote-workers/worker-1/canary-only \
+  -H 'content-type: application/json' \
+  -d '{"enabled":false,"reason":"canary complete"}' \
+  | python -m json.tool
 ```
 
 ### Failure Modes

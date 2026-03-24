@@ -223,6 +223,8 @@ class RouteSelectionReasonCode(StrEnum):
     REMOTE_EVIDENCE_UNAVAILABLE = "remote_evidence_unavailable"
     REMOTE_QUARANTINED = "remote_quarantined"
     REMOTE_CANARY_ONLY = "remote_canary_only"
+    CLOUD_ROLLOUT = "cloud_rollout"
+    OPERATOR_OVERRIDE = "operator_override"
     MODEL_EXACT_EQUIVALENCE = "model_exact_equivalence"
     MODEL_APPROXIMATE_EQUIVALENCE = "model_approximate_equivalence"
     MODEL_ALIAS_UNSUPPORTED = "model_alias_unsupported"
@@ -413,6 +415,10 @@ class RouteAnnotations(BaseModel):
     affinity_disposition: AffinityDisposition = AffinityDisposition.NOT_REQUESTED
     rollout_disposition: RolloutDisposition = RolloutDisposition.NONE
     shadow_disposition: ShadowDisposition = ShadowDisposition.DISABLED
+    cloud_routing_reason: str | None = Field(default=None, min_length=1, max_length=64)
+    cloud_rollout_disposition: str | None = Field(default=None, min_length=1, max_length=64)
+    cloud_rollout_bucket_percentage: float | None = Field(default=None, ge=0.0, le=100.0)
+    operator_override_applied: bool = False
     notes: list[str] = Field(default_factory=list)
 
 
@@ -677,6 +683,7 @@ class RequestContext(BaseModel):
     trace_id: str | None = Field(default=None, min_length=1, max_length=128)
     internal_backend_pin: str | None = Field(default=None, min_length=1, max_length=128)
     blocked_backends: list[str] = Field(default_factory=list)
+    blocked_backend_reasons: dict[str, str] = Field(default_factory=dict)
     tenant_id: str = Field(default="default", min_length=1, max_length=128)
     tenant_tier: TenantTier = TenantTier.STANDARD
     session_id: str | None = Field(default=None, min_length=1, max_length=128)

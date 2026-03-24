@@ -108,6 +108,17 @@ from switchyard.schemas.benchmark import (
     WorkloadScenarioFamily,
 )
 from switchyard.schemas.chat import ChatCompletionRequest, ChatMessage, ChatRole, UsageStats
+from switchyard.schemas.forge import (
+    ForgeCampaignInspectionResponse,
+    ForgePromotionRuntimeSummary,
+    ForgeTrialInspectionSummary,
+)
+from switchyard.schemas.optimization import (
+    OptimizationCampaignArtifact,
+    OptimizationCandidateConfigurationArtifact,
+    OptimizationConstraintDimension,
+    OptimizationTrialArtifact,
+)
 from switchyard.schemas.routing import (
     AdmissionDecision,
     AffinityDisposition,
@@ -699,9 +710,7 @@ def validate_replayable_traces(
 
     for trace in traces:
         resolved_model_alias = (
-            model_alias
-            or trace.logical_alias
-            or trace.execution_target.model_alias
+            model_alias or trace.logical_alias or trace.execution_target.model_alias
         )
         _build_request_from_trace(
             trace=trace,
@@ -1085,9 +1094,7 @@ def summarize_records(records: list[BenchmarkRequestRecord]) -> BenchmarkSummary
     ttfts = [record.ttft_ms for record in records if record.ttft_ms is not None]
     output_tokens = [_output_tokens_for_record(record) for record in records]
     tps_values = [
-        record.tokens_per_second
-        for record in records
-        if record.tokens_per_second is not None
+        record.tokens_per_second for record in records if record.tokens_per_second is not None
     ]
     success_count = sum(1 for record in records if record.success)
     failure_count = len(records) - success_count
@@ -1157,9 +1164,7 @@ def _summarize_record_evidence(
             runtime_label = evidence.runtime.runtime_label or evidence.runtime.runtime_family
             runtime_counts[runtime_label] += 1
             if evidence.runtime.runtime_version is not None:
-                runtime_version_counts[
-                    f"{runtime_label}:{evidence.runtime.runtime_version}"
-                ] += 1
+                runtime_version_counts[f"{runtime_label}:{evidence.runtime.runtime_version}"] += 1
         identity = (
             evidence.backend_name
             if evidence.backend_instance_id is None
@@ -1209,9 +1214,7 @@ def _summarize_record_evidence(
         cloud_worker_identity_counts=dict(sorted(worker_identity_counts.items())),
         observed_error_count=observed_error_count,
         observed_budget_outcome_counts=dict(sorted(observed_budget_outcomes.items())),
-        avg_observed_queue_delay_ms=(
-            None if not queue_delays else _average(queue_delays)
-        ),
+        avg_observed_queue_delay_ms=(None if not queue_delays else _average(queue_delays)),
         avg_observed_remote_latency_ms=(
             None if not remote_latencies else _average(remote_latencies)
         ),
@@ -1232,8 +1235,7 @@ def _run_kind_for_records(
     estimated_count = class_counts.get(BenchmarkEvidenceClass.ESTIMATED, 0)
     mixed_count = class_counts.get(BenchmarkEvidenceClass.MIXED, 0)
     if observed_count > 0 and any(
-        count > 0
-        for count in (mock_count, configured_count, estimated_count, mixed_count)
+        count > 0 for count in (mock_count, configured_count, estimated_count, mixed_count)
     ):
         return BenchmarkRunKind.MIXED_EVIDENCE
     if mixed_count > 0:
@@ -1457,13 +1459,8 @@ def _confidence_notes_for_record(record: BenchmarkRequestRecord) -> list[str]:
         notes.append(
             f"predictor estimate confidence={context.predictor_condition.confidence.value}"
         )
-    if (
-        context.injected_condition is not None
-        and context.injected_condition.confidence is not None
-    ):
-        notes.append(
-            f"injected condition confidence={context.injected_condition.confidence.value}"
-        )
+    if context.injected_condition is not None and context.injected_condition.confidence is not None:
+        notes.append(f"injected condition confidence={context.injected_condition.confidence.value}")
     if context.observed_execution_path is HybridExecutionPath.UNKNOWN:
         notes.append("no observed execution path was captured")
     return notes
@@ -1479,9 +1476,8 @@ def _record_comparability_limitations(record: BenchmarkRequestRecord) -> list[st
         limitations.append("record relies on predictor-based cloud estimates")
     elif record.evidence_class is BenchmarkEvidenceClass.MIXED:
         limitations.append("record mixes observed cloud evidence with non-observed evidence")
-    elif (
-        record.evidence_class is BenchmarkEvidenceClass.UNSUPPORTED
-        and _is_local_only_record(record)
+    elif record.evidence_class is BenchmarkEvidenceClass.UNSUPPORTED and _is_local_only_record(
+        record
     ):
         limitations.append("record stayed local-only and carries no cloud-worker evidence")
     return limitations
@@ -1541,9 +1537,7 @@ def summarize_records_without_families(records: list[BenchmarkRequestRecord]) ->
     ttfts = [record.ttft_ms for record in records if record.ttft_ms is not None]
     output_tokens = [_output_tokens_for_record(record) for record in records]
     tps_values = [
-        record.tokens_per_second
-        for record in records
-        if record.tokens_per_second is not None
+        record.tokens_per_second for record in records if record.tokens_per_second is not None
     ]
     success_count = sum(1 for record in records if record.success)
     failure_count = len(records) - success_count
@@ -1610,10 +1604,19 @@ def load_benchmark_artifact_model(
     | CounterfactualSimulationArtifact
     | CounterfactualSimulationComparisonArtifact
     | PolicyRecommendationReportArtifact
+    | OptimizationCandidateConfigurationArtifact
+    | OptimizationTrialArtifact
+    | OptimizationCampaignArtifact
 ):
     """Load a benchmark or comparison artifact from disk."""
 
     payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    if "campaign_artifact_id" in payload:
+        return OptimizationCampaignArtifact.model_validate(payload)
+    if "trial_artifact_id" in payload:
+        return OptimizationTrialArtifact.model_validate(payload)
+    if "candidate_configuration_id" in payload and "candidate" in payload:
+        return OptimizationCandidateConfigurationArtifact.model_validate(payload)
     if "recommendation_report_id" in payload:
         return PolicyRecommendationReportArtifact.model_validate(payload)
     if "simulation_comparison_id" in payload:
@@ -1674,9 +1677,7 @@ def render_run_report_markdown(artifact: BenchmarkRunArtifact) -> str:
         else "routing_policy"
     )
     p95_ttft = (
-        artifact.summary.p95_ttft_ms
-        if artifact.summary.p95_ttft_ms is not None
-        else "unavailable"
+        artifact.summary.p95_ttft_ms if artifact.summary.p95_ttft_ms is not None else "unavailable"
     )
     deployment_target = (
         artifact.environment.deployment_target.value
@@ -1689,9 +1690,7 @@ def render_run_report_markdown(artifact: BenchmarkRunArtifact) -> str:
         else "unspecified"
     )
     config_profile_name = artifact.environment.config_profile_name or "unspecified"
-    topology_capture_source = (
-        artifact.environment.topology_capture_source or "not_captured"
-    )
+    topology_capture_source = artifact.environment.topology_capture_source or "not_captured"
     evidence_summary = _resolved_evidence_summary_for_artifact(artifact)
     run_kind = evidence_summary.run_kind if evidence_summary is not None else artifact.run_kind
     lines = [
@@ -1755,9 +1754,7 @@ def render_run_report_markdown(artifact: BenchmarkRunArtifact) -> str:
             f"- Control-plane git revision: `{git_sha}`",
         ]
     if artifact.summary.avg_tokens_per_second is not None:
-        lines.append(
-            f"| Average tokens/sec | `{artifact.summary.avg_tokens_per_second:.3f}` |"
-        )
+        lines.append(f"| Average tokens/sec | `{artifact.summary.avg_tokens_per_second:.3f}` |")
     if evidence_summary is not None:
         evidence_classes = _format_empty_distribution(
             _enum_key_distribution(evidence_summary.evidence_class_counts),
@@ -1803,10 +1800,7 @@ def render_run_report_markdown(artifact: BenchmarkRunArtifact) -> str:
                 f"- Cloud worker identities: {cloud_identities}",
                 f"- Cloud runtimes: {cloud_runtimes}",
                 f"- Cloud runtime versions: {cloud_runtime_versions}",
-                (
-                    "- Cloud placement tags: "
-                    f"providers={provider_tags} regions={region_tags}"
-                ),
+                (f"- Cloud placement tags: providers={provider_tags} regions={region_tags}"),
                 (
                     "- Observed runtime signals: "
                     f"avg_queue_delay_ms=`{evidence_summary.avg_observed_queue_delay_ms}` "
@@ -1977,10 +1971,7 @@ def render_run_report_markdown(artifact: BenchmarkRunArtifact) -> str:
                 "- Admission outcomes: "
                 f"{_format_empty_distribution(admission_outcomes, empty_label='none observed')}"
             ),
-            (
-                "- Queue waits: "
-                f"{_format_queue_wait_summary(queue_wait_summary)}"
-            ),
+            (f"- Queue waits: {_format_queue_wait_summary(queue_wait_summary)}"),
             (
                 "- Breaker phases: "
                 f"{_format_empty_distribution(breaker_phases, empty_label='none observed')}"
@@ -2074,8 +2065,7 @@ def render_target_comparison_report_markdown(
     )
     best_throughput_run = (
         artifact.comparison_summary.best_result_by_throughput
-        if artifact.comparison_summary
-        and artifact.comparison_summary.best_result_by_throughput
+        if artifact.comparison_summary and artifact.comparison_summary.best_result_by_throughput
         else "unavailable"
     )
     lines = [
@@ -2135,10 +2125,7 @@ def render_target_comparison_report_markdown(
         ),
     ]
     if artifact.comparability_assessment.limitations:
-        lines.append(
-            "- Limitations: "
-            + "; ".join(artifact.comparability_assessment.limitations)
-        )
+        lines.append("- Limitations: " + "; ".join(artifact.comparability_assessment.limitations))
     if artifact.left.evidence_summary is not None or artifact.right.evidence_summary is not None:
         left_evidence = (
             {}
@@ -2273,10 +2260,7 @@ def render_simulation_report_markdown(artifact: CounterfactualSimulationArtifact
         f"- Insufficient-data requests: `{artifact.summary.insufficient_data_count}`",
         f"- Projected average latency: `{artifact.summary.projected_avg_latency_ms}`",
         f"- Projected error rate: `{artifact.summary.projected_error_rate}`",
-        (
-            "- Projected average tokens/sec: "
-            f"`{artifact.summary.projected_avg_tokens_per_second}`"
-        ),
+        (f"- Projected average tokens/sec: `{artifact.summary.projected_avg_tokens_per_second}`"),
         "",
         "## Backend Shifts",
         f"- Observed backends: {_format_distribution(artifact.summary.observed_backend_counts)}",
@@ -2370,10 +2354,19 @@ def render_loaded_artifact_markdown(
         | CounterfactualSimulationArtifact
         | CounterfactualSimulationComparisonArtifact
         | PolicyRecommendationReportArtifact
+        | OptimizationCandidateConfigurationArtifact
+        | OptimizationTrialArtifact
+        | OptimizationCampaignArtifact
     ),
 ) -> str:
     """Render markdown for any supported benchmark artifact type."""
 
+    if isinstance(artifact, OptimizationCampaignArtifact):
+        return render_optimization_campaign_report_markdown(artifact)
+    if isinstance(artifact, OptimizationTrialArtifact):
+        return render_optimization_trial_report_markdown(artifact)
+    if isinstance(artifact, OptimizationCandidateConfigurationArtifact):
+        return render_optimization_candidate_report_markdown(artifact)
     if isinstance(artifact, BenchmarkRunArtifact):
         return render_run_report_markdown(artifact)
     if isinstance(artifact, BenchmarkTargetComparisonArtifact):
@@ -2395,12 +2388,339 @@ def render_artifact_bundle_markdown(
         | CounterfactualSimulationArtifact
         | CounterfactualSimulationComparisonArtifact
         | PolicyRecommendationReportArtifact
+        | OptimizationCandidateConfigurationArtifact
+        | OptimizationTrialArtifact
+        | OptimizationCampaignArtifact
     ],
 ) -> str:
     """Render a compact markdown bundle for one or more artifacts."""
 
     sections = [render_loaded_artifact_markdown(artifact) for artifact in artifacts]
     return "\n\n---\n\n".join(sections)
+
+
+def render_optimization_candidate_report_markdown(
+    artifact: OptimizationCandidateConfigurationArtifact,
+) -> str:
+    """Render a compact Markdown report for one candidate configuration artifact."""
+
+    lines = [
+        f"# Switchyard Optimization Candidate: {artifact.candidate_configuration_id}",
+        "",
+        f"- Campaign: `{artifact.campaign_id}`",
+        f"- Candidate kind: `{artifact.candidate.candidate_kind.value}`",
+        f"- Config profile: `{artifact.config_profile_id}`",
+        f"- Baseline profile: `{artifact.baseline_config_profile_id}`",
+        f"- Knob changes: `{len(artifact.knob_changes)}`",
+        f"- Objectives in scope: `{len(artifact.objectives_in_scope)}`",
+        f"- Constraints in scope: `{len(artifact.constraints_in_scope)}`",
+        (
+            "- Generation strategy: "
+            f"`{artifact.generation.strategy.value if artifact.generation is not None else 'none'}`"
+        ),
+        (
+            "- Eligibility: "
+            f"`{_candidate_eligibility_label(artifact)}`"
+        ),
+        (
+            "- Expected evidence kinds: "
+            f"`{', '.join(kind.value for kind in artifact.expected_evidence_kinds) or 'none'}`"
+        ),
+    ]
+    if artifact.knob_changes:
+        lines.extend(["", "## Knob Changes"])
+        lines.extend(
+            f"- `{change.knob_id}`: `{change.baseline_value}` -> `{change.candidate_value}`"
+            for change in artifact.knob_changes
+        )
+    return "\n".join(lines)
+
+
+def render_optimization_trial_report_markdown(
+    artifact: OptimizationTrialArtifact,
+) -> str:
+    """Render a compact Markdown report for one optimization trial artifact."""
+
+    evidence_kinds = ", ".join(
+        sorted({record.evidence_kind.value for record in artifact.evidence_records})
+    )
+    remote_budget_assessments = [
+        assessment
+        for assessment in artifact.constraint_assessments
+        if assessment.dimension
+        in {
+            OptimizationConstraintDimension.REMOTE_SHARE_PERCENT,
+            OptimizationConstraintDimension.REMOTE_REQUEST_BUDGET_PER_MINUTE,
+        }
+    ]
+    lines = [
+        f"# Switchyard Optimization Trial: {artifact.trial_artifact_id}",
+        "",
+        f"- Campaign: `{artifact.campaign_id}`",
+        f"- Candidate config: `{artifact.candidate_configuration.candidate_configuration_id}`",
+        f"- Config profile: `{artifact.candidate_configuration.config_profile_id}`",
+        f"- Trial status: `{artifact.result_status.value}`",
+        f"- Evidence kinds: `{evidence_kinds or 'none'}`",
+        f"- Objective assessments: `{len(artifact.objective_assessments)}`",
+        f"- Constraint assessments: `{len(artifact.constraint_assessments)}`",
+    ]
+    if artifact.recommendation_summary is not None:
+        recommendation = artifact.recommendation_summary
+        lines.extend(
+            [
+                f"- Recommendation: `{recommendation.disposition.value}`",
+                f"- Recommendation label: `{recommendation.recommendation_label.value}`",
+                (
+                    "- Recommendation evidence kinds: "
+                    f"`{', '.join(kind.value for kind in recommendation.evidence_kinds) or 'none'}`"
+                ),
+            ]
+        )
+    if artifact.promotion_decision is not None:
+        lines.append(f"- Promotion decision: `{artifact.promotion_decision.disposition.value}`")
+    if artifact.candidate_configuration.knob_changes:
+        lines.extend(["", "## Candidate Diff"])
+        lines.extend(
+            (f"- `{change.knob_id}`: `{change.baseline_value}` -> `{change.candidate_value}`")
+            for change in artifact.candidate_configuration.knob_changes
+        )
+    if artifact.recommendation_summary is not None:
+        recommendation = artifact.recommendation_summary
+        lines.extend(
+            [
+                "",
+                "## Workload Impact",
+                (f"- Helps: `{', '.join(recommendation.benefited_workload_families) or 'none'}`"),
+                (f"- Hurts: `{', '.join(recommendation.regressed_workload_families) or 'none'}`"),
+            ]
+        )
+    if remote_budget_assessments:
+        lines.extend(["", "## Remote Budget Posture"])
+        lines.extend(
+            (
+                f"- `{assessment.constraint_id}`: "
+                f"`{'satisfied' if assessment.satisfied else 'violated'}`"
+            )
+            for assessment in remote_budget_assessments
+        )
+    if artifact.stale_reason is not None:
+        lines.append(f"- Stale reason: `{artifact.stale_reason}`")
+    if artifact.invalidation_reason is not None:
+        lines.append(f"- Invalidation reason: `{artifact.invalidation_reason}`")
+    return "\n".join(lines)
+
+
+def render_optimization_campaign_report_markdown(
+    artifact: OptimizationCampaignArtifact,
+) -> str:
+    """Render a compact Markdown report for one optimization campaign artifact."""
+
+    evidence_kinds = ", ".join(
+        sorted({record.evidence_kind.value for record in artifact.evidence_records})
+    )
+    recommendation_counts: dict[str, int] = {}
+    helped_workload_families = sorted(
+        {
+            family
+            for recommendation in artifact.recommendation_summaries
+            for family in recommendation.benefited_workload_families
+        }
+    )
+    hurt_workload_families = sorted(
+        {
+            family
+            for recommendation in artifact.recommendation_summaries
+            for family in recommendation.regressed_workload_families
+        }
+    )
+    remote_budget_constraints = sorted(
+        {
+            assessment.constraint_id
+            for trial in artifact.trials
+            for assessment in trial.constraint_assessments
+            if assessment.dimension
+            in {
+                OptimizationConstraintDimension.REMOTE_SHARE_PERCENT,
+                OptimizationConstraintDimension.REMOTE_REQUEST_BUDGET_PER_MINUTE,
+            }
+        }
+    )
+    for recommendation in artifact.recommendation_summaries:
+        recommendation_counts[recommendation.disposition.value] = (
+            recommendation_counts.get(recommendation.disposition.value, 0) + 1
+        )
+    lines = [
+        f"# Switchyard Optimization Campaign: {artifact.campaign_artifact_id}",
+        "",
+        f"- Campaign ID: `{artifact.campaign.campaign_id}`",
+        f"- Optimization profile: `{artifact.campaign.optimization_profile_id}`",
+        f"- Objective: `{artifact.campaign.objective.value}`",
+        f"- Status: `{artifact.result_status.value}`",
+        f"- Candidate configurations: `{1 + len(artifact.candidate_configurations)}`",
+        f"- Trials: `{len(artifact.trials)}`",
+        f"- Recommendations: `{len(artifact.recommendation_summaries)}`",
+        f"- Promotion decisions: `{len(artifact.promotion_decisions)}`",
+        f"- Evidence kinds: `{evidence_kinds or 'none'}`",
+        (
+            "- Recommendation status counts: "
+            f"`{_recommendation_counts_label(recommendation_counts)}`"
+        ),
+        (f"- Helps workload families: `{', '.join(helped_workload_families) or 'none'}`"),
+        (f"- Hurts workload families: `{', '.join(hurt_workload_families) or 'none'}`"),
+        (
+            "- Remote budget constraints involved: "
+            f"`{', '.join(remote_budget_constraints) or 'none'}`"
+        ),
+    ]
+    if artifact.campaign.default_workload_set_ids:
+        lines.append(f"- Workload sets: `{', '.join(artifact.campaign.default_workload_set_ids)}`")
+    if artifact.trials:
+        lines.extend(["", "## Trials"])
+        lines.extend(
+            (
+                f"- `{trial.trial_artifact_id}`: "
+                f"`{trial.candidate_configuration.config_profile_id}` "
+                f"recommendation=`{_trial_recommendation_label(trial)}` "
+                f"evidence=`{_trial_evidence_label(trial)}`"
+            )
+            for trial in artifact.trials
+        )
+    if artifact.stale_reason is not None:
+        lines.append(f"- Stale reason: `{artifact.stale_reason}`")
+    if artifact.invalidation_reason is not None:
+        lines.append(f"- Invalidation reason: `{artifact.invalidation_reason}`")
+    return "\n".join(lines)
+
+
+def render_forge_campaign_inspection_markdown(
+    inspection: ForgeCampaignInspectionResponse,
+) -> str:
+    """Render a compact Markdown report for campaign inspection summaries."""
+
+    lines = ["# Switchyard Forge Stage A Inspection", ""]
+    if not inspection.campaigns:
+        lines.append("- No campaign artifacts were provided.")
+        return "\n".join(lines)
+    for campaign in inspection.campaigns:
+        lines.extend(
+            [
+                f"## Campaign `{campaign.campaign_artifact_id}`",
+                f"- Campaign ID: `{campaign.campaign_id}`",
+                f"- Objective: `{campaign.objective}`",
+                (
+                    "- Evidence kinds: "
+                    f"`{', '.join(kind.value for kind in campaign.evidence_kinds) or 'none'}`"
+                ),
+                (
+                    "- Recommendation counts: "
+                    f"`{_recommendation_counts_label(campaign.recommendation_status_counts)}`"
+                ),
+                (
+                    "- Helps workload families: "
+                    f"`{', '.join(campaign.helped_workload_families) or 'none'}`"
+                ),
+                (
+                    "- Hurts workload families: "
+                    f"`{', '.join(campaign.hurt_workload_families) or 'none'}`"
+                ),
+                (
+                    "- Remote budget constraints: "
+                    f"`{', '.join(campaign.remote_budget_constraint_ids) or 'none'}`"
+                ),
+                "",
+                "### Trials",
+            ]
+        )
+        lines.extend(
+            (
+                f"- `{trial.trial_artifact_id}`: "
+                f"recommendation=`{_inspection_trial_recommendation_label(trial)}` "
+                f"evidence=`{', '.join(kind.value for kind in trial.evidence_kinds) or 'none'}` "
+                f"helps=`{', '.join(trial.helped_workload_families) or 'none'}` "
+                f"hurts=`{', '.join(trial.hurt_workload_families) or 'none'}`"
+            )
+            for trial in campaign.trials
+        )
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def render_forge_promotion_runtime_markdown(
+    summary: ForgePromotionRuntimeSummary,
+) -> str:
+    """Render a compact Markdown report for live Forge promotion state."""
+
+    lines = [
+        "# Switchyard Forge Stage A Promotion",
+        "",
+        f"- Rollout artifact: `{summary.rollout_artifact_id or 'none'}`",
+        f"- Lifecycle state: `{_promotion_lifecycle_label(summary)}`",
+        f"- Active config profile: `{summary.active_config_profile_id}`",
+        f"- Candidate config profile: `{summary.candidate_config_profile_id or 'none'}`",
+        f"- Rollout mode: `{summary.rollout_mode.value}`",
+        f"- Canary percentage: `{summary.canary_percentage}`",
+        f"- Promotion disposition: `{summary.promotion_disposition.value}`",
+        (
+            "- Evidence kinds: "
+            f"`{', '.join(kind.value for kind in summary.evidence_kinds) or 'none'}`"
+        ),
+    ]
+    if summary.comparison is not None:
+        lines.extend(
+            [
+                "",
+                "## Canary Comparison",
+                f"- Comparison artifact: `{summary.comparison.comparison_artifact_id}`",
+                f"- Recommendation: `{summary.comparison.recommendation_disposition.value}`",
+                (
+                    "- Helps workload families: "
+                    f"`{', '.join(summary.comparison.benefited_workload_families) or 'none'}`"
+                ),
+                (
+                    "- Hurts workload families: "
+                    f"`{', '.join(summary.comparison.regressed_workload_families) or 'none'}`"
+                ),
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _candidate_eligibility_label(
+    artifact: OptimizationCandidateConfigurationArtifact,
+) -> str:
+    if artifact.eligibility is None:
+        return "unknown"
+    return artifact.eligibility.status.value
+
+
+def _recommendation_counts_label(counts: Mapping[str, int]) -> str:
+    rendered = ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))
+    return rendered or "none"
+
+
+def _trial_recommendation_label(artifact: OptimizationTrialArtifact) -> str:
+    if artifact.recommendation_summary is None:
+        return "none"
+    return artifact.recommendation_summary.disposition.value
+
+
+def _trial_evidence_label(artifact: OptimizationTrialArtifact) -> str:
+    rendered = ", ".join(
+        sorted({record.evidence_kind.value for record in artifact.evidence_records})
+    )
+    return rendered or "none"
+
+
+def _inspection_trial_recommendation_label(trial: ForgeTrialInspectionSummary) -> str:
+    if trial.recommendation_disposition is None:
+        return "none"
+    return trial.recommendation_disposition.value
+
+
+def _promotion_lifecycle_label(summary: ForgePromotionRuntimeSummary) -> str:
+    if summary.lifecycle_state is None:
+        return "none"
+    return summary.lifecycle_state.value
 
 
 def write_json_model(model: BaseModel, output_path: Path) -> Path:
@@ -2424,9 +2744,7 @@ def _format_distribution(distribution: Mapping[str, int]) -> str:
 
     if not distribution:
         return "`unavailable`"
-    return ", ".join(
-        f"`{key}`: `{value}`" for key, value in sorted(distribution.items())
-    )
+    return ", ".join(f"`{key}`: `{value}`" for key, value in sorted(distribution.items()))
 
 
 def _format_empty_distribution(
@@ -2486,12 +2804,10 @@ def _comparison_id(
     left_artifact: BenchmarkRunArtifact,
     right_artifact: BenchmarkRunArtifact,
 ) -> str:
-    digest = hashlib.sha1(
-        f"{left_artifact.run_id}|{right_artifact.run_id}".encode()
-    ).hexdigest()[:12]
-    return (
-        f"{left_artifact.timestamp.strftime('%Y%m%dT%H%M%SZ')}_compare_{digest}"
-    )
+    digest = hashlib.sha1(f"{left_artifact.run_id}|{right_artifact.run_id}".encode()).hexdigest()[
+        :12
+    ]
+    return f"{left_artifact.timestamp.strftime('%Y%m%dT%H%M%SZ')}_compare_{digest}"
 
 
 def _comparison_side_summary(
@@ -2528,12 +2844,12 @@ def _comparability_assessment(
     left_artifact: BenchmarkRunArtifact,
     right_artifact: BenchmarkRunArtifact,
 ) -> BenchmarkComparabilityAssessment:
-    left_summary = _resolved_evidence_summary_for_artifact(
-        left_artifact
-    ) or BenchmarkEvidenceSummary()
-    right_summary = _resolved_evidence_summary_for_artifact(
-        right_artifact
-    ) or BenchmarkEvidenceSummary()
+    left_summary = (
+        _resolved_evidence_summary_for_artifact(left_artifact) or BenchmarkEvidenceSummary()
+    )
+    right_summary = (
+        _resolved_evidence_summary_for_artifact(right_artifact) or BenchmarkEvidenceSummary()
+    )
     shared_classes = sorted(
         set(left_summary.evidence_class_counts) & set(right_summary.evidence_class_counts),
         key=lambda item: item.value,
@@ -2541,9 +2857,7 @@ def _comparability_assessment(
     limitations: list[str] = []
     directly_comparable = True
     if left_summary.run_kind != right_summary.run_kind:
-        limitations.append(
-            "comparison spans different run kinds and is not apples-to-apples"
-        )
+        limitations.append("comparison spans different run kinds and is not apples-to-apples")
         directly_comparable = False
     if (
         left_summary.observed_cloud_request_count > 0
@@ -2552,16 +2866,10 @@ def _comparability_assessment(
         right_summary.observed_cloud_request_count > 0
         and left_summary.observed_cloud_request_count == 0
     ):
-        limitations.append(
-            "only one side contains direct observed cloud-worker execution"
-        )
+        limitations.append("only one side contains direct observed cloud-worker execution")
         directly_comparable = False
-    if (
-        left_summary.mock_request_count > 0
-        and right_summary.mock_request_count == 0
-    ) or (
-        right_summary.mock_request_count > 0
-        and left_summary.mock_request_count == 0
+    if (left_summary.mock_request_count > 0 and right_summary.mock_request_count == 0) or (
+        right_summary.mock_request_count > 0 and left_summary.mock_request_count == 0
     ):
         limitations.append("comparison mixes mock-remote evidence with non-mock evidence")
         directly_comparable = False
@@ -3103,9 +3411,8 @@ def _hybrid_comparison_summary(
     modeled_cost_deltas = [
         delta.modeled_cost_delta for delta in deltas if delta.modeled_cost_delta is not None
     ]
-    budget_exhausted_delta = (
-        sum(1 for record in right_records if _budget_exhausted(record))
-        - sum(1 for record in left_records if _budget_exhausted(record))
+    budget_exhausted_delta = sum(1 for record in right_records if _budget_exhausted(record)) - sum(
+        1 for record in left_records if _budget_exhausted(record)
     )
     notes: list[str] = []
     if beneficial_count > 0:
@@ -3154,14 +3461,10 @@ def _observed_network_penalty_delta(
     right: BenchmarkRequestRecord,
 ) -> float | None:
     left_penalty = (
-        None
-        if left.hybrid_context is None
-        else left.hybrid_context.observed_network_penalty_ms
+        None if left.hybrid_context is None else left.hybrid_context.observed_network_penalty_ms
     )
     right_penalty = (
-        None
-        if right.hybrid_context is None
-        else right.hybrid_context.observed_network_penalty_ms
+        None if right.hybrid_context is None else right.hybrid_context.observed_network_penalty_ms
     )
     return _optional_delta(right_penalty, left_penalty)
 
@@ -3265,8 +3568,7 @@ def get_git_sha() -> str | None:
                 ["git", "rev-parse", "--short=12", "HEAD"],
                 stderr=DEVNULL,
                 text=True,
-            )
-            .strip()
+            ).strip()
             or None
         )
     except (CalledProcessError, FileNotFoundError):
@@ -3454,13 +3756,13 @@ def _predictor_condition_from_route_decision(
     modeled_cost = deployment.cost_profile.relative_cost_index
     confidence = (
         RecommendationConfidence.LOW
-        if deployment.readiness_hints.cold_start_likely
-        or expected_rtt is None
+        if deployment.readiness_hints.cold_start_likely or expected_rtt is None
         else RecommendationConfidence.MEDIUM
     )
     execution_path = (
         HybridExecutionPath.REMOTE_ONLY
-        if deployment.execution_mode in {
+        if deployment.execution_mode
+        in {
             ExecutionModeLabel.REMOTE_WORKER,
             ExecutionModeLabel.EXTERNAL_SERVICE,
         }
@@ -3625,13 +3927,10 @@ def _deployment_placement_evidence(
         return None
     if source is CloudEvidenceSource.OBSERVED_RUNTIME:
         instance = _observed_backend_instance(route_decision)
-        if (
-            instance is not None
-            and (
-                instance.placement.provider is not None
-                or instance.placement.region is not None
-                or instance.placement.zone is not None
-            )
+        if instance is not None and (
+            instance.placement.provider is not None
+            or instance.placement.region is not None
+            or instance.placement.zone is not None
         ):
             return CloudPlacementEvidence(
                 source=source,
@@ -3665,13 +3964,10 @@ def _deployment_cost_evidence(
         return None
     if source is CloudEvidenceSource.OBSERVED_RUNTIME:
         instance = _observed_backend_instance(route_decision)
-        if (
-            instance is not None
-            and (
-                instance.cost_profile.relative_cost_index is not None
-                or instance.cost_profile.budget_bucket is not None
-                or instance.cost_profile.currency is not None
-            )
+        if instance is not None and (
+            instance.cost_profile.relative_cost_index is not None
+            or instance.cost_profile.budget_bucket is not None
+            or instance.cost_profile.currency is not None
         ):
             return CloudCostEvidence(
                 source=source,
@@ -3746,13 +4042,10 @@ def _resolved_placement_source(route_decision: RouteDecision | None) -> CloudEvi
     ):
         instance_id = route_decision.execution_observation.backend_instance_id
         for instance in deployment.instances:
-            if (
-                instance.instance_id == instance_id
-                and (
-                    instance.placement.provider is not None
-                    or instance.placement.region is not None
-                    or instance.placement.zone is not None
-                )
+            if instance.instance_id == instance_id and (
+                instance.placement.provider is not None
+                or instance.placement.region is not None
+                or instance.placement.zone is not None
             ):
                 return CloudEvidenceSource.OBSERVED_RUNTIME
     if (
@@ -3768,13 +4061,10 @@ def _resolved_cost_source(route_decision: RouteDecision | None) -> CloudEvidence
     if route_decision is None or route_decision.selected_deployment is None:
         return None
     observed_instance = _observed_backend_instance(route_decision)
-    if (
-        observed_instance is not None
-        and (
-            observed_instance.cost_profile.relative_cost_index is not None
-            or observed_instance.cost_profile.budget_bucket is not None
-            or observed_instance.cost_profile.currency is not None
-        )
+    if observed_instance is not None and (
+        observed_instance.cost_profile.relative_cost_index is not None
+        or observed_instance.cost_profile.budget_bucket is not None
+        or observed_instance.cost_profile.currency is not None
     ):
         return CloudEvidenceSource.OBSERVED_RUNTIME
     cost_profile = route_decision.selected_deployment.cost_profile
@@ -4777,8 +5067,7 @@ def _resolved_workload_warmup(
 ) -> BenchmarkWarmupConfig:
     resolved = warmup or BenchmarkWarmupConfig()
     if not any(
-        item.family is WorkloadScenarioFamily.REPEATED_PREFIX
-        for item in _scenario_items(scenario)
+        item.family is WorkloadScenarioFamily.REPEATED_PREFIX for item in _scenario_items(scenario)
     ):
         return resolved
     if resolved.request_count > 0:

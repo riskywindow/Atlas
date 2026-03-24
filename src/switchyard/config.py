@@ -370,7 +370,7 @@ class PolicyRolloutSettings(BaseModel):
 
 
 class HybridExecutionSettings(BaseModel):
-    """Phase 7 hybrid local/remote execution guardrails and operator budgets."""
+    """Hybrid local/remote execution guardrails and operator budgets."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -409,8 +409,20 @@ class RemoteTenantSpilloverRule(BaseModel):
     allow_high_priority_bypass: bool = False
 
 
+class CloudTrafficRolloutSettings(BaseModel):
+    """Phase 8 runtime controls for exposing canary-only cloud backends."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    canary_percentage: float = Field(default=0.0, ge=0.0, le=100.0)
+    kill_switch_enabled: bool = False
+    auto_quarantine_failure_threshold: int | None = Field(default=3, ge=1, le=100)
+    max_recent_decisions: int = Field(default=50, ge=1, le=500)
+
+
 class RemoteWorkerLifecycleSettings(BaseModel):
-    """Phase 7 worker registration and heartbeat posture."""
+    """Remote-worker registration, heartbeat, and lifecycle posture."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -440,22 +452,30 @@ class RemoteWorkerLifecycleSettings(BaseModel):
 
 
 class Phase7ControlPlaneSettings(BaseModel):
-    """Phase 7 hybrid execution and remote worker controls."""
+    """Legacy config bucket for hybrid, remote-worker, and Phase 8 cloud-rollout controls.
+
+    The `phase7.*` settings path is retained for backward-compatible configuration and
+    benchmark snapshots. New real-cloud rollout controls live here until a later config
+    migration intentionally renames the public settings path.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     hybrid_execution: HybridExecutionSettings = Field(default_factory=HybridExecutionSettings)
+    cloud_rollout: CloudTrafficRolloutSettings = Field(
+        default_factory=CloudTrafficRolloutSettings
+    )
     remote_workers: RemoteWorkerLifecycleSettings = Field(
         default_factory=RemoteWorkerLifecycleSettings
     )
 
 
 class OptimizationSettings(BaseModel):
-    """Optimization-ready bounds and evidence posture for later Stage A workflows."""
+    """Optimization-ready bounds and evidence posture for Phase 9 Forge Stage A."""
 
     model_config = ConfigDict(extra="forbid")
 
-    profile_id: str = Field(default="phase7-stage-a-baseline", min_length=1, max_length=128)
+    profile_id: str = Field(default="phase9-stage-a-baseline", min_length=1, max_length=128)
     objective: CounterfactualObjective = CounterfactualObjective.BALANCED
     allowlisted_routing_policies: tuple[RoutingPolicy, ...] = (
         RoutingPolicy.BALANCED,

@@ -22,7 +22,9 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 
 from switchyard.adapters.base import BackendAdapter
+from switchyard.bench.campaigns import inspect_forge_stage_a_campaigns
 from switchyard.control.admission import AdmissionLease, AdmissionRejectedError
+from switchyard.control.shadow import ShadowLaunchPlan
 from switchyard.control.spillover import (
     RemotePermit,
     SpilloverPermitRejectedError,
@@ -36,12 +38,15 @@ from switchyard.diagnostics import (
 )
 from switchyard.gateway.dependencies import GatewayServices, get_services
 from switchyard.logging import bind_request_context, get_logger
+from switchyard.optimization import build_forge_stage_a_campaign
 from switchyard.router.features import routing_feature_runtime_summary
 from switchyard.schemas.admin import (
     AliasCompatibilityRuntimeEntry,
     AliasRoutingOverrideRequest,
     AliasRoutingOverrideState,
     BackendRuntimeSummary,
+    CloudRolloutRuntimeSummary,
+    CloudRolloutUpdateRequest,
     DeploymentDiagnosticsResponse,
     HybridBudgetResetResponse,
     HybridBudgetRuntimeSummary,
@@ -61,6 +66,16 @@ from switchyard.schemas.chat import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
+from switchyard.schemas.forge import (
+    ForgeCampaignInspectionRequest,
+    ForgeCampaignInspectionResponse,
+    ForgePromotionApplyRequest,
+    ForgePromotionCompareRequest,
+    ForgePromotionDecisionRequest,
+    ForgePromotionProposeRequest,
+    ForgePromotionRuntimeSummary,
+)
+from switchyard.schemas.optimization import ForgeStageACampaign
 from switchyard.schemas.routing import (
     AdmissionDecision,
     AdmissionDecisionState,
@@ -201,6 +216,175 @@ async def admin_policy_rollout(
     return services.policy_rollout.inspect_state()
 
 
+@router.get("/admin/forge/stage-a", response_model=ForgeStageACampaign)
+async def admin_forge_stage_a(
+    services: GatewayServices = Depends(get_services),
+) -> ForgeStageACampaign:
+    """Return the typed Forge Stage A campaign inspection snapshot."""
+
+    return build_forge_stage_a_campaign(services.settings)
+
+
+@router.post(
+    "/admin/forge/stage-a/campaigns/inspect",
+    response_model=ForgeCampaignInspectionResponse,
+)
+async def inspect_admin_forge_stage_a_campaigns(
+    request: ForgeCampaignInspectionRequest,
+) -> ForgeCampaignInspectionResponse:
+    """Summarize one or more Forge campaign artifacts for operator inspection."""
+
+    return inspect_forge_stage_a_campaigns(
+        campaign_artifacts=request.campaign_artifacts,
+        comparison_artifacts=request.comparison_artifacts,
+    )
+
+
+@router.get(
+    "/admin/forge/stage-a/promotion",
+    response_model=ForgePromotionRuntimeSummary,
+)
+async def admin_forge_stage_a_promotion(
+    services: GatewayServices = Depends(get_services),
+) -> ForgePromotionRuntimeSummary:
+    """Return the live Forge Stage A promotion and rollback posture."""
+
+    return services.forge_promotion.inspect_state()
+
+
+@router.post(
+    "/admin/forge/stage-a/promotion/propose",
+    response_model=ForgePromotionRuntimeSummary,
+)
+async def propose_admin_forge_stage_a_promotion(
+    request: ForgePromotionProposeRequest,
+    services: GatewayServices = Depends(get_services),
+) -> ForgePromotionRuntimeSummary:
+    """Propose one reviewed Forge Stage A trial as a promotion-ready profile."""
+
+    try:
+        return services.forge_promotion.propose(request)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/admin/forge/stage-a/promotion/approve",
+    response_model=ForgePromotionRuntimeSummary,
+)
+async def approve_admin_forge_stage_a_promotion(
+    request: ForgePromotionDecisionRequest,
+    services: GatewayServices = Depends(get_services),
+) -> ForgePromotionRuntimeSummary:
+    """Approve one proposed Forge Stage A rollout without activating it yet."""
+
+    try:
+        return services.forge_promotion.approve(request)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/admin/forge/stage-a/promotion/apply",
+    response_model=ForgePromotionRuntimeSummary,
+)
+async def apply_admin_forge_stage_a_promotion(
+    request: ForgePromotionApplyRequest,
+    services: GatewayServices = Depends(get_services),
+) -> ForgePromotionRuntimeSummary:
+    """Activate one approved Forge Stage A profile as a bounded canary."""
+
+    try:
+        return services.forge_promotion.apply(request)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/admin/forge/stage-a/promotion/compare",
+    response_model=ForgePromotionRuntimeSummary,
+)
+async def compare_admin_forge_stage_a_promotion(
+    request: ForgePromotionCompareRequest,
+    services: GatewayServices = Depends(get_services),
+) -> ForgePromotionRuntimeSummary:
+    """Attach artifact-backed canary comparison evidence to the active rollout."""
+
+    try:
+        return services.forge_promotion.compare(request)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/admin/forge/stage-a/promotion/promote-default",
+    response_model=ForgePromotionRuntimeSummary,
+)
+async def promote_default_admin_forge_stage_a_promotion(
+    request: ForgePromotionDecisionRequest,
+    services: GatewayServices = Depends(get_services),
+) -> ForgePromotionRuntimeSummary:
+    """Promote a compared canary profile to the runtime default."""
+
+    try:
+        return services.forge_promotion.promote_default(request)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/admin/forge/stage-a/promotion/reset",
+    response_model=ForgePromotionRuntimeSummary,
+)
+async def reset_admin_forge_stage_a_promotion(
+    request: ForgePromotionDecisionRequest,
+    services: GatewayServices = Depends(get_services),
+) -> ForgePromotionRuntimeSummary:
+    """Reset the live Forge Stage A promotion controller to the baseline profile."""
+
+    try:
+        return services.forge_promotion.reset(request)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post(
+    "/admin/forge/stage-a/promotion/reject",
+    response_model=ForgePromotionRuntimeSummary,
+)
+async def reject_admin_forge_stage_a_promotion(
+    request: ForgePromotionDecisionRequest,
+    services: GatewayServices = Depends(get_services),
+) -> ForgePromotionRuntimeSummary:
+    """Reject the current Forge Stage A rollout proposal or active canary."""
+
+    try:
+        return services.forge_promotion.reject(request)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
 @router.post("/admin/policy-rollout", response_model=PolicyRolloutRuntimeSummary)
 async def update_admin_policy_rollout(
     update: PolicyRolloutUpdateRequest,
@@ -268,6 +452,25 @@ async def admin_hybrid(
     """Return recent operator-facing hybrid routing state."""
 
     return _hybrid_operator_summary(services=services)
+
+
+@router.get("/admin/hybrid/cloud-rollout", response_model=CloudRolloutRuntimeSummary)
+async def admin_hybrid_cloud_rollout(
+    services: GatewayServices = Depends(get_services),
+) -> CloudRolloutRuntimeSummary:
+    """Return runtime controls for canary-only cloud backends."""
+
+    return services.cloud_rollout.inspect_state()
+
+
+@router.post("/admin/hybrid/cloud-rollout", response_model=CloudRolloutRuntimeSummary)
+async def update_hybrid_cloud_rollout(
+    update: CloudRolloutUpdateRequest,
+    services: GatewayServices = Depends(get_services),
+) -> CloudRolloutRuntimeSummary:
+    """Mutate runtime rollout posture for canary-only cloud backends."""
+
+    return services.cloud_rollout.update(update)
 
 
 @router.post("/admin/hybrid/remote-enabled", response_model=HybridOperatorRuntimeSummary)
@@ -504,14 +707,24 @@ async def create_chat_completion(
             if explicit_backend_pin is not None
             else (None if alias_override is None else alias_override.pinned_backend)
         ),
-        blocked_backends=(
-            []
-            if explicit_backend_pin is not None or alias_override is None
-            else list(alias_override.disabled_backends)
-        ),
         tenant_id=_resolve_tenant_id(request),
         tenant_tier=_resolve_tenant_tier(request),
         session_id=_resolve_session_id(request),
+    )
+    (
+        blocked_backend_reasons,
+        registered_cloud_rollout_decisions,
+    ) = _blocked_backend_reasons(
+        services=services,
+        context=route_context,
+        serving_target=chat_request.model,
+        alias_override=alias_override,
+    )
+    route_context = route_context.model_copy(
+        update={
+            "blocked_backends": sorted(blocked_backend_reasons),
+            "blocked_backend_reasons": blocked_backend_reasons,
+        }
     )
     execution_target = _execution_target_from_context(
         model_alias=chat_request.model,
@@ -553,6 +766,14 @@ async def create_chat_completion(
     decision.admission_decision = admission_lease.decision
     if decision.telemetry_metadata is not None:
         decision.telemetry_metadata.admission_control_enabled = services.admission.enabled
+    _annotate_operator_override(
+        decision=decision,
+        alias_override=alias_override,
+    )
+    _annotate_registered_cloud_rollout(
+        decision=decision,
+        rollout_decisions=registered_cloud_rollout_decisions,
+    )
     route_reason = (
         decision.explanation.compact_reason()
         if decision.explanation is not None
@@ -641,7 +862,7 @@ async def create_chat_completion(
         )
 
     try:
-        chat_response, final_backend_name = await _generate_with_fallback(
+        chat_response, final_backend_name, shadow_plan = await _generate_with_fallback(
             chat_request=chat_request,
             context=route_context,
             services=services,
@@ -695,6 +916,7 @@ async def create_chat_completion(
         context=route_context,
         decision=decision,
         primary_backend_name=final_backend_name,
+        plan=shadow_plan,
     )
     for key, value in _route_metadata_headers(decision).items():
         response.headers[key] = value
@@ -908,11 +1130,17 @@ async def _stream_chat_completion(
                 )
                 if remote_permit is not None:
                     services.spillover.record_remote_instability()
+                    quarantine_triggered = _record_remote_transport_failure(
+                        services=services,
+                        backend_name=backend_name,
+                        error=str(exc),
+                    )
                     services.operator.record_remote_transport_error(
                         request_id=context.request_id,
                         backend_name=backend_name,
                         error=str(exc),
                         cooldown_triggered=services.spillover.inspect_state().cooldown_active,
+                        quarantine_triggered=quarantine_triggered,
                     )
                 continue
 
@@ -961,6 +1189,12 @@ async def _stream_chat_completion(
                 fallback_used=attempt_number > 1,
                 final_outcome="succeeded",
             )
+            shadow_plan = services.shadow.plan(
+                request=chat_request,
+                context=context,
+                decision=decision,
+                primary_backend_name=backend_name,
+            )
             _record_execution_observation(
                 services,
                 decision,
@@ -980,12 +1214,17 @@ async def _stream_chat_completion(
                 backend_name=backend_name,
                 fallback_used=attempt_number > 1,
             )
+            _record_remote_backend_success(
+                services=services,
+                backend_name=backend_name,
+            )
             _launch_streaming_shadow_traffic(
                 services=services,
                 chat_request=chat_request,
                 context=context,
                 decision=decision,
                 primary_backend_name=backend_name,
+                plan=shadow_plan,
             )
             await services.trace_capture.capture_chat_completion(
                 request_timestamp=request_timestamp,
@@ -1070,7 +1309,7 @@ async def _generate_with_fallback(
     decision: RouteDecision,
     route: str,
     method: str,
-) -> tuple[ChatCompletionResponse, str]:
+) -> tuple[ChatCompletionResponse, str, ShadowLaunchPlan | None]:
     decision_policy = decision.policy.value
     execution_errors: list[str] = []
     remote_permit: RemotePermit | None = None
@@ -1192,11 +1431,17 @@ async def _generate_with_fallback(
                 )
                 if remote_permit is not None:
                     services.spillover.record_remote_instability()
+                    quarantine_triggered = _record_remote_transport_failure(
+                        services=services,
+                        backend_name=backend_name,
+                        error=str(exc),
+                    )
                     services.operator.record_remote_transport_error(
                         request_id=context.request_id,
                         backend_name=backend_name,
                         error=str(exc),
                         cooldown_triggered=services.spillover.inspect_state().cooldown_active,
+                        quarantine_triggered=quarantine_triggered,
                     )
                 continue
 
@@ -1228,6 +1473,12 @@ async def _generate_with_fallback(
                 fallback_used=attempt_number > 1,
                 final_outcome="succeeded",
             )
+            shadow_plan = services.shadow.plan(
+                request=chat_request,
+                context=context,
+                decision=decision,
+                primary_backend_name=backend_name,
+            )
             _record_execution_observation(
                 services,
                 decision,
@@ -1247,8 +1498,12 @@ async def _generate_with_fallback(
                 backend_name=backend_name,
                 fallback_used=attempt_number > 1,
             )
+            _record_remote_backend_success(
+                services=services,
+                backend_name=backend_name,
+            )
             services.circuit_breaker.record_success(backend_name)
-            return chat_response, backend_name
+            return chat_response, backend_name, shadow_plan
     finally:
         services.spillover.release_remote_permit(remote_permit)
 
@@ -1392,9 +1647,7 @@ def _record_execution_observation(
     final_outcome: str,
 ) -> None:
     queue_delay_ms = (
-        None
-        if decision.admission_decision is None
-        else decision.admission_decision.queue_wait_ms
+        None if decision.admission_decision is None else decision.admission_decision.queue_wait_ms
     )
     decision.execution_observation = RouteExecutionObservation(
         executed_backend=executed_backend,
@@ -1408,9 +1661,7 @@ def _record_execution_observation(
         final_outcome=final_outcome,
     )
     remote_candidate_count = sum(
-        1
-        for candidate in decision.considered_backends
-        if candidate.startswith("remote-worker:")
+        1 for candidate in decision.considered_backends if candidate.startswith("remote-worker:")
     )
     services.operator.record_route_example(
         decision=decision,
@@ -1432,6 +1683,38 @@ def _record_execution_observation(
         )
 
 
+def _record_remote_backend_success(
+    *,
+    services: GatewayServices,
+    backend_name: str,
+) -> None:
+    if backend_name.startswith("remote-worker:"):
+        services.cloud_rollout.record_backend_success(backend_name)
+
+
+def _record_remote_transport_failure(
+    *,
+    services: GatewayServices,
+    backend_name: str,
+    error: str,
+) -> bool:
+    if not backend_name.startswith("remote-worker:"):
+        return False
+    threshold_reached = services.cloud_rollout.record_backend_failure(backend_name)
+    if not threshold_reached:
+        return False
+    for worker in services.remote_workers.snapshot().workers:
+        if worker.backend_name != backend_name or worker.quarantined:
+            continue
+        services.remote_workers.set_quarantined(
+            worker.worker_id,
+            enabled=True,
+            reason=f"auto-quarantined after repeated transport failures: {error[:160]}",
+        )
+        return True
+    return False
+
+
 def _update_session_affinity(
     *,
     services: GatewayServices,
@@ -1444,9 +1727,19 @@ def _update_session_affinity(
         return
     if not services.session_affinity.enabled:
         return
+    annotations = _ensure_route_annotations(decision)
+    skip_reason = None
     if decision.canary_policy is not None and decision.canary_policy.enabled:
+        skip_reason = "canary routing is active"
+    elif annotations.operator_override_applied:
+        skip_reason = "operator override selected the current path"
+    elif annotations.cloud_routing_reason == "spillover":
+        skip_reason = "spillover selected the current path"
+    elif annotations.cloud_rollout_disposition in {"selected", "explicit_canary"}:
+        skip_reason = "cloud rollout selected the current path"
+    if skip_reason is not None:
         _ensure_route_annotations(decision).notes.append(
-            "session affinity update skipped because canary routing is active"
+            f"session affinity update skipped because {skip_reason}"
         )
         return
     affinity_key = decision.session_affinity_key or SessionAffinityKey(
@@ -1467,7 +1760,6 @@ def _update_session_affinity(
             else "sticky route refreshed after successful execution"
         ),
     )
-    annotations = _ensure_route_annotations(decision)
     if previous_backend == backend_name:
         if annotations.affinity_disposition is AffinityDisposition.NOT_REQUESTED:
             annotations.affinity_disposition = AffinityDisposition.CREATED
@@ -1487,13 +1779,15 @@ def _schedule_shadow_traffic(
     context: RequestContext,
     decision: RouteDecision,
     primary_backend_name: str,
+    plan: ShadowLaunchPlan | None = None,
 ) -> None:
-    plan = services.shadow.plan(
-        request=chat_request,
-        context=context,
-        decision=decision,
-        primary_backend_name=primary_backend_name,
-    )
+    if plan is None:
+        plan = services.shadow.plan(
+            request=chat_request,
+            context=context,
+            decision=decision,
+            primary_backend_name=primary_backend_name,
+        )
     if plan is None:
         return
     background_tasks.add_task(
@@ -1514,13 +1808,15 @@ def _launch_streaming_shadow_traffic(
     context: RequestContext,
     decision: RouteDecision,
     primary_backend_name: str,
+    plan: ShadowLaunchPlan | None = None,
 ) -> None:
-    plan = services.shadow.plan(
-        request=chat_request,
-        context=context,
-        decision=decision,
-        primary_backend_name=primary_backend_name,
-    )
+    if plan is None:
+        plan = services.shadow.plan(
+            request=chat_request,
+            context=context,
+            decision=decision,
+            primary_backend_name=primary_backend_name,
+        )
     if plan is None:
         return
     services.shadow.launch(
@@ -1651,6 +1947,113 @@ def _resolve_session_id(request: Request) -> str | None:
     return normalized
 
 
+def _blocked_backend_reasons(
+    *,
+    services: GatewayServices,
+    context: RequestContext,
+    serving_target: str,
+    alias_override: AliasRoutingOverrideState | None,
+) -> tuple[dict[str, str], dict[str, tuple[str, float | None]]]:
+    reasons: dict[str, str] = {}
+    rollout_decisions: dict[str, tuple[str, float | None]] = {}
+    if alias_override is not None:
+        for backend_name in alias_override.disabled_backends:
+            reasons[backend_name] = "operator disabled backend for this serving target"
+    for worker in services.remote_workers.snapshot().workers:
+        if serving_target not in worker.serving_targets:
+            continue
+        if worker.quarantined:
+            reasons[worker.backend_name] = "registered cloud worker is quarantined"
+            continue
+        if worker.lifecycle_state.value == "draining":
+            reasons[worker.backend_name] = "registered cloud worker is draining"
+            continue
+        if not worker.usable:
+            reasons[worker.backend_name] = (
+                worker.eligibility_reasons[0]
+                if worker.eligibility_reasons
+                else "registered cloud worker is not currently usable"
+            )
+            continue
+        if "canary-only" in worker.tags:
+            cloud_rollout = services.cloud_rollout.evaluate_canary_only_candidate(
+                context=context,
+                serving_target=serving_target,
+                backend_name=worker.backend_name,
+            )
+            rollout_decisions[worker.backend_name] = (
+                cloud_rollout.disposition,
+                cloud_rollout.bucket_percentage,
+            )
+            if not cloud_rollout.allowed:
+                reasons[worker.backend_name] = cloud_rollout.reason or "canary-only backend blocked"
+    return reasons, rollout_decisions
+
+
+def _annotate_registered_cloud_rollout(
+    *,
+    decision: RouteDecision,
+    rollout_decisions: dict[str, tuple[str, float | None]],
+) -> None:
+    if not rollout_decisions:
+        return
+    annotations = _ensure_route_annotations(decision)
+    if decision.backend_name in rollout_decisions:
+        disposition, bucket_percentage = rollout_decisions[decision.backend_name]
+        annotations.cloud_rollout_disposition = disposition
+        annotations.cloud_rollout_bucket_percentage = (
+            None if bucket_percentage is None else round(bucket_percentage, 3)
+        )
+        if disposition == "selected" and annotations.cloud_routing_reason is None:
+            annotations.cloud_routing_reason = "cloud_rollout"
+        if (
+            disposition == "selected"
+            and decision.explanation is not None
+            and RouteSelectionReasonCode.CLOUD_ROLLOUT
+            not in decision.explanation.selection_reason_codes
+        ):
+            decision.explanation.selection_reason_codes.append(
+                RouteSelectionReasonCode.CLOUD_ROLLOUT
+            )
+            note = "registered canary-only cloud worker admitted by rollout"
+            if note not in decision.explanation.selected_reason:
+                decision.explanation.selected_reason.append(note)
+            if note not in annotations.notes:
+                annotations.notes.append(note)
+        return
+    first_disposition, first_bucket_percentage = next(iter(rollout_decisions.values()))
+    annotations.cloud_rollout_disposition = first_disposition
+    annotations.cloud_rollout_bucket_percentage = (
+        None if first_bucket_percentage is None else round(first_bucket_percentage, 3)
+    )
+
+
+def _annotate_operator_override(
+    *,
+    decision: RouteDecision,
+    alias_override: AliasRoutingOverrideState | None,
+) -> None:
+    if alias_override is None or alias_override.pinned_backend is None:
+        return
+    annotations = _ensure_route_annotations(decision)
+    annotations.operator_override_applied = True
+    if decision.backend_name.startswith("remote-worker:"):
+        annotations.cloud_routing_reason = "operator_override"
+    override_note = f"operator override pinned backend={alias_override.pinned_backend}"
+    if override_note not in annotations.notes:
+        annotations.notes.append(override_note)
+    if decision.explanation is not None:
+        if (
+            RouteSelectionReasonCode.OPERATOR_OVERRIDE
+            not in decision.explanation.selection_reason_codes
+        ):
+            decision.explanation.selection_reason_codes.append(
+                RouteSelectionReasonCode.OPERATOR_OVERRIDE
+            )
+        if override_note not in decision.explanation.selected_reason:
+            decision.explanation.selected_reason.append(override_note)
+
+
 def _route_metadata_headers(decision: RouteDecision) -> dict[str, str]:
     payload = json.dumps(
         decision.model_dump(mode="json", exclude_none=True),
@@ -1677,6 +2080,7 @@ def _hybrid_operator_summary(
     )
     return services.operator.inspect_state(
         remote_effectively_enabled=services.spillover.enabled,
+        cloud_rollout_runtime=services.cloud_rollout.inspect_state(),
         spillover_runtime=services.spillover.inspect_state(),
         remote_worker_snapshot=resolved_remote_worker_snapshot,
         known_serving_targets=_known_serving_targets(
@@ -1801,9 +2205,7 @@ async def _admit_request(
                 tenant_id=context.tenant_id,
                 request_class=context.request_class.value,
                 state=decision.state.value,
-                reason_code=(
-                    None if decision.reason_code is None else decision.reason_code.value
-                ),
+                reason_code=(None if decision.reason_code is None else decision.reason_code.value),
                 queue_depth=0,
                 queue_wait_ms=decision.queue_wait_ms,
                 status_code=200,

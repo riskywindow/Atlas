@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from switchyard.schemas.admin import (
     AliasCompatibilityRuntimeEntry,
     AliasRoutingOverrideState,
+    CloudRolloutRuntimeSummary,
     CloudRouteEvidenceRuntimeSummary,
     CloudWorkerControlRuntimeEntry,
     HybridBudgetRuntimeSummary,
@@ -21,7 +22,10 @@ from switchyard.schemas.admin import (
 from switchyard.schemas.backend import BackendInstance
 from switchyard.schemas.benchmark import CloudEvidenceSource
 from switchyard.schemas.routing import RouteDecision, RoutingPolicy
-from switchyard.schemas.worker import RegisteredRemoteWorkerRecord, RegisteredRemoteWorkerSnapshot
+from switchyard.schemas.worker import (
+    RegisteredRemoteWorkerRecord,
+    RegisteredRemoteWorkerSnapshot,
+)
 
 
 @dataclass(slots=True)
@@ -59,6 +63,9 @@ class HybridOperatorService:
             notes.extend(decision.explanation.selected_reason)
         if decision.annotations is not None:
             notes.extend(decision.annotations.notes)
+        shadow_target_backend = None if decision.shadow_decision is None else (
+            decision.shadow_decision.target_backend or decision.shadow_decision.target_alias
+        )
         admission_reason_code = (
             None
             if decision.admission_decision is None
@@ -122,6 +129,37 @@ class HybridOperatorService:
                 ),
                 fallback_used=fallback_used,
                 final_outcome=final_outcome,
+                affinity_disposition=(
+                    None
+                    if decision.annotations is None
+                    else decision.annotations.affinity_disposition.value
+                ),
+                operator_override_applied=(
+                    False
+                    if decision.annotations is None
+                    else decision.annotations.operator_override_applied
+                ),
+                cloud_routing_reason=(
+                    None
+                    if decision.annotations is None
+                    else decision.annotations.cloud_routing_reason
+                ),
+                cloud_rollout_disposition=(
+                    None
+                    if decision.annotations is None
+                    else decision.annotations.cloud_rollout_disposition
+                ),
+                cloud_rollout_bucket_percentage=(
+                    None
+                    if decision.annotations is None
+                    else decision.annotations.cloud_rollout_bucket_percentage
+                ),
+                shadow_disposition=(
+                    None
+                    if decision.annotations is None
+                    else decision.annotations.shadow_disposition.value
+                ),
+                shadow_target_backend=shadow_target_backend,
                 route_reason_codes=route_reason_codes,
                 admission_reason_code=admission_reason_code,
                 remote_candidate_count=remote_candidate_count,
@@ -143,6 +181,7 @@ class HybridOperatorService:
         backend_name: str,
         error: str,
         cooldown_triggered: bool,
+        quarantine_triggered: bool = False,
     ) -> None:
         self._recent_transport_errors.appendleft(
             RemoteTransportErrorRuntimeEntry(
@@ -150,6 +189,7 @@ class HybridOperatorService:
                 backend_name=backend_name,
                 error=error,
                 cooldown_triggered=cooldown_triggered,
+                quarantine_triggered=quarantine_triggered,
             )
         )
 
@@ -157,6 +197,7 @@ class HybridOperatorService:
         self,
         *,
         remote_effectively_enabled: bool,
+        cloud_rollout_runtime: CloudRolloutRuntimeSummary | None = None,
         spillover_runtime: HybridExecutionRuntimeSummary | None = None,
         remote_worker_snapshot: RegisteredRemoteWorkerSnapshot | None = None,
         known_serving_targets: list[str] | None = None,
@@ -293,6 +334,11 @@ class HybridOperatorService:
         return HybridOperatorRuntimeSummary(
             remote_enabled_override=self.remote_enabled_override,
             remote_effectively_enabled=remote_effectively_enabled,
+            cloud_rollout=(
+                CloudRolloutRuntimeSummary()
+                if cloud_rollout_runtime is None
+                else cloud_rollout_runtime
+            ),
             recent_route_examples=list(self._recent_route_examples),
             recent_route_example_count=len(self._recent_route_examples),
             recent_placement_distribution=PlacementDistributionRuntimeSummary(

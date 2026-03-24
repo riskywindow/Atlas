@@ -15,28 +15,28 @@ The goal is **not** to build a thin LLM wrapper. The goal is to build a serious 
 ---
 
 ## Current phase
-**Phase 8: first real cloud-backed execution and Linux/NVIDIA worker bring-up**
+**Phase 9: Forge Stage A evidence-driven autotuning**
 
-Phase 8 builds on the Phase 7 hybrid local/remote control plane, typed worker topology,
-registration and lifecycle posture, explainable routing, deterministic request
-features, historical summaries, and offline simulation. The new work is about turning
-the cloud-ready boundary into the first real cloud-backed execution path without giving
-up the Mac-first developer workflow, CI portability, or backend-agnostic control-plane
-contracts.
+Phase 9 builds on the completed Phase 8 control plane: Mac-first local development,
+network-addressable local Apple workers, hybrid local/remote execution, benchmark and
+replay artifacts, explainable and adaptive routing, operator-visible cloud placement /
+spend / health posture, and the first real Linux/NVIDIA cloud-worker path.
 
-Phase 8 introduces the first real Linux/NVIDIA worker path behind the generic worker
-contract, a concrete `vllm_cuda`-style remote backend, honest cloud-backed benchmark
-and reporting semantics, operator-visible placement/spend/health posture, and bounded,
-canaryable, reversible rollout controls. Observed cloud/runtime evidence must remain
-explicitly distinct from estimates, mock injections, and offline predictors.
+Phase 9 introduces the first Forge Stage A layer without turning Switchyard into a
+runtime code-generation project. The focus is a typed optimization surface, explicit
+campaign and trial lineage, offline and replay-backed candidate evaluation, explainable
+recommendations, safe promotion through config profiles and bounded canaries, and
+operator/admin inspection for tuning workflows. Observed evidence must remain
+explicitly distinct from replayed, simulated, estimated, or mock evidence in every
+typed surface and artifact.
 
-### Definition of done for Phase 8
-Phase 8 is complete when all of the following are true:
+### Definition of done for Phase 9
+Phase 9 is complete when all of the following are true:
 1. The repo keeps a clean Python workspace with linting, typing, and tests.
-2. There are at least two real backend adapter paths behind the shared contracts:
+2. There are still at least two real Mac-native backend adapter paths behind the shared contracts:
    - `mlx_lm`
    - `vllm_metal`
-3. There is a first real Linux/NVIDIA remote worker path behind the shared worker
+3. There is still a real Linux/NVIDIA remote worker path behind the shared worker
    contract:
    - `vllm_cuda` or an equivalent `vllm_cuda`-style remote backend deployment.
 4. The FastAPI gateway still serves `GET /healthz`, `GET /readyz`, and
@@ -79,13 +79,27 @@ Phase 8 is complete when all of the following are true:
     execution paths and preserve that information in serializable outputs.
 19. Observed cloud/runtime evidence is kept distinct from estimates, predictor outputs,
     and mock results in typed schemas, operator surfaces, and benchmark/report artifacts.
-20. The first real cloud path is canaryable, bounded, and reversible:
+20. A typed optimization surface exposes explicit knobs, objectives, constraints, and
+    promotion guardrails rather than inferring them from ad hoc runtime state.
+21. Forge Stage A campaign and trial lineage are serializable, diffable, and usable by
+    offline, replay-backed, and admin-inspection workflows.
+22. Candidate generation and comparison remain backend-agnostic and preserve alias
+    compatibility across local Apple and remote cloud workers.
+23. Recommendations are explainable, conservative, and reversible:
+    each recommendation carries explicit evidence posture, comparison scope, and a safe
+    no-change outcome when evidence is insufficient.
+24. Live promotion stays bounded and reversible through config profiles and rollout
+    controls:
     canaries stay explicit,
-    budget and kill-switch posture are operator-visible,
-    and rollback does not require a control-plane refactor.
-21. Deployment docs and runbooks cover local host-native backends, portable
-    control-plane images, and the first rented-GPU bring-up path without requiring
-    actual GPU rental in CI.
+    rollback does not require a control-plane refactor,
+    and operator-visible kill switches remain available.
+25. Operator/admin inspection surfaces expose the current Forge Stage A campaign
+    posture, evidence requirements, candidate lineage, and promotion constraints.
+26. Deployment docs and runbooks cover local host-native backends, portable
+    control-plane images, the first rented-GPU bring-up path, and Phase 9 preparation
+    for later Forge Stage B without requiring actual GPU rental in CI.
+27. Phase 9 prepares for later Forge Stage B but does not implement kernel generation,
+    runtime code generation, or automatic unreviewed promotion.
 
 ---
 
@@ -97,31 +111,36 @@ Phase 8 is complete when all of the following are true:
 - During the Mac-first phase, **real local model backends should run host-native on macOS**.
 - Containerized services are fine for infra such as Postgres, Redis, Prometheus, Grafana, and the OpenTelemetry Collector.
 - Do **not** require CUDA-only or Triton-only runtime dependencies in the default
-  control-plane workspace for Phase 8.
+  control-plane workspace for Phase 9.
 - Linux/NVIDIA worker dependencies should stay isolated to explicit worker extras,
   images, or packaging boundaries.
 - Keep the design explicitly portable so later phases can add more remote GPU workers
   beyond the first real `vllm_cuda` path.
 
 ### Scope constraints
-- Phase 8 should preserve **two real Mac-native backend paths** behind the same adapter boundary:
+- Phase 9 should preserve **two real Mac-native backend paths** behind the same adapter boundary:
   - `mlx_lm`
   - `vllm_metal`
-- Phase 8 should add the first real Linux/NVIDIA remote worker path behind the generic
-  worker contract without making the control plane hardware-aware.
+- Phase 9 should preserve the first real Linux/NVIDIA remote worker path behind the
+  generic worker contract without making the control plane hardware-aware.
 - A single logical model alias may map to multiple backend implementations. Registration, routing, and benchmarks should preserve that abstraction instead of assuming one alias implies one runtime.
 - A single logical backend deployment may map to multiple explicit worker instances with
   distinct network addresses. Inventory should stay typed and portable to future remote
   workers.
 - Observed cloud/runtime evidence must remain explicitly distinct from estimates,
   predictors, and mock results in typed outputs.
-- Avoid premature multi-service complexity. In Phase 8, a **single Python workspace** is still preferred over many separate packages.
+- Optimization must be driven by explicit knobs, objectives, and constraints rather than
+  hidden heuristics or mutable process-local state.
+- Candidate recommendations must be explainable and reversible.
+- Live promotion requires bounded rollout and rollback support.
+- Avoid premature multi-service complexity. In Phase 9, a **single Python workspace** is still preferred over many separate packages.
 - Do not build a frontend UI yet.
 - A small `kind` deployment path is in scope, but avoid a production-grade Kubernetes
   platform build-out.
-- Do not introduce Ray into the request path in Phase 8.
-- Prepare for later Forge Stage A by preserving typed evidence, config, and replay
-  surfaces, but do not implement Forge Stage A in Phase 8.
+- Do not introduce Ray into the request path in Phase 9.
+- Prepare for later Forge Stage B by preserving typed evidence, optimization lineage,
+  and replay/simulation surfaces, but do not implement kernel or code generation in
+  Phase 9.
 
 ### Quality constraints
 - Prefer **small vertical slices** over giant speculative scaffolding.
@@ -158,7 +177,7 @@ Phase 8 is complete when all of the following are true:
 
 ---
 
-## Recommended stack for Phase 8
+## Recommended stack for Phase 9
 - Python 3.12
 - `uv` for environment and dependency management
 - FastAPI
@@ -469,15 +488,19 @@ When choosing between multiple valid next steps, prefer this order:
 6. Preserve adapter portability for future `vllm_cuda`, cloud, and remote workers
 7. Update deployment docs, routing docs, and local dev ergonomics
 
-## Phase 8 implementation priorities
+## Phase 9 implementation priorities
 When choosing between multiple valid next steps, prefer this order:
 1. Keep the shared contracts, routing core, and Phase 7 test baseline clean
-2. Add the first real Linux/NVIDIA worker path behind the existing worker protocol
-3. Preserve cross-backend alias compatibility across local Apple and remote cloud paths
-4. Make observed cloud/runtime evidence explicit and keep it distinct from estimates or mock results
-5. Keep the first real cloud path canaryable, budget-bounded, and operator-reversible
-6. Preserve the Mac-first local developer workflow and portable control-plane packaging
-7. Extend docs, runbooks, and benchmark/report semantics before expanding cloud automation
+2. Keep the Phase 8 real cloud path, hybrid guardrails, and operator posture intact
+3. Add typed optimization surfaces, campaign/trial lineage, and explicit objective /
+   constraint handling in small slices
+4. Extend offline, replay, and simulation-backed comparison workflows before adding live
+   promotion behavior
+5. Keep observed evidence explicit and distinct from replayed, simulated, estimated, or
+   mock evidence everywhere
+6. Keep recommendations explainable, conservative, bounded, and reversible
+7. Preserve the Mac-first local developer workflow and portable control-plane packaging
+8. Extend docs, runbooks, and admin inspection before attempting broader automation
 
 ---
 

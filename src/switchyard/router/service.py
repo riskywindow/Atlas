@@ -6,6 +6,7 @@ from switchyard.adapters.registry import AdapterRegistry
 from switchyard.control.affinity import SessionAffinityService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
+from switchyard.control.cloud_rollout import CloudTrafficRolloutService
 from switchyard.control.locality import PrefixLocalityService
 from switchyard.control.policy_rollout import PolicyRolloutService
 from switchyard.control.spillover import RemoteSpilloverControlService
@@ -50,6 +51,7 @@ class RouterService:
         session_affinity: SessionAffinityService | None = None,
         prefix_locality: PrefixLocalityService | None = None,
         canary_routing: CanaryRoutingService | None = None,
+        cloud_rollout: CloudTrafficRolloutService | None = None,
         policy_registry: PolicyRegistry | None = None,
         policy_rollout: PolicyRolloutService | None = None,
         spillover: RemoteSpilloverControlService | None = None,
@@ -59,6 +61,7 @@ class RouterService:
         self._session_affinity = session_affinity
         self._prefix_locality = prefix_locality
         self._canary_routing = canary_routing
+        self._cloud_rollout = cloud_rollout
         self._policy_registry = policy_registry or PolicyRegistry()
         self._policy_rollout = policy_rollout
         self._spillover = spillover
@@ -110,12 +113,30 @@ class RouterService:
         remote_candidates = [
             snapshot for snapshot in target_snapshot.deployments if _is_remote_candidate(snapshot)
         ]
+        cloud_rollout_decisions: dict[str, tuple[str, float | None]] = {}
+        canary_policy = None
+        canary_selection = None
+        if (
+            sticky_backend_name is None
+            and context.internal_backend_pin is None
+            and self._canary_routing is not None
+        ):
+            canary_policy = self._canary_routing.match_policy(serving_target=request.model)
+            if canary_policy is not None:
+                canary_selection = self._canary_routing.select(
+                    context=context,
+                    policy=canary_policy,
+                )
         spillover_guardrail_triggers: list[str] = []
 
         for snapshot in target_snapshot.deployments:
             if snapshot.name in context.blocked_backends:
+                blocked_reason = context.blocked_backend_reasons.get(
+                    snapshot.name,
+                    "operator disabled backend for this serving target",
+                )
                 blocked_rejection = CandidateRejection(
-                    reason="operator disabled backend for this serving target",
+                    reason=blocked_reason,
                     category="protection",
                 )
                 rejected_backends[snapshot.name] = blocked_rejection.reason
@@ -152,6 +173,30 @@ class RouterService:
                 context=context,
                 policy=context.policy,
             )
+            if (
+                rejection is None
+                and self._cloud_rollout is not None
+                and _is_remote_candidate(snapshot)
+                and snapshot.metadata.get("remote_canary_only") == "true"
+            ):
+                cloud_rollout = self._cloud_rollout.evaluate_canary_only_candidate(
+                    context=context,
+                    serving_target=request.model,
+                    backend_name=snapshot.name,
+                    explicitly_selected_backend=(
+                        None if canary_selection is None else canary_selection.selected_backend
+                    ),
+                )
+                cloud_rollout_decisions[snapshot.name] = (
+                    cloud_rollout.disposition,
+                    cloud_rollout.bucket_percentage,
+                )
+                if not cloud_rollout.allowed:
+                    rejection = CandidateRejection(
+                        reason=cloud_rollout.reason or "canary-only backend blocked",
+                        category="protection",
+                        reason_codes=[RouteSelectionReasonCode.REMOTE_CANARY_ONLY],
+                    )
             if (
                 rejection is None
                 and self._spillover is not None
@@ -293,7 +338,6 @@ class RouterService:
                 "local admission overflow allowed explicit remote spillover",
                 *chosen_rationale,
             ]
-        canary_policy = None
         if (
             context.internal_backend_pin is not None
             and self._canary_routing is not None
@@ -337,16 +381,9 @@ class RouterService:
                     annotations.notes.append(detail)
                 fallback_backends = ranked[1:]
         else:
-            canary_service = self._canary_routing
-            if canary_service is not None:
-                canary_policy = canary_service.match_policy(serving_target=request.model)
             if canary_policy is not None:
-                assert canary_service is not None
                 annotations.notes.append(f"canary policy '{canary_policy.policy_name}' matched")
-                canary_selection = canary_service.select(
-                    context=context,
-                    policy=canary_policy,
-                )
+                assert canary_selection is not None
                 annotations.rollout_disposition = canary_selection.disposition
                 if canary_selection.reason is not None:
                     annotations.notes.append(canary_selection.reason)
@@ -404,6 +441,44 @@ class RouterService:
             ]
         considered_backends = [chosen.snapshot.name, *fallback_backends]
         policy_reference = primary_evaluation.policy_reference
+        if chosen.snapshot.name in cloud_rollout_decisions:
+            rollout_disposition, rollout_bucket_percentage = cloud_rollout_decisions[
+                chosen.snapshot.name
+            ]
+            annotations.cloud_rollout_disposition = rollout_disposition
+            annotations.cloud_rollout_bucket_percentage = (
+                None
+                if rollout_bucket_percentage is None
+                else round(rollout_bucket_percentage, 3)
+            )
+            if rollout_disposition in {"selected", "explicit_canary"}:
+                annotations.cloud_routing_reason = "cloud_rollout"
+                selected_reason_codes.append(RouteSelectionReasonCode.CLOUD_ROLLOUT)
+        elif cloud_rollout_decisions:
+            first_rollout_disposition, first_rollout_bucket_percentage = next(
+                iter(cloud_rollout_decisions.values())
+            )
+            annotations.cloud_rollout_disposition = first_rollout_disposition
+            annotations.cloud_rollout_bucket_percentage = (
+                None
+                if first_rollout_bucket_percentage is None
+                else round(first_rollout_bucket_percentage, 3)
+            )
+        if (
+            annotations.cloud_routing_reason is None
+            and chosen.snapshot.name.startswith("remote-worker:")
+        ):
+            if annotations.rollout_disposition is RolloutDisposition.CANARY:
+                annotations.cloud_routing_reason = "canary"
+            elif (
+                context.force_remote_candidates_only
+                or RouteSelectionReasonCode.LOCAL_ADMISSION_SPILLOVER in selected_reason_codes
+                or RouteSelectionReasonCode.HYBRID_BURST_REMOTE in selected_reason_codes
+                or RouteSelectionReasonCode.HYBRID_REMOTE_IF_LOCAL_UNHEALTHY
+                in selected_reason_codes
+                or RouteSelectionReasonCode.REMOTE_ESCALATION in selected_reason_codes
+            ):
+                annotations.cloud_routing_reason = "spillover"
 
         return RouteDecision(
             backend_name=chosen.snapshot.name,

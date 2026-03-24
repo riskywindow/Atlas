@@ -28,6 +28,7 @@ from switchyard.bench.artifacts import (
     parse_prometheus_text,
     render_artifact_bundle_markdown,
     render_comparison_report_markdown,
+    render_forge_campaign_inspection_markdown,
     render_loaded_artifact_markdown,
     render_run_report_markdown,
     render_simulation_comparison_report_markdown,
@@ -40,6 +41,7 @@ from switchyard.bench.artifacts import (
     validate_replayable_traces,
     write_artifact,
 )
+from switchyard.bench.campaigns import inspect_forge_stage_a_campaigns
 from switchyard.bench.recommendations import build_policy_recommendation_report
 from switchyard.bench.simulation import compare_candidate_policies_offline
 from switchyard.bench.workloads import build_workload_manifest
@@ -87,6 +89,7 @@ from switchyard.schemas.benchmark import (
     ComparisonSourceKind,
     CounterfactualObjective,
     CounterfactualSimulationComparisonArtifact,
+    DeployedTopologyEndpoint,
     ExecutionTarget,
     ExecutionTargetType,
     ExplainablePolicySpec,
@@ -98,6 +101,7 @@ from switchyard.schemas.benchmark import (
     HybridExecutionContext,
     HybridExecutionPath,
     PolicyRecommendationReportArtifact,
+    RecommendationConfidence,
     RemoteBudgetOutcome,
     RemoteTemperature,
     ReplayMode,
@@ -109,6 +113,38 @@ from switchyard.schemas.benchmark import (
     WorkloadScenarioFamily,
 )
 from switchyard.schemas.chat import UsageStats
+from switchyard.schemas.optimization import (
+    ForgeCandidateKind,
+    ForgeEvidenceSourceKind,
+    OptimizationArtifactEvidenceKind,
+    OptimizationArtifactSourceType,
+    OptimizationArtifactStatus,
+    OptimizationCampaignArtifact,
+    OptimizationCampaignMetadata,
+    OptimizationCandidateConfigurationArtifact,
+    OptimizationComparisonOperator,
+    OptimizationConstraint,
+    OptimizationConstraintAssessment,
+    OptimizationConstraintDimension,
+    OptimizationConstraintStrength,
+    OptimizationEvidenceRecord,
+    OptimizationGoal,
+    OptimizationKnobChange,
+    OptimizationObjectiveAssessment,
+    OptimizationObjectiveMetric,
+    OptimizationObjectiveTarget,
+    OptimizationPromotionDecision,
+    OptimizationPromotionDisposition,
+    OptimizationRecommendationDisposition,
+    OptimizationRecommendationSummary,
+    OptimizationScope,
+    OptimizationScopeKind,
+    OptimizationTopologyLineage,
+    OptimizationTrialArtifact,
+    OptimizationTrialIdentity,
+    OptimizationWorkloadSet,
+    OptimizationWorkloadSourceKind,
+)
 from switchyard.schemas.routing import (
     AdmissionDecision,
     AdmissionDecisionState,
@@ -116,6 +152,7 @@ from switchyard.schemas.routing import (
     CanaryPolicy,
     CircuitBreakerPhase,
     CircuitBreakerState,
+    PolicyRolloutMode,
     RequestClass,
     RolloutDisposition,
     RouteAnnotations,
@@ -124,10 +161,266 @@ from switchyard.schemas.routing import (
     RoutingPolicy,
     ShadowDisposition,
     ShadowPolicy,
+    TopologySnapshotReference,
     WorkloadShape,
 )
 from switchyard.schemas.worker import RemoteWorkerAuthMode
 from switchyard.telemetry import configure_telemetry
+
+
+def _optimization_workload_set() -> OptimizationWorkloadSet:
+    return OptimizationWorkloadSet(
+        workload_set_id="phase9-cache-locality",
+        source_kind=OptimizationWorkloadSourceKind.BUILT_IN_SCENARIO_FAMILY,
+        serving_targets=["chat-shared"],
+        scenario_families=[WorkloadScenarioFamily.REPEATED_PREFIX],
+    )
+
+
+def _optimization_topology_lineage() -> OptimizationTopologyLineage:
+    return OptimizationTopologyLineage(
+        topology_references=[
+            TopologySnapshotReference(
+                topology_snapshot_id="topology-phase9-001",
+                capture_source="runtime-inspection",
+                captured_at=datetime(2026, 3, 22, 12, 0, tzinfo=UTC),
+                artifact_run_id="benchmark-phase9-001",
+            )
+        ],
+        deployed_topology=[
+            DeployedTopologyEndpoint(
+                endpoint_id="gateway-primary",
+                role="gateway",
+                address="http://127.0.0.1:8000",
+                transport=WorkerTransportType.HTTP,
+                execution_mode=ExecutionModeLabel.HOST_NATIVE,
+            )
+        ],
+        worker_instance_inventory=[
+            BackendInstance(
+                instance_id="worker-local-1",
+                endpoint=BackendNetworkEndpoint(
+                    base_url="http://127.0.0.1:8001",
+                    transport=WorkerTransportType.HTTP,
+                ),
+                backend_type=BackendType.VLLM_METAL,
+                device_class=DeviceClass.APPLE_GPU,
+                execution_mode=ExecutionModeLabel.HOST_NATIVE,
+            )
+        ],
+    )
+
+
+def _baseline_trial_identity() -> OptimizationTrialIdentity:
+    return OptimizationTrialIdentity(
+        trial_id="trial-baseline",
+        candidate_id="routing_policy:balanced",
+        candidate_kind=ForgeCandidateKind.ROUTING_POLICY,
+        config_profile_id="phase9-baseline",
+        routing_policy=RoutingPolicy.BALANCED,
+    )
+
+
+def _candidate_trial_identity() -> OptimizationTrialIdentity:
+    return OptimizationTrialIdentity(
+        trial_id="trial-latency",
+        candidate_id="routing_policy:latency-first",
+        candidate_kind=ForgeCandidateKind.ROUTING_POLICY,
+        config_profile_id="phase9-latency",
+        routing_policy=RoutingPolicy.LATENCY_FIRST,
+    )
+
+
+def _optimization_objective() -> OptimizationObjectiveTarget:
+    return OptimizationObjectiveTarget(
+        objective_id="latency-primary",
+        metric=OptimizationObjectiveMetric.LATENCY_MS,
+        goal=OptimizationGoal.MINIMIZE,
+        applies_to=[OptimizationScope(kind=OptimizationScopeKind.GLOBAL)],
+        workload_set_ids=["phase9-cache-locality"],
+        evidence_sources=[ForgeEvidenceSourceKind.OBSERVED_RUNTIME],
+    )
+
+
+def _optimization_constraint() -> OptimizationConstraint:
+    return OptimizationConstraint(
+        constraint_id="remote-share-cap",
+        dimension=OptimizationConstraintDimension.REMOTE_SHARE_PERCENT,
+        strength=OptimizationConstraintStrength.HARD,
+        operator=OptimizationComparisonOperator.LTE,
+        threshold_value=25.0,
+    )
+
+
+def _candidate_configuration_artifact(
+    *,
+    candidate_configuration_id: str,
+    trial_identity: OptimizationTrialIdentity,
+    baseline_config_profile_id: str,
+    knob_change_value: float | None,
+) -> OptimizationCandidateConfigurationArtifact:
+    knob_changes = []
+    if knob_change_value is not None:
+        knob_changes.append(
+            OptimizationKnobChange(
+                knob_id="shadow_sampling_rate",
+                config_path="routing.shadow_policy.sample_rate",
+                baseline_value=0.0,
+                candidate_value=knob_change_value,
+            )
+        )
+    return OptimizationCandidateConfigurationArtifact(
+        candidate_configuration_id=candidate_configuration_id,
+        campaign_id="campaign-phase9-001",
+        candidate=trial_identity,
+        baseline_config_profile_id=baseline_config_profile_id,
+        config_profile_id=trial_identity.config_profile_id,
+        knob_changes=knob_changes,
+        objectives_in_scope=[_optimization_objective()],
+        constraints_in_scope=[_optimization_constraint()],
+        workload_sets=[_optimization_workload_set()],
+        expected_evidence_kinds=[
+            OptimizationArtifactEvidenceKind.OBSERVED,
+            OptimizationArtifactEvidenceKind.REPLAYED,
+        ],
+        topology_lineage=_optimization_topology_lineage(),
+    )
+
+
+def _trial_artifact(
+    candidate_configuration: OptimizationCandidateConfigurationArtifact,
+) -> OptimizationTrialArtifact:
+    return OptimizationTrialArtifact(
+        trial_artifact_id="trial-artifact-001",
+        campaign_id="campaign-phase9-001",
+        baseline_candidate_configuration_id="candidate-config-baseline",
+        candidate_configuration=candidate_configuration,
+        trial_identity=candidate_configuration.candidate,
+        evidence_records=[
+            OptimizationEvidenceRecord(
+                evidence_id="evidence-observed",
+                evidence_kind=OptimizationArtifactEvidenceKind.OBSERVED,
+                source_type=OptimizationArtifactSourceType.BENCHMARK_RUN,
+                source_artifact_id="benchmark-run-001",
+                source_run_ids=["benchmark-run-001"],
+            ),
+            OptimizationEvidenceRecord(
+                evidence_id="evidence-replayed",
+                evidence_kind=OptimizationArtifactEvidenceKind.REPLAYED,
+                source_type=OptimizationArtifactSourceType.REPLAY_PLAN,
+                source_artifact_id="replay-plan-001",
+                source_trace_ids=["trace-a"],
+            ),
+        ],
+        topology_lineage=_optimization_topology_lineage(),
+        result_status=OptimizationArtifactStatus.PARTIAL,
+        objective_assessments=[
+            OptimizationObjectiveAssessment(
+                objective_id="latency-primary",
+                metric=OptimizationObjectiveMetric.LATENCY_MS,
+                goal=OptimizationGoal.MINIMIZE,
+                measured_value=91.5,
+                target_value=100.0,
+                satisfied=True,
+                evidence_kinds=[OptimizationArtifactEvidenceKind.OBSERVED],
+            )
+        ],
+        constraint_assessments=[
+            OptimizationConstraintAssessment(
+                constraint_id="remote-share-cap",
+                dimension=OptimizationConstraintDimension.REMOTE_SHARE_PERCENT,
+                strength=OptimizationConstraintStrength.HARD,
+                operator=OptimizationComparisonOperator.LTE,
+                threshold_value=25.0,
+                evaluated_value=18.0,
+                satisfied=True,
+                evidence_kinds=[OptimizationArtifactEvidenceKind.OBSERVED],
+            )
+        ],
+        recommendation_summary=OptimizationRecommendationSummary(
+            recommendation_summary_id="recommendation-001",
+            disposition=OptimizationRecommendationDisposition.PROMOTE_CANDIDATE,
+            confidence=RecommendationConfidence.MEDIUM,
+            candidate_configuration_id="candidate-config-latency",
+            config_profile_id="phase9-latency",
+            evidence_kinds=[OptimizationArtifactEvidenceKind.OBSERVED],
+            rationale=["Latency improved under observed evidence."],
+        ),
+        promotion_decision=OptimizationPromotionDecision(
+            promotion_decision_id="promotion-001",
+            disposition=OptimizationPromotionDisposition.RECOMMEND_CANARY,
+            candidate_configuration_id="candidate-config-latency",
+            config_profile_id="phase9-latency",
+            rollout_mode=PolicyRolloutMode.CANARY,
+            canary_percentage=10.0,
+            rollback_supported=True,
+            rationale=["Promotion remains bounded and reversible."],
+        ),
+    )
+
+
+def _campaign_artifact() -> OptimizationCampaignArtifact:
+    baseline_candidate = _candidate_configuration_artifact(
+        candidate_configuration_id="candidate-config-baseline",
+        trial_identity=_baseline_trial_identity(),
+        baseline_config_profile_id="phase9-baseline",
+        knob_change_value=None,
+    )
+    candidate_configuration = _candidate_configuration_artifact(
+        candidate_configuration_id="candidate-config-latency",
+        trial_identity=_candidate_trial_identity(),
+        baseline_config_profile_id="phase9-baseline",
+        knob_change_value=0.1,
+    )
+    return OptimizationCampaignArtifact(
+        campaign_artifact_id="campaign-artifact-001",
+        campaign=OptimizationCampaignMetadata(
+            campaign_id="campaign-phase9-001",
+            optimization_profile_id="phase9-stage-a-baseline",
+            objective=CounterfactualObjective.BALANCED,
+            evidence_sources=[
+                ForgeEvidenceSourceKind.OBSERVED_RUNTIME,
+                ForgeEvidenceSourceKind.REPLAYED_TRACE,
+            ],
+            default_workload_set_ids=["phase9-cache-locality"],
+        ),
+        baseline_candidate_configuration=baseline_candidate,
+        candidate_configurations=[candidate_configuration],
+        trials=[_trial_artifact(candidate_configuration)],
+        evidence_records=[
+            OptimizationEvidenceRecord(
+                evidence_id="campaign-evidence",
+                evidence_kind=OptimizationArtifactEvidenceKind.OBSERVED,
+                source_type=OptimizationArtifactSourceType.BENCHMARK_RUN,
+                source_artifact_id="benchmark-run-001",
+                source_run_ids=["benchmark-run-001"],
+            )
+        ],
+        topology_lineage=_optimization_topology_lineage(),
+        recommendation_summaries=[
+            OptimizationRecommendationSummary(
+                recommendation_summary_id="campaign-recommendation-001",
+                disposition=OptimizationRecommendationDisposition.PROMOTE_CANDIDATE,
+                confidence=RecommendationConfidence.MEDIUM,
+                candidate_configuration_id="candidate-config-latency",
+                config_profile_id="phase9-latency",
+                evidence_kinds=[OptimizationArtifactEvidenceKind.OBSERVED],
+                rationale=["Observed trial remained within bounded constraints."],
+            )
+        ],
+        promotion_decisions=[
+            OptimizationPromotionDecision(
+                promotion_decision_id="campaign-promotion-001",
+                disposition=OptimizationPromotionDisposition.RECOMMEND_CANARY,
+                candidate_configuration_id="candidate-config-latency",
+                config_profile_id="phase9-latency",
+                rollout_mode=PolicyRolloutMode.CANARY,
+                canary_percentage=10.0,
+                rollback_supported=True,
+            )
+        ],
+        result_status=OptimizationArtifactStatus.PARTIAL,
+    )
 
 
 @pytest.mark.asyncio
@@ -322,329 +615,331 @@ async def test_run_gateway_benchmark_captures_deployed_topology_metadata() -> No
             {
                 "captured_at": "2026-03-16T12:00:00Z",
                 "backends": [
-                {
-                    "backend_name": "mlx-lm:chat-mlx",
-                    "backend_type": "mlx_lm",
-                    "deployment_profile": "host_native",
-                    "environment": "local",
-                    "health_state": "healthy",
-                    "load_state": "ready",
-                    "latency_ms": 1.2,
-                    "active_requests": 0,
-                    "queue_depth": 0,
-                    "circuit_open": False,
-                    "circuit_reason": None,
-                    "instances": [
-                        {
-                            "instance_id": "mlx-worker-01",
-                            "source_of_truth": "static_config",
-                            "endpoint": "http://host.docker.internal:8101",
-                            "transport": "http",
-                            "device_class": "apple_gpu",
-                            "locality": "local",
-                            "registration_state": "static",
-                            "health_state": "healthy",
-                            "load_state": "ready",
-                            "last_seen_at": "2026-03-16T11:59:55Z",
-                            "tags": ["local", "compose"],
-                        }
-                    ],
-                }
-            ],
-            "admission": {
-                "enabled": False,
-                "global_concurrency_cap": 1,
-                "global_queue_size": 0,
-                "in_flight_total": 0,
-                "queued_requests": 0,
-                "oldest_queue_age_ms": None,
-                "tenant_limiters": [],
-            },
-            "circuit_breakers": {"enabled": False, "backends": []},
-            "canary_routing": {"enabled": False, "default_percentage": 0.0, "policies": []},
-            "shadow_routing": {
-                "enabled": False,
-                "default_sampling_rate": 0.0,
-                "active_tasks": 0,
-                "policies": [],
-            },
-            "policy_rollout": {
-                "mode": "disabled",
-                "candidate_policy": None,
-                "active_policy": None,
-                "shadow_policy": None,
-                "compatibility_policy": None,
-                "canary_percentage": 0.0,
-                "kill_switch_enabled": False,
-                "learning_frozen": False,
-                "exploration_enabled": False,
-                "recent_decisions": [],
-                "recent_abstentions": 0,
-                "recent_guardrail_triggers": [],
-                "last_policy_update_at": None,
-                "last_learning_event_at": None,
-                "last_learning_event": None,
-                "last_guardrail_trigger": None,
-                "notes": [],
-            },
-            "session_affinity": {
-                "enabled": False,
-                "ttl_seconds": 60.0,
-                "max_sessions": 1,
-                "active_bindings": 0,
-                "bindings_by_target": {},
-            },
-            "hybrid_execution": {
-                "enabled": False,
-                "prefer_local": True,
-                "spillover_enabled": False,
-                "require_healthy_local_backends": True,
-                "max_remote_share_percent": 0.0,
-                "remote_request_budget_per_minute": None,
-                "allowed_remote_environments": [],
-                "local_capable_backends": 1,
-                "remote_capable_backends": 0,
-                "healthy_local_backends": 1,
-                "healthy_remote_backends": 0,
-                "degraded_remote_backends": 0,
-                "unavailable_remote_backends": 0,
-                "remote_instance_count": 0,
-                "notes": [],
-            },
-            "remote_workers": {
-                "secure_registration_required": False,
-                "auth_mode": "none",
-                "dynamic_registration_enabled": False,
-                "heartbeat_timeout_seconds": 30.0,
-                "stale_eviction_seconds": 300.0,
-                "registration_token_name": None,
-                "allow_static_instances": True,
-                "static_instance_count": 1,
-                "registered_instance_count": 0,
-                "discovered_instance_count": 0,
-                "stale_instance_count": 0,
-                "ready_instance_count": 0,
-                "draining_instance_count": 0,
-                "unhealthy_instance_count": 0,
-                "lost_instance_count": 0,
-                "retired_instance_count": 0,
-                "notes": [],
-            },
-            "remote_worker_registry": {
-                "secure_registration_required": False,
-                "auth_mode": "none",
-                "dynamic_registration_enabled": False,
-                "heartbeat_timeout_seconds": 30.0,
-                "stale_eviction_seconds": 300.0,
-                "registration_token_name": None,
-                "worker_count": 1,
-                "stale_worker_count": 0,
-                "ready_worker_count": 1,
-                "live_worker_count": 1,
-                "draining_worker_count": 0,
-                "unhealthy_worker_count": 0,
-                "lost_worker_count": 0,
-                "retired_worker_count": 0,
-                "workers": [
                     {
-                        "worker_id": "remote-mlx-01",
-                        "worker_name": "mlx-worker",
-                        "environment": "local",
-                        "serving_targets": ["chat-shared"],
-                        "backend_name": "remote-worker:mlx-worker",
+                        "backend_name": "mlx-lm:chat-mlx",
                         "backend_type": "mlx_lm",
-                        "lifecycle_state": "ready",
-                        "registration_state": "registered",
-                        "registered_at": "2026-03-16T12:00:00Z",
-                        "last_heartbeat_at": "2026-03-16T12:00:00Z",
-                        "expires_at": "2026-03-16T12:00:30Z",
-                        "deregistered_at": None,
-                        "stale": False,
-                        "live": True,
-                        "ready": True,
+                        "deployment_profile": "host_native",
+                        "environment": "local",
+                        "health_state": "healthy",
+                        "load_state": "ready",
+                        "latency_ms": 1.2,
                         "active_requests": 0,
                         "queue_depth": 0,
-                        "heartbeat_count": 3,
-                        "capabilities": {
-                            "backend_type": "mlx_lm",
-                            "engine_type": "mlx",
-                            "device_class": "apple_gpu",
-                            "execution_mode": "host_native",
-                            "model_ids": ["chat-mlx"],
-                            "serving_targets": ["chat-shared"],
-                            "max_context_tokens": 8192,
-                            "supports_streaming": True,
-                            "concurrency_limit": 2,
-                            "configured_priority": 100,
-                            "configured_weight": 1.0,
-                            "quality_tier": 1,
-                            "quality_hint": "balanced",
-                            "performance_hint": "balanced",
-                            "model_aliases": {},
-                            "default_model": None,
-                            "supports_tools": False,
-                            "warmup_required": False,
-                            "cache_capabilities": {
-                                "supports_prefix_cache": False,
-                                "supports_prompt_cache_read": False,
-                                "supports_prompt_cache_write": False,
-                                "supports_kv_cache_reuse": False,
-                            },
-                            "placement": {
-                                "provider": None,
-                                "region": None,
-                                "zone": None,
-                                "provider_tags": {},
-                            },
-                            "cost_profile": {
-                                "profile": "unknown",
-                                "budget_bucket": None,
-                                "relative_cost_index": None,
-                                "currency": None,
-                                "metadata": {},
-                            },
-                            "readiness_hints": {
-                                "cold_start_likely": False,
-                                "warm_pool_enabled": False,
-                                "estimated_cold_start_ms": None,
-                                "estimated_warm_ttl_seconds": None,
-                            },
-                            "trust": {
-                                "auth_state": "unknown",
-                                "trust_state": "unknown",
-                                "identity_provider": None,
-                                "principal": None,
-                                "detail": None,
-                            },
-                            "network_characteristics": {
-                                "profile": "unknown",
-                                "expected_rtt_ms": None,
-                                "expected_jitter_ms": None,
-                                "expected_bandwidth_mbps": None,
-                                "notes": [],
-                            },
-                        },
-                        "token_verified": False,
-                        "instance": {
-                            "instance_id": "remote-mlx-01",
-                            "endpoint": {
-                                "base_url": "http://host.docker.internal:8101",
+                        "circuit_open": False,
+                        "circuit_reason": None,
+                        "instances": [
+                            {
+                                "instance_id": "mlx-worker-01",
+                                "source_of_truth": "static_config",
+                                "endpoint": "http://host.docker.internal:8101",
                                 "transport": "http",
-                                "health_path": "/healthz",
-                                "readiness_path": "/internal/worker/ready",
-                                "capabilities_path": "/internal/worker/capabilities",
-                                "warmup_path": "/internal/worker/warmup",
-                                "chat_completions_path": "/internal/worker/generate",
-                                "stream_chat_completions_path": "/internal/worker/generate/stream",
-                                "reachability": {
-                                    "reachable_from_control_plane": True,
-                                    "requires_tunnel": False,
+                                "device_class": "apple_gpu",
+                                "locality": "local",
+                                "registration_state": "static",
+                                "health_state": "healthy",
+                                "load_state": "ready",
+                                "last_seen_at": "2026-03-16T11:59:55Z",
+                                "tags": ["local", "compose"],
+                            }
+                        ],
+                    }
+                ],
+                "admission": {
+                    "enabled": False,
+                    "global_concurrency_cap": 1,
+                    "global_queue_size": 0,
+                    "in_flight_total": 0,
+                    "queued_requests": 0,
+                    "oldest_queue_age_ms": None,
+                    "tenant_limiters": [],
+                },
+                "circuit_breakers": {"enabled": False, "backends": []},
+                "canary_routing": {"enabled": False, "default_percentage": 0.0, "policies": []},
+                "shadow_routing": {
+                    "enabled": False,
+                    "default_sampling_rate": 0.0,
+                    "active_tasks": 0,
+                    "policies": [],
+                },
+                "policy_rollout": {
+                    "mode": "disabled",
+                    "candidate_policy": None,
+                    "active_policy": None,
+                    "shadow_policy": None,
+                    "compatibility_policy": None,
+                    "canary_percentage": 0.0,
+                    "kill_switch_enabled": False,
+                    "learning_frozen": False,
+                    "exploration_enabled": False,
+                    "recent_decisions": [],
+                    "recent_abstentions": 0,
+                    "recent_guardrail_triggers": [],
+                    "last_policy_update_at": None,
+                    "last_learning_event_at": None,
+                    "last_learning_event": None,
+                    "last_guardrail_trigger": None,
+                    "notes": [],
+                },
+                "session_affinity": {
+                    "enabled": False,
+                    "ttl_seconds": 60.0,
+                    "max_sessions": 1,
+                    "active_bindings": 0,
+                    "bindings_by_target": {},
+                },
+                "hybrid_execution": {
+                    "enabled": False,
+                    "prefer_local": True,
+                    "spillover_enabled": False,
+                    "require_healthy_local_backends": True,
+                    "max_remote_share_percent": 0.0,
+                    "remote_request_budget_per_minute": None,
+                    "allowed_remote_environments": [],
+                    "local_capable_backends": 1,
+                    "remote_capable_backends": 0,
+                    "healthy_local_backends": 1,
+                    "healthy_remote_backends": 0,
+                    "degraded_remote_backends": 0,
+                    "unavailable_remote_backends": 0,
+                    "remote_instance_count": 0,
+                    "notes": [],
+                },
+                "remote_workers": {
+                    "secure_registration_required": False,
+                    "auth_mode": "none",
+                    "dynamic_registration_enabled": False,
+                    "heartbeat_timeout_seconds": 30.0,
+                    "stale_eviction_seconds": 300.0,
+                    "registration_token_name": None,
+                    "allow_static_instances": True,
+                    "static_instance_count": 1,
+                    "registered_instance_count": 0,
+                    "discovered_instance_count": 0,
+                    "stale_instance_count": 0,
+                    "ready_instance_count": 0,
+                    "draining_instance_count": 0,
+                    "unhealthy_instance_count": 0,
+                    "lost_instance_count": 0,
+                    "retired_instance_count": 0,
+                    "notes": [],
+                },
+                "remote_worker_registry": {
+                    "secure_registration_required": False,
+                    "auth_mode": "none",
+                    "dynamic_registration_enabled": False,
+                    "heartbeat_timeout_seconds": 30.0,
+                    "stale_eviction_seconds": 300.0,
+                    "registration_token_name": None,
+                    "worker_count": 1,
+                    "stale_worker_count": 0,
+                    "ready_worker_count": 1,
+                    "live_worker_count": 1,
+                    "draining_worker_count": 0,
+                    "unhealthy_worker_count": 0,
+                    "lost_worker_count": 0,
+                    "retired_worker_count": 0,
+                    "workers": [
+                        {
+                            "worker_id": "remote-mlx-01",
+                            "worker_name": "mlx-worker",
+                            "environment": "local",
+                            "serving_targets": ["chat-shared"],
+                            "backend_name": "remote-worker:mlx-worker",
+                            "backend_type": "mlx_lm",
+                            "lifecycle_state": "ready",
+                            "registration_state": "registered",
+                            "registered_at": "2026-03-16T12:00:00Z",
+                            "last_heartbeat_at": "2026-03-16T12:00:00Z",
+                            "expires_at": "2026-03-16T12:00:30Z",
+                            "deregistered_at": None,
+                            "stale": False,
+                            "live": True,
+                            "ready": True,
+                            "active_requests": 0,
+                            "queue_depth": 0,
+                            "heartbeat_count": 3,
+                            "capabilities": {
+                                "backend_type": "mlx_lm",
+                                "engine_type": "mlx",
+                                "device_class": "apple_gpu",
+                                "execution_mode": "host_native",
+                                "model_ids": ["chat-mlx"],
+                                "serving_targets": ["chat-shared"],
+                                "max_context_tokens": 8192,
+                                "supports_streaming": True,
+                                "concurrency_limit": 2,
+                                "configured_priority": 100,
+                                "configured_weight": 1.0,
+                                "quality_tier": 1,
+                                "quality_hint": "balanced",
+                                "performance_hint": "balanced",
+                                "model_aliases": {},
+                                "default_model": None,
+                                "supports_tools": False,
+                                "warmup_required": False,
+                                "cache_capabilities": {
+                                    "supports_prefix_cache": False,
+                                    "supports_prompt_cache_read": False,
+                                    "supports_prompt_cache_write": False,
+                                    "supports_kv_cache_reuse": False,
+                                },
+                                "placement": {
+                                    "provider": None,
+                                    "region": None,
+                                    "zone": None,
+                                    "provider_tags": {},
+                                },
+                                "cost_profile": {
+                                    "profile": "unknown",
+                                    "budget_bucket": None,
+                                    "relative_cost_index": None,
+                                    "currency": None,
+                                    "metadata": {},
+                                },
+                                "readiness_hints": {
+                                    "cold_start_likely": False,
+                                    "warm_pool_enabled": False,
+                                    "estimated_cold_start_ms": None,
+                                    "estimated_warm_ttl_seconds": None,
+                                },
+                                "trust": {
                                     "auth_state": "unknown",
                                     "trust_state": "unknown",
-                                    "last_verified_at": None,
+                                    "identity_provider": None,
+                                    "principal": None,
                                     "detail": None,
                                 },
+                                "network_characteristics": {
+                                    "profile": "unknown",
+                                    "expected_rtt_ms": None,
+                                    "expected_jitter_ms": None,
+                                    "expected_bandwidth_mbps": None,
+                                    "notes": [],
+                                },
                             },
-                            "source_of_truth": "registered",
-                            "backend_type": "mlx_lm",
-                            "device_class": "apple_gpu",
-                            "model_identifier": "chat-mlx",
-                            "locality": "local",
-                            "locality_class": "local_network",
-                            "execution_mode": "host_native",
-                            "placement": {
-                                "provider": None,
-                                "region": None,
-                                "zone": None,
-                                "provider_tags": {},
+                            "token_verified": False,
+                            "instance": {
+                                "instance_id": "remote-mlx-01",
+                                "endpoint": {
+                                    "base_url": "http://host.docker.internal:8101",
+                                    "transport": "http",
+                                    "health_path": "/healthz",
+                                    "readiness_path": "/internal/worker/ready",
+                                    "capabilities_path": "/internal/worker/capabilities",
+                                    "warmup_path": "/internal/worker/warmup",
+                                    "chat_completions_path": "/internal/worker/generate",
+                                    "stream_chat_completions_path": (
+                                        "/internal/worker/generate/stream"
+                                    ),
+                                    "reachability": {
+                                        "reachable_from_control_plane": True,
+                                        "requires_tunnel": False,
+                                        "auth_state": "unknown",
+                                        "trust_state": "unknown",
+                                        "last_verified_at": None,
+                                        "detail": None,
+                                    },
+                                },
+                                "source_of_truth": "registered",
+                                "backend_type": "mlx_lm",
+                                "device_class": "apple_gpu",
+                                "model_identifier": "chat-mlx",
+                                "locality": "local",
+                                "locality_class": "local_network",
+                                "execution_mode": "host_native",
+                                "placement": {
+                                    "provider": None,
+                                    "region": None,
+                                    "zone": None,
+                                    "provider_tags": {},
+                                },
+                                "cost_profile": {
+                                    "profile": "unknown",
+                                    "budget_bucket": None,
+                                    "relative_cost_index": None,
+                                    "currency": None,
+                                    "metadata": {},
+                                },
+                                "readiness_hints": {
+                                    "cold_start_likely": False,
+                                    "warm_pool_enabled": False,
+                                    "estimated_cold_start_ms": None,
+                                    "estimated_warm_ttl_seconds": None,
+                                },
+                                "trust": {
+                                    "auth_state": "unknown",
+                                    "trust_state": "unknown",
+                                    "identity_provider": None,
+                                    "principal": None,
+                                    "detail": None,
+                                },
+                                "network_characteristics": {
+                                    "profile": "lan",
+                                    "expected_rtt_ms": None,
+                                    "expected_jitter_ms": None,
+                                    "expected_bandwidth_mbps": None,
+                                    "notes": [],
+                                },
+                                "tags": ["registered", "remote"],
+                                "registration": {
+                                    "state": "registered",
+                                    "lifecycle_state": "ready",
+                                    "registered_at": "2026-03-16T12:00:00Z",
+                                    "last_heartbeat_at": "2026-03-16T12:00:00Z",
+                                    "expires_at": "2026-03-16T12:00:30Z",
+                                    "deregistered_at": None,
+                                    "heartbeat_count": 3,
+                                    "source": "dynamic_registration",
+                                    "detail": None,
+                                },
+                                "health": {
+                                    "state": "healthy",
+                                    "checked_at": "2026-03-16T12:00:00Z",
+                                    "latency_ms": 3.5,
+                                    "error_rate": None,
+                                    "detail": None,
+                                    "load_state": "ready",
+                                    "warmed_models": [],
+                                    "last_error": None,
+                                    "circuit_open": False,
+                                    "circuit_reason": None,
+                                },
+                                "last_seen_at": "2026-03-16T12:00:00Z",
+                                "image_metadata": None,
+                                "metadata": {"worker_name": "mlx-worker", "ready": "true"},
                             },
-                            "cost_profile": {
-                                "profile": "unknown",
-                                "budget_bucket": None,
-                                "relative_cost_index": None,
-                                "currency": None,
-                                "metadata": {},
-                            },
-                            "readiness_hints": {
-                                "cold_start_likely": False,
-                                "warm_pool_enabled": False,
-                                "estimated_cold_start_ms": None,
-                                "estimated_warm_ttl_seconds": None,
-                            },
-                            "trust": {
-                                "auth_state": "unknown",
-                                "trust_state": "unknown",
-                                "identity_provider": None,
-                                "principal": None,
-                                "detail": None,
-                            },
-                            "network_characteristics": {
-                                "profile": "lan",
-                                "expected_rtt_ms": None,
-                                "expected_jitter_ms": None,
-                                "expected_bandwidth_mbps": None,
-                                "notes": [],
-                            },
-                            "tags": ["registered", "remote"],
-                            "registration": {
-                                "state": "registered",
-                                "lifecycle_state": "ready",
-                                "registered_at": "2026-03-16T12:00:00Z",
-                                "last_heartbeat_at": "2026-03-16T12:00:00Z",
-                                "expires_at": "2026-03-16T12:00:30Z",
-                                "deregistered_at": None,
-                                "heartbeat_count": 3,
-                                "source": "dynamic_registration",
-                                "detail": None,
-                            },
-                            "health": {
-                                "state": "healthy",
-                                "checked_at": "2026-03-16T12:00:00Z",
-                                "latency_ms": 3.5,
-                                "error_rate": None,
-                                "detail": None,
-                                "load_state": "ready",
-                                "warmed_models": [],
-                                "last_error": None,
-                                "circuit_open": False,
-                                "circuit_reason": None,
-                            },
-                            "last_seen_at": "2026-03-16T12:00:00Z",
-                            "image_metadata": None,
-                            "metadata": {"worker_name": "mlx-worker", "ready": "true"},
-                        },
-                        "metadata": {},
-                    }
-                ],
-                "recent_events": [
-                    {
-                        "event_type": "registered",
-                        "recorded_at": "2026-03-16T12:00:00Z",
-                        "worker_id": "remote-mlx-01",
-                        "lifecycle_state": "ready",
-                        "detail": "worker registered",
-                        "metadata": {},
-                    }
-                ],
-            },
-            "routing_features": {
-                "feature_version": "phase6.v2",
-                "input_length_buckets": ["tiny", "short", "medium", "long", "very_long"],
-                "history_depth_buckets": ["single_turn", "short_history", "deep_history"],
-                "workload_tags": [
-                    "short_chat",
-                    "long_context",
-                    "repeated_prefix",
-                    "burst_candidate",
-                    "session_continuation",
-                    "streaming",
-                    "latency_sensitive",
-                    "bulk",
-                    "priority_tenant",
-                ],
-                "prefix_fingerprint_algorithm": "sha256_truncated_16_hex",
-                "prefix_plaintext_retained": False,
-            },
+                            "metadata": {},
+                        }
+                    ],
+                    "recent_events": [
+                        {
+                            "event_type": "registered",
+                            "recorded_at": "2026-03-16T12:00:00Z",
+                            "worker_id": "remote-mlx-01",
+                            "lifecycle_state": "ready",
+                            "detail": "worker registered",
+                            "metadata": {},
+                        }
+                    ],
+                },
+                "routing_features": {
+                    "feature_version": "phase6.v2",
+                    "input_length_buckets": ["tiny", "short", "medium", "long", "very_long"],
+                    "history_depth_buckets": ["single_turn", "short_history", "deep_history"],
+                    "workload_tags": [
+                        "short_chat",
+                        "long_context",
+                        "repeated_prefix",
+                        "burst_candidate",
+                        "session_continuation",
+                        "streaming",
+                        "latency_sensitive",
+                        "bulk",
+                        "priority_tenant",
+                    ],
+                    "prefix_fingerprint_algorithm": "sha256_truncated_16_hex",
+                    "prefix_plaintext_retained": False,
+                },
                 "prefix_locality": {
                     "enabled": True,
                     "ttl_seconds": 300.0,
@@ -944,9 +1239,7 @@ def test_summarize_records_captures_hybrid_evidence_honestly() -> None:
         BenchmarkEvidenceClass.MIXED: 1,
     }
     assert summary.evidence_summary.cloud_provider_counts == {"aws": 1}
-    assert summary.evidence_summary.cloud_worker_identity_counts == {
-        "remote-worker:cuda-a": 1
-    }
+    assert summary.evidence_summary.cloud_worker_identity_counts == {"remote-worker:cuda-a": 1}
     assert "run does not contain direct observed cloud-worker execution" in (
         summary.evidence_summary.comparability_limitations
     )
@@ -1059,9 +1352,7 @@ def test_summarize_records_marks_observed_real_cloud_evidence() -> None:
     assert summary.evidence_summary.run_kind is BenchmarkRunKind.OBSERVED_CLOUD
     assert summary.evidence_summary.observed_cloud_request_count == 1
     assert summary.evidence_summary.cloud_runtime_version_counts == {"vllm_cuda:0.6.5": 1}
-    assert summary.evidence_summary.observed_budget_outcome_counts == {
-        "within_budget": 1
-    }
+    assert summary.evidence_summary.observed_budget_outcome_counts == {"within_budget": 1}
 
 
 def test_compare_benchmark_runs_marks_hybrid_benefit_and_uncertainty() -> None:
@@ -1845,8 +2136,7 @@ async def test_repeated_prefix_workload_auto_preconditions_warmup() -> None:
     assert artifact.run_config.warmup.enabled is True
     assert artifact.run_config.warmup.request_count == 1
     assert (
-        artifact.summary.family_summaries[WorkloadScenarioFamily.REPEATED_PREFIX].request_count
-        == 2
+        artifact.summary.family_summaries[WorkloadScenarioFamily.REPEATED_PREFIX].request_count == 2
     )
 
 
@@ -2377,9 +2667,7 @@ def test_parse_prometheus_text_extracts_labels() -> None:
     assert samples[0].name == "switchyard_backend_request_latency_ms"
     assert samples[0].labels["backend_name"] == "mlx-lm:mlx-chat"
     assert samples[1].value == 3.0
-    assert samples[1].labels["route_reason"].endswith(
-        "tie_breaker=score, latency_ms, backend_name"
-    )
+    assert samples[1].labels["route_reason"].endswith("tie_breaker=score, latency_ms, backend_name")
 
 
 def test_write_artifact_outputs_stable_json(tmp_path: Path) -> None:
@@ -2563,3 +2851,93 @@ def test_load_benchmark_artifact_model_accepts_policy_recommendation_payload(
     assert loaded.recommendation_report_id == "policy-guidance"
     markdown = render_loaded_artifact_markdown(loaded)
     assert "# Switchyard Policy Recommendation Report:" in markdown
+
+
+@pytest.mark.parametrize(
+    ("artifact", "expected_type", "expected_header"),
+    [
+        (
+            _candidate_configuration_artifact(
+                candidate_configuration_id="candidate-config-latency",
+                trial_identity=_candidate_trial_identity(),
+                baseline_config_profile_id="phase9-baseline",
+                knob_change_value=0.1,
+            ),
+            OptimizationCandidateConfigurationArtifact,
+            "# Switchyard Optimization Candidate:",
+        ),
+        (
+            _trial_artifact(
+                _candidate_configuration_artifact(
+                    candidate_configuration_id="candidate-config-latency",
+                    trial_identity=_candidate_trial_identity(),
+                    baseline_config_profile_id="phase9-baseline",
+                    knob_change_value=0.1,
+                )
+            ),
+            OptimizationTrialArtifact,
+            "# Switchyard Optimization Trial:",
+        ),
+        (
+            _campaign_artifact(),
+            OptimizationCampaignArtifact,
+            "# Switchyard Optimization Campaign:",
+        ),
+    ],
+)
+def test_load_benchmark_artifact_model_accepts_optimization_payloads(
+    tmp_path: Path,
+    artifact: (
+        OptimizationCandidateConfigurationArtifact
+        | OptimizationTrialArtifact
+        | OptimizationCampaignArtifact
+    ),
+    expected_type: type[object],
+    expected_header: str,
+) -> None:
+    artifact_path = tmp_path / f"{type(artifact).__name__}.json"
+    artifact_path.write_text(artifact.model_dump_json(indent=2), encoding="utf-8")
+
+    loaded = load_benchmark_artifact_model(artifact_path)
+    markdown = render_loaded_artifact_markdown(loaded)
+
+    assert isinstance(loaded, expected_type)
+    assert expected_header in markdown
+
+
+def test_render_artifact_bundle_markdown_supports_optimization_artifacts() -> None:
+    candidate_configuration = _candidate_configuration_artifact(
+        candidate_configuration_id="candidate-config-latency",
+        trial_identity=_candidate_trial_identity(),
+        baseline_config_profile_id="phase9-baseline",
+        knob_change_value=0.1,
+    )
+    campaign = _campaign_artifact()
+
+    markdown = render_artifact_bundle_markdown(
+        [candidate_configuration, _trial_artifact(candidate_configuration), campaign]
+    )
+
+    assert "# Switchyard Optimization Candidate:" in markdown
+    assert "# Switchyard Optimization Trial:" in markdown
+
+
+def test_render_optimization_reports_surface_workload_and_budget_posture() -> None:
+    campaign = _campaign_artifact()
+    trial = campaign.trials[0]
+
+    trial_markdown = render_loaded_artifact_markdown(trial)
+    campaign_markdown = render_loaded_artifact_markdown(campaign)
+    inspection_markdown = render_forge_campaign_inspection_markdown(
+        inspect_forge_stage_a_campaigns(campaign_artifacts=[campaign])
+    )
+
+    assert "## Candidate Diff" in trial_markdown
+    assert "## Workload Impact" in trial_markdown
+    assert "## Remote Budget Posture" in trial_markdown
+    assert "Recommendation status counts" in campaign_markdown
+    assert "Helps workload families" in campaign_markdown
+    assert "Remote budget constraints involved" in campaign_markdown
+    assert "# Switchyard Forge Stage A Inspection" in inspection_markdown
+    assert "recommendation=`promote_candidate`" in inspection_markdown
+    assert "# Switchyard Optimization Campaign:" in campaign_markdown

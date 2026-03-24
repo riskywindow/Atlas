@@ -20,6 +20,8 @@ from switchyard.control.affinity import SessionAffinityService
 from switchyard.control.alias_overrides import AliasRoutingOverrideService
 from switchyard.control.canary import CanaryRoutingService
 from switchyard.control.circuit import CircuitBreakerService
+from switchyard.control.cloud_rollout import CloudTrafficRolloutService
+from switchyard.control.forge_promotion import ForgePromotionService
 from switchyard.control.locality import PrefixLocalityService
 from switchyard.control.operator import HybridOperatorService
 from switchyard.control.policy_rollout import PolicyRolloutService
@@ -39,6 +41,7 @@ from switchyard.logging import (
     configure_logging,
     get_logger,
 )
+from switchyard.optimization import build_forge_stage_a_campaign
 from switchyard.router.service import NoRouteAvailableError, RouterService
 from switchyard.schemas.chat import ErrorResponse
 from switchyard.telemetry import Telemetry, configure_telemetry
@@ -72,6 +75,9 @@ def create_app(
     resolved_prefix_locality = prefix_locality or PrefixLocalityService()
     resolved_operator = HybridOperatorService()
     resolved_canary = CanaryRoutingService(resolved_settings.phase4.canary_routing)
+    resolved_cloud_rollout = CloudTrafficRolloutService(
+        resolved_settings.phase7.cloud_rollout
+    )
     resolved_shadow = ShadowTrafficService(resolved_settings.phase4.shadow_routing)
     resolved_remote_workers = RemoteWorkerRegistryService(
         resolved_settings.phase7.remote_workers
@@ -83,12 +89,24 @@ def create_app(
     resolved_policy_rollout = policy_rollout or PolicyRolloutService(
         resolved_settings.phase4.policy_rollout
     )
+    forge_campaign = build_forge_stage_a_campaign(resolved_settings)
+    resolved_forge_promotion = ForgePromotionService(
+        settings=resolved_settings,
+        baseline_config_profile_id=forge_campaign.trial_lineage[0].config_profile_id,
+        max_canary_percentage=resolved_settings.optimization.max_rollout_canary_percentage,
+        requires_operator_review=(
+            resolved_settings.optimization.promotion_requires_operator_review
+        ),
+        policy_rollout=resolved_policy_rollout,
+        spillover=resolved_spillover,
+    )
     resolved_router = router_service or RouterService(
         resolved_registry,
         circuit_breaker=resolved_circuit_breaker,
         session_affinity=resolved_session_affinity,
         prefix_locality=resolved_prefix_locality,
         canary_routing=resolved_canary,
+        cloud_rollout=resolved_cloud_rollout,
         policy_rollout=resolved_policy_rollout,
         spillover=resolved_spillover,
     )
@@ -109,8 +127,10 @@ def create_app(
         prefix_locality=resolved_prefix_locality,
         operator=resolved_operator,
         canary=resolved_canary,
+        cloud_rollout=resolved_cloud_rollout,
         shadow=resolved_shadow,
         policy_rollout=resolved_policy_rollout,
+        forge_promotion=resolved_forge_promotion,
         remote_workers=resolved_remote_workers,
         spillover=resolved_spillover,
         alias_overrides=resolved_alias_overrides,

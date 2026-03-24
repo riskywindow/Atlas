@@ -33,7 +33,9 @@ controls bounded and reversible.
 - Keep the first cloud path safe to operate:
   - canaries stay explicit,
   - spillover and remote budget posture stay bounded,
-  - kill switches and rollback remain operator-visible and reversible.
+  - kill switches and rollback remain operator-visible and reversible,
+  - `canary-only` cloud workers should stay behind an explicit runtime rollout gate
+    rather than depending on coarse alias pins.
 - Prepare for later Forge Stage A work:
   - typed artifacts, config surfaces, and replay/report outputs should remain consumable
     by later optimization work,

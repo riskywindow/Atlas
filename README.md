@@ -1,26 +1,38 @@
 # Switchyard
 
-Switchyard is a Mac-first, backend-agnostic inference fabric. In Phase 8 it can expose
+Switchyard is a Mac-first, backend-agnostic inference fabric. In Phase 9 it can expose
 one logical model alias through either MLX-LM, vLLM-Metal, or both, route requests
-across explicit network-addressable worker instances, and emit typed route decisions
-that are benchmarkable, replayable, and explainable. The current routing slice carries
-tenant and session context, rejects saturated backends with bounded admission rules,
-uses circuit-breaker protection to stop hammering failing backends, supports bounded
-session-affinity reuse, records canary/shadow decisions in runtime inspection and
-benchmark artifacts, and preserves deterministic request-feature extraction for
-cache/locality-aware scorers and offline policy simulation.
+across explicit network-addressable worker instances (local and remote), and emit typed
+route decisions that are benchmarkable, replayable, and explainable. The current routing
+slice carries tenant and session context, rejects saturated backends with bounded
+admission rules, uses circuit-breaker protection to stop hammering failing backends,
+supports bounded session-affinity reuse, records canary/shadow decisions in runtime
+inspection and benchmark artifacts, and preserves deterministic request-feature
+extraction for cache/locality-aware scorers and offline policy simulation.
 
-Phase 8 adds the first real cloud-backed execution path on top of that baseline:
+Phase 9 adds Forge Stage A — evidence-driven autotuning — on top of the Phase 8
+hybrid local/remote baseline:
 
-- remote workers are first-class topology members rather than special cases,
-- hybrid local/remote routing stays explainable and bounded by explicit spillover and
-  budget guardrails,
-- remote lifecycle and health posture are visible through admin/runtime surfaces,
-- benchmark and replay artifacts preserve remote-versus-local execution truth,
-- the first Linux/NVIDIA worker path fits the same generic worker contract,
-- control-plane packaging stays portable while cloud worker dependencies remain isolated,
-- optimization-ready config surfaces and config fingerprints prepare the repo for later
-  Forge Stage A work without starting autotuning yet.
+- typed optimization campaigns generate, prune, and evaluate candidate configurations
+  offline against benchmark and replay evidence,
+- multi-objective candidate ranking surfaces explicit tradeoffs across latency, quality,
+  remote spend, and workload diversity,
+- campaign honesty assessment validates recommendations against current environment state
+  (budget bounds, topology drift, staleness, workload coverage, evidence consistency),
+- typed recommendations carry dispositions, confidence levels, evidence kinds, and
+  reason codes,
+- a bounded promotion lifecycle (propose, approve, canary, compare, promote/rollback)
+  keeps changes reversible and operator-reviewed,
+- evidence semantics (observed vs replayed vs simulated vs estimated) are preserved
+  end-to-end and never collapsed.
+
+Earlier phases delivered:
+
+- remote workers as first-class topology members with hybrid local/remote guardrails
+  (Phase 7-8),
+- the first real Linux/NVIDIA worker path behind the same generic worker contract
+  (Phase 8),
+- optimization-ready config surfaces and config fingerprints (Phase 7-8).
 
 More specifically, the current repo includes:
 - deterministic request and workload feature extraction,
@@ -34,11 +46,43 @@ More specifically, the current repo includes:
 - typed hybrid local/remote execution settings and runtime inspection,
 - operator-visible remote spillover budgets and remote-health summaries,
 - remote worker lifecycle posture for later secure registration and cloud-ready workers,
-- optimization-ready config and export surfaces for later Forge Stage A work.
+- optimization-ready config and export surfaces for Forge Stage A autotuning.
 - explicit separation between observed cloud/runtime evidence and estimated or mock
   evidence in typed operator and benchmark surfaces.
+- offline optimization campaigns with candidate generation, pruning, and ranking.
+- campaign honesty assessment for budget, topology, staleness, and evidence validation.
+- bounded promotion lifecycle with canary rollout and atomic rollback.
+- typed recommendation summaries with disposition, confidence, and evidence posture.
 
-Phase 8 is Mac-first, not Mac-locked:
+## Phase 9 At A Glance
+
+Phase 9 is the first release with an optimization layer (Forge Stage A) on top of the
+existing hybrid control plane.
+
+- typed optimization profiles declare what is safely tunable (routing policy, rollout
+  mode, hybrid budget posture, shadow sampling) and what is excluded (kernels,
+  quantization, model loading),
+- offline campaigns generate candidates, evaluate them against benchmark and replay
+  evidence, and rank them with multi-objective comparison,
+- campaign honesty assessment warns when recommendations may not be trustworthy due to
+  budget changes, topology drift, stale evidence, narrow workload coverage, or
+  inconsistent evidence,
+- recommendations carry explicit dispositions (PROMOTE_CANDIDATE, KEEP_BASELINE,
+  NEED_MORE_EVIDENCE, INVALIDATE_TRIAL) and evidence kinds,
+- promotion follows a bounded lifecycle: PROPOSED -> APPROVED -> CANARY_ACTIVE ->
+  COMPARED -> PROMOTED_DEFAULT with rollback at every stage,
+- evidence semantics (observed, replayed, simulated, estimated) are never collapsed
+  and are visible in every operator surface.
+
+Start with these docs:
+
+- [docs/forge-stage-a.md](/Users/rishivinodkumar/Atlas/docs/forge-stage-a.md)
+- [docs/architecture.md](/Users/rishivinodkumar/Atlas/docs/architecture.md)
+- [docs/remote-workers.md](/Users/rishivinodkumar/Atlas/docs/remote-workers.md)
+- [docs/phase8.md](/Users/rishivinodkumar/Atlas/docs/phase8.md)
+- [docs/phase9.md](/Users/rishivinodkumar/Atlas/docs/phase9.md)
+
+Phase 9 is Mac-first, not Mac-locked:
 - real local backends are currently Apple Silicon focused,
 - the gateway, router, schemas, and artifacts stay backend-agnostic,
 - Apple-specific imports stay behind adapter and runtime boundaries,
@@ -46,7 +90,7 @@ Phase 8 is Mac-first, not Mac-locked:
 - the same control plane is intended to grow into future `vllm_cuda` and remote worker
   backends.
 
-## Phase 8 Setup
+## Setup
 
 ### Prerequisites
 
@@ -121,9 +165,9 @@ Notes:
 - Portable control-plane packaging should continue to work without either Apple-worker
   extra installed.
 
-## Mac-First Phase 8 Workflow
+## Mac-First Workflow
 
-Phase 8 is built around one explicit split:
+The current workflow is built around one explicit split:
 
 - Apple-Silicon model workers stay host-native on macOS by default.
 - The control plane can run locally, in Docker Compose, or in kind without Apple-specific runtime dependencies.
@@ -292,15 +336,33 @@ curl -sS -X POST http://127.0.0.1:8000/admin/policy-rollout/reset | python -m js
 curl -s http://127.0.0.1:8000/admin/policy-rollout/export | python -m json.tool
 ```
 
+Inspect and mutate the real-cloud rollout gate for `canary-only` remote workers:
+
+```bash
+curl -s http://127.0.0.1:8000/admin/hybrid/cloud-rollout | python -m json.tool
+
+curl -sS http://127.0.0.1:8000/admin/hybrid/cloud-rollout \
+  -H 'content-type: application/json' \
+  -d '{"enabled":true,"canary_percentage":5.0,"kill_switch_enabled":false}' \
+  | python -m json.tool
+
+curl -sS http://127.0.0.1:8000/admin/hybrid/cloud-rollout \
+  -H 'content-type: application/json' \
+  -d '{"kill_switch_enabled":true}' \
+  | python -m json.tool
+```
+
 Use the longer guides together:
 
 - [deployment.md](/Users/rishivinodkumar/Atlas/docs/deployment.md)
 - [hybrid-workers.md](/Users/rishivinodkumar/Atlas/docs/hybrid-workers.md)
+- [remote-workers.md](/Users/rishivinodkumar/Atlas/docs/remote-workers.md)
 - [control-plane.md](/Users/rishivinodkumar/Atlas/docs/control-plane.md)
 - [benchmarking.md](/Users/rishivinodkumar/Atlas/docs/benchmarking.md)
 - [phase6.md](/Users/rishivinodkumar/Atlas/docs/phase6.md)
 - [phase7.md](/Users/rishivinodkumar/Atlas/docs/phase7.md)
 - [phase8.md](/Users/rishivinodkumar/Atlas/docs/phase8.md)
+- [phase8-exit-review.md](/Users/rishivinodkumar/Atlas/docs/phase8-exit-review.md)
 - [intelligent-routing.md](/Users/rishivinodkumar/Atlas/docs/intelligent-routing.md)
 - [architecture.md](/Users/rishivinodkumar/Atlas/docs/architecture.md)
 
@@ -955,6 +1017,7 @@ uv run pytest
 
 - [README.md](/Users/rishivinodkumar/Atlas/README.md)
 - [docs/architecture.md](/Users/rishivinodkumar/Atlas/docs/architecture.md)
+- [docs/forge-stage-a.md](/Users/rishivinodkumar/Atlas/docs/forge-stage-a.md)
 - [docs/hybrid-workers.md](/Users/rishivinodkumar/Atlas/docs/hybrid-workers.md)
 - [docs/control-plane.md](/Users/rishivinodkumar/Atlas/docs/control-plane.md)
 - [docs/benchmarking.md](/Users/rishivinodkumar/Atlas/docs/benchmarking.md)
@@ -965,6 +1028,8 @@ uv run pytest
 - [docs/phase4.md](/Users/rishivinodkumar/Atlas/docs/phase4.md)
 - [docs/phase7.md](/Users/rishivinodkumar/Atlas/docs/phase7.md)
 - [docs/phase8.md](/Users/rishivinodkumar/Atlas/docs/phase8.md)
+- [docs/phase8-exit-review.md](/Users/rishivinodkumar/Atlas/docs/phase8-exit-review.md)
+- [docs/phase9.md](/Users/rishivinodkumar/Atlas/docs/phase9.md)
 - [docs/infra.md](/Users/rishivinodkumar/Atlas/docs/infra.md)
 - [docs/adr/0001-single-python-workspace.md](/Users/rishivinodkumar/Atlas/docs/adr/0001-single-python-workspace.md)
 - [docs/adr/0002-optional-mlx-runtime-boundary.md](/Users/rishivinodkumar/Atlas/docs/adr/0002-optional-mlx-runtime-boundary.md)
@@ -973,3 +1038,6 @@ uv run pytest
 - [docs/adr/0005-deterministic-canary-bucketing.md](/Users/rishivinodkumar/Atlas/docs/adr/0005-deterministic-canary-bucketing.md)
 - [docs/adr/0008-phase7-optimization-ready-knob-surface.md](/Users/rishivinodkumar/Atlas/docs/adr/0008-phase7-optimization-ready-knob-surface.md)
 - [docs/adr/0009-phase7-remote-workers-as-first-class-topology-members.md](/Users/rishivinodkumar/Atlas/docs/adr/0009-phase7-remote-workers-as-first-class-topology-members.md)
+- [docs/adr/0010-phase8-canary-only-cloud-rollout-gating.md](/Users/rishivinodkumar/Atlas/docs/adr/0010-phase8-canary-only-cloud-rollout-gating.md)
+- [docs/adr/0011-phase8-concrete-vllm-cuda-runtime-behind-generic-worker-contract.md](/Users/rishivinodkumar/Atlas/docs/adr/0011-phase8-concrete-vllm-cuda-runtime-behind-generic-worker-contract.md)
+- [docs/adr/0012-phase9-forge-stage-a-optimization-and-promotion-model.md](/Users/rishivinodkumar/Atlas/docs/adr/0012-phase9-forge-stage-a-optimization-and-promotion-model.md)
