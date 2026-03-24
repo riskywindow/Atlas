@@ -29,6 +29,7 @@ from switchyard.bench.artifacts import (
     render_artifact_bundle_markdown,
     render_comparison_report_markdown,
     render_forge_campaign_inspection_markdown,
+    render_forge_promotion_runtime_markdown,
     render_loaded_artifact_markdown,
     render_run_report_markdown,
     render_simulation_comparison_report_markdown,
@@ -113,6 +114,13 @@ from switchyard.schemas.benchmark import (
     WorkloadScenarioFamily,
 )
 from switchyard.schemas.chat import UsageStats
+from switchyard.schemas.forge import (
+    ForgePromotionAppliedKnobChange,
+    ForgePromotionComparisonSummary,
+    ForgePromotionLifecycleEvent,
+    ForgePromotionLifecycleState,
+    ForgePromotionRuntimeSummary,
+)
 from switchyard.schemas.optimization import (
     ForgeCandidateKind,
     ForgeEvidenceSourceKind,
@@ -120,7 +128,9 @@ from switchyard.schemas.optimization import (
     OptimizationArtifactSourceType,
     OptimizationArtifactStatus,
     OptimizationCampaignArtifact,
+    OptimizationCampaignComparisonArtifact,
     OptimizationCampaignMetadata,
+    OptimizationCandidateComparisonArtifact,
     OptimizationCandidateConfigurationArtifact,
     OptimizationComparisonOperator,
     OptimizationConstraint,
@@ -136,6 +146,7 @@ from switchyard.schemas.optimization import (
     OptimizationPromotionDecision,
     OptimizationPromotionDisposition,
     OptimizationRecommendationDisposition,
+    OptimizationRecommendationLabel,
     OptimizationRecommendationSummary,
     OptimizationScope,
     OptimizationScopeKind,
@@ -2939,5 +2950,347 @@ def test_render_optimization_reports_surface_workload_and_budget_posture() -> No
     assert "Helps workload families" in campaign_markdown
     assert "Remote budget constraints involved" in campaign_markdown
     assert "# Switchyard Forge Stage A Inspection" in inspection_markdown
-    assert "recommendation=`promote_candidate`" in inspection_markdown
+    assert "Recommendation: `promote_candidate`" in inspection_markdown
     assert "# Switchyard Optimization Campaign:" in campaign_markdown
+
+
+# ---------------------------------------------------------------------------
+# Forge campaign inspection markdown: detailed sections
+# ---------------------------------------------------------------------------
+
+
+def test_forge_campaign_inspection_markdown_surfaces_trial_diffs_and_provenance() -> None:
+    campaign = _campaign_artifact()
+    inspection = inspect_forge_stage_a_campaigns(campaign_artifacts=[campaign])
+    markdown = render_forge_campaign_inspection_markdown(inspection)
+
+    # Trial header and identity.
+    assert "#### Trial `trial-artifact-001`" in markdown
+    assert "Candidate: `candidate-config-latency`" in markdown
+    assert "Config profile: `phase9-latency`" in markdown
+    assert "Candidate kind: `routing_policy`" in markdown
+    assert "Status: `partial`" in markdown
+
+    # Candidate diff entries.
+    assert "##### Candidate Diff" in markdown
+    assert "`shadow_sampling_rate`" in markdown
+    assert "`0.0` -> `0.1`" in markdown
+
+    # Provenance.
+    assert "##### Provenance" in markdown
+    assert "Campaign: `campaign-phase9-001`" in markdown
+    assert "Trial artifact: `trial-artifact-001`" in markdown
+    assert "Candidate configuration: `candidate-config-latency`" in markdown
+    assert "Baseline profile: `phase9-baseline`" in markdown
+
+
+def test_forge_campaign_inspection_markdown_surfaces_campaign_metadata() -> None:
+    campaign = _campaign_artifact()
+    inspection = inspect_forge_stage_a_campaigns(campaign_artifacts=[campaign])
+    markdown = render_forge_campaign_inspection_markdown(inspection)
+
+    assert "Optimization profile: `phase9-stage-a-baseline`" in markdown
+    assert "Status: `partial`" in markdown
+    assert "Trustworthy: `True`" in markdown
+    assert "Remote budget involved:" in markdown
+
+
+def test_forge_campaign_inspection_markdown_surfaces_trial_evidence_and_workloads() -> None:
+    campaign = _campaign_artifact()
+    inspection = inspect_forge_stage_a_campaigns(campaign_artifacts=[campaign])
+    markdown = render_forge_campaign_inspection_markdown(inspection)
+
+    assert "Evidence kinds: `observed`" in markdown
+    assert "Routing policy: `latency_first`" in markdown
+
+
+def test_forge_campaign_inspection_markdown_surfaces_remote_budget_outcomes() -> None:
+    campaign = _campaign_artifact()
+    inspection = inspect_forge_stage_a_campaigns(campaign_artifacts=[campaign])
+    markdown = render_forge_campaign_inspection_markdown(inspection)
+
+    # The trial has a remote-share-cap constraint assessment that was satisfied.
+    assert "Remote budget outcomes:" in markdown
+    assert "remote-share-cap:satisfied" in markdown
+
+
+def test_forge_campaign_inspection_with_comparison_shows_rank() -> None:
+    campaign = _campaign_artifact()
+    trial = campaign.trials[0]
+    recommendation = trial.recommendation_summary
+    assert recommendation is not None
+    comparison = OptimizationCampaignComparisonArtifact(
+        comparison_artifact_id="comparison-001",
+        campaign_id="campaign-phase9-001",
+        baseline_candidate_configuration_id="candidate-config-baseline",
+        candidate_comparisons=[
+            OptimizationCandidateComparisonArtifact(
+                candidate_configuration_id="candidate-config-latency",
+                trial_artifact_id="trial-artifact-001",
+                config_profile_id="phase9-latency",
+                rank=1,
+                pareto_optimal=True,
+                dominated=False,
+                recommendation_summary=recommendation,
+            )
+        ],
+    )
+    inspection = inspect_forge_stage_a_campaigns(
+        campaign_artifacts=[campaign],
+        comparison_artifacts=[comparison],
+    )
+    markdown = render_forge_campaign_inspection_markdown(inspection)
+
+    assert "Comparison rank: `1`" in markdown
+    assert "pareto=`True`" in markdown
+    assert "dominated=`False`" in markdown
+
+
+def test_forge_campaign_inspection_markdown_handles_empty_campaigns() -> None:
+    from switchyard.schemas.forge import ForgeCampaignInspectionResponse
+
+    inspection = ForgeCampaignInspectionResponse(campaigns=[], notes=[])
+    markdown = render_forge_campaign_inspection_markdown(inspection)
+
+    assert "# Switchyard Forge Stage A Inspection" in markdown
+    assert "No campaign artifacts were provided" in markdown
+
+
+# ---------------------------------------------------------------------------
+# Forge promotion runtime markdown: detailed sections
+# ---------------------------------------------------------------------------
+
+
+def _promotion_summary_with_canary() -> ForgePromotionRuntimeSummary:
+    """Build a promotion summary in CANARY_ACTIVE state with applied knobs."""
+    return ForgePromotionRuntimeSummary(
+        rollout_artifact_id="forge-rollout-candidate-001",
+        baseline_config_profile_id="phase9-baseline",
+        active_config_profile_id="phase9-latency-candidate",
+        candidate_config_profile_id="phase9-latency-candidate",
+        lifecycle_state=ForgePromotionLifecycleState.CANARY_ACTIVE,
+        applied=True,
+        campaign_id="campaign-phase9-001",
+        campaign_artifact_id="campaign-artifact-001",
+        trial_artifact_id="trial-artifact-001",
+        candidate_configuration_id="candidate-config-latency",
+        candidate_kind=ForgeCandidateKind.ROUTING_POLICY,
+        routing_policy="latency_first",
+        rollout_mode=PolicyRolloutMode.CANARY,
+        canary_percentage=10.0,
+        promotion_disposition=OptimizationPromotionDisposition.APPROVED_CANARY,
+        evidence_kinds=[
+            OptimizationArtifactEvidenceKind.OBSERVED,
+            OptimizationArtifactEvidenceKind.REPLAYED,
+        ],
+        applied_knob_changes=[
+            ForgePromotionAppliedKnobChange(
+                knob_id="default_routing_policy",
+                config_path="default_routing_policy",
+                runtime_mutable=True,
+                applied=True,
+                baseline_value="balanced",
+                candidate_value="latency_first",
+            ),
+            ForgePromotionAppliedKnobChange(
+                knob_id="policy_rollout_mode",
+                config_path="phase4.policy_rollout.mode",
+                runtime_mutable=True,
+                applied=True,
+                baseline_value="disabled",
+                candidate_value="canary",
+            ),
+        ],
+        rollback_available=True,
+        requires_operator_review=True,
+        lifecycle_events=[
+            ForgePromotionLifecycleEvent(
+                event_id="event-proposed",
+                lifecycle_state=ForgePromotionLifecycleState.PROPOSED,
+                promotion_disposition=OptimizationPromotionDisposition.RECOMMEND_CANARY,
+                recorded_at=datetime(2026, 3, 24, 10, 0, tzinfo=UTC),
+            ),
+            ForgePromotionLifecycleEvent(
+                event_id="event-approved",
+                lifecycle_state=ForgePromotionLifecycleState.APPROVED,
+                promotion_disposition=OptimizationPromotionDisposition.RECOMMEND_CANARY,
+                recorded_at=datetime(2026, 3, 24, 10, 1, tzinfo=UTC),
+            ),
+            ForgePromotionLifecycleEvent(
+                event_id="event-canary",
+                lifecycle_state=ForgePromotionLifecycleState.CANARY_ACTIVE,
+                promotion_disposition=OptimizationPromotionDisposition.APPROVED_CANARY,
+                recorded_at=datetime(2026, 3, 24, 10, 2, tzinfo=UTC),
+            ),
+        ],
+    )
+
+
+def _promotion_summary_with_comparison() -> ForgePromotionRuntimeSummary:
+    """Build a promotion summary in COMPARED state with full comparison details."""
+    base = _promotion_summary_with_canary()
+    return base.model_copy(
+        update={
+            "lifecycle_state": ForgePromotionLifecycleState.COMPARED,
+            "comparison": ForgePromotionComparisonSummary(
+                comparison_artifact_id="comparison-artifact-001",
+                campaign_id="campaign-phase9-001",
+                candidate_configuration_id="candidate-config-latency",
+                baseline_candidate_configuration_id="candidate-config-baseline",
+                config_profile_id="phase9-latency-candidate",
+                rank=1,
+                pareto_optimal=True,
+                dominated=False,
+                recommendation_disposition=(
+                    OptimizationRecommendationDisposition.PROMOTE_CANDIDATE
+                ),
+                recommendation_label=OptimizationRecommendationLabel.PROMOTION_ELIGIBLE,
+                evidence_kinds=[
+                    OptimizationArtifactEvidenceKind.OBSERVED,
+                    OptimizationArtifactEvidenceKind.REPLAYED,
+                ],
+                improved_objective_ids=["latency-p50"],
+                regressed_objective_ids=["error-rate"],
+                satisfied_constraint_ids=["remote-share-cap"],
+                violated_constraint_ids=[],
+                benefited_workload_families=["repeated_prefix"],
+                regressed_workload_families=["code_completion"],
+                rationale=[
+                    "latency improved under observed evidence",
+                    "error rate within acceptable bounds",
+                ],
+            ),
+            "lifecycle_events": [
+                *base.lifecycle_events,
+                ForgePromotionLifecycleEvent(
+                    event_id="event-compared",
+                    lifecycle_state=ForgePromotionLifecycleState.COMPARED,
+                    promotion_disposition=(
+                        OptimizationPromotionDisposition.APPROVED_CANARY
+                    ),
+                    recorded_at=datetime(2026, 3, 24, 10, 3, tzinfo=UTC),
+                ),
+            ],
+        },
+        deep=True,
+    )
+
+
+def test_forge_promotion_markdown_surfaces_rollout_controls() -> None:
+    summary = _promotion_summary_with_canary()
+    markdown = render_forge_promotion_runtime_markdown(summary)
+
+    assert "# Switchyard Forge Stage A Promotion" in markdown
+    assert "Lifecycle state: `canary_active`" in markdown
+    assert "Applied: `True`" in markdown
+    assert "Rollback available: `True`" in markdown
+    assert "Requires operator review: `True`" in markdown
+
+
+def test_forge_promotion_markdown_surfaces_config_profiles() -> None:
+    summary = _promotion_summary_with_canary()
+    markdown = render_forge_promotion_runtime_markdown(summary)
+
+    assert "## Config Profiles" in markdown
+    assert "Baseline: `phase9-baseline`" in markdown
+    assert "Active: `phase9-latency-candidate`" in markdown
+    assert "Candidate: `phase9-latency-candidate`" in markdown
+
+
+def test_forge_promotion_markdown_surfaces_campaign_identity() -> None:
+    summary = _promotion_summary_with_canary()
+    markdown = render_forge_promotion_runtime_markdown(summary)
+
+    assert "## Campaign Identity" in markdown
+    assert "Campaign: `campaign-phase9-001`" in markdown
+    assert "Campaign artifact: `campaign-artifact-001`" in markdown
+    assert "Trial artifact: `trial-artifact-001`" in markdown
+    assert "Candidate: `candidate-config-latency`" in markdown
+
+
+def test_forge_promotion_markdown_surfaces_applied_knob_changes() -> None:
+    summary = _promotion_summary_with_canary()
+    markdown = render_forge_promotion_runtime_markdown(summary)
+
+    assert "## Applied Knob Changes" in markdown
+    assert "`default_routing_policy`" in markdown
+    assert "`balanced` -> `latency_first`" in markdown
+    assert "(applied)" in markdown
+    assert "`policy_rollout_mode`" in markdown
+
+
+def test_forge_promotion_markdown_surfaces_lifecycle_events() -> None:
+    summary = _promotion_summary_with_canary()
+    markdown = render_forge_promotion_runtime_markdown(summary)
+
+    assert "## Lifecycle Events" in markdown
+    assert "`proposed`" in markdown
+    assert "`approved`" in markdown
+    assert "`canary_active`" in markdown
+    assert "disposition=`recommend_canary`" in markdown
+
+
+def test_forge_promotion_markdown_surfaces_candidate_kind_and_policy() -> None:
+    summary = _promotion_summary_with_canary()
+    markdown = render_forge_promotion_runtime_markdown(summary)
+
+    assert "Candidate kind: `routing_policy`" in markdown
+    assert "Routing policy: `latency_first`" in markdown
+
+
+def test_forge_promotion_markdown_surfaces_detailed_comparison() -> None:
+    summary = _promotion_summary_with_comparison()
+    markdown = render_forge_promotion_runtime_markdown(summary)
+
+    assert "## Canary Comparison" in markdown
+    assert "Recommendation: `promote_candidate`" in markdown
+    assert "Label: `promotion_eligible`" in markdown
+    assert "Rank: `1` pareto=`True` dominated=`False`" in markdown
+    assert "Evidence kinds: `observed, replayed`" in markdown
+    assert "Improved objectives: `latency-p50`" in markdown
+    assert "Regressed objectives: `error-rate`" in markdown
+    assert "Satisfied constraints: `remote-share-cap`" in markdown
+    assert "Violated constraints: `none`" in markdown
+    assert "Helps workload families: `repeated_prefix`" in markdown
+    assert "Hurts workload families: `code_completion`" in markdown
+
+
+def test_forge_promotion_markdown_surfaces_comparison_rationale() -> None:
+    summary = _promotion_summary_with_comparison()
+    markdown = render_forge_promotion_runtime_markdown(summary)
+
+    assert "### Rationale" in markdown
+    assert "latency improved under observed evidence" in markdown
+    assert "error rate within acceptable bounds" in markdown
+
+
+def test_forge_promotion_markdown_no_comparison_omits_section() -> None:
+    summary = _promotion_summary_with_canary()
+    markdown = render_forge_promotion_runtime_markdown(summary)
+
+    assert "## Canary Comparison" not in markdown
+
+
+def test_forge_promotion_markdown_no_campaign_omits_identity() -> None:
+    summary = ForgePromotionRuntimeSummary(
+        baseline_config_profile_id="phase9-baseline",
+        active_config_profile_id="phase9-baseline",
+    )
+    markdown = render_forge_promotion_runtime_markdown(summary)
+
+    assert "## Campaign Identity" not in markdown
+    assert "## Applied Knob Changes" not in markdown
+    assert "## Lifecycle Events" not in markdown
+
+
+def test_forge_promotion_markdown_evidence_trust_boundary_preserved() -> None:
+    """Evidence kinds are listed explicitly, not blurred across categories."""
+    summary = _promotion_summary_with_comparison()
+    markdown = render_forge_promotion_runtime_markdown(summary)
+
+    # The rollout-level evidence kinds should list observed and replayed separately.
+    assert "observed, replayed" in markdown
+    # The comparison evidence kinds should also be listed separately.
+    comparison_section_start = markdown.index("## Canary Comparison")
+    comparison_section = markdown[comparison_section_start:]
+    assert "Evidence kinds: `observed, replayed`" in comparison_section

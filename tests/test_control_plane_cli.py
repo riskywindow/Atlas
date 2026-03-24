@@ -282,8 +282,8 @@ def test_inspect_forge_stage_a_campaign_command_renders_markdown(tmp_path: Path)
 
     assert result.exit_code == 0
     assert "# Switchyard Forge Stage A Inspection" in result.stdout
-    assert "recommendation=`promote_candidate`" in result.stdout
-    assert "helps=`repeated_prefix`" in result.stdout
+    assert "Recommendation: `promote_candidate`" in result.stdout
+    assert "Helps workload families: `repeated_prefix`" in result.stdout
 
 
 def test_apply_forge_stage_a_promotion_command(

@@ -2595,7 +2595,7 @@ def render_optimization_campaign_report_markdown(
 def render_forge_campaign_inspection_markdown(
     inspection: ForgeCampaignInspectionResponse,
 ) -> str:
-    """Render a compact Markdown report for campaign inspection summaries."""
+    """Render a detailed Markdown report for campaign inspection summaries."""
 
     lines = ["# Switchyard Forge Stage A Inspection", ""]
     if not inspection.campaigns:
@@ -2606,7 +2606,10 @@ def render_forge_campaign_inspection_markdown(
             [
                 f"## Campaign `{campaign.campaign_artifact_id}`",
                 f"- Campaign ID: `{campaign.campaign_id}`",
+                f"- Optimization profile: `{campaign.optimization_profile_id}`",
                 f"- Objective: `{campaign.objective}`",
+                f"- Status: `{campaign.result_status.value}`",
+                f"- Trustworthy: `{campaign.trustworthy}`",
                 (
                     "- Evidence kinds: "
                     f"`{', '.join(kind.value for kind in campaign.evidence_kinds) or 'none'}`"
@@ -2623,24 +2626,97 @@ def render_forge_campaign_inspection_markdown(
                     "- Hurts workload families: "
                     f"`{', '.join(campaign.hurt_workload_families) or 'none'}`"
                 ),
+                f"- Remote budget involved: `{campaign.remote_budget_involved}`",
                 (
                     "- Remote budget constraints: "
                     f"`{', '.join(campaign.remote_budget_constraint_ids) or 'none'}`"
                 ),
-                "",
-                "### Trials",
             ]
         )
-        lines.extend(
-            (
-                f"- `{trial.trial_artifact_id}`: "
-                f"recommendation=`{_inspection_trial_recommendation_label(trial)}` "
-                f"evidence=`{', '.join(kind.value for kind in trial.evidence_kinds) or 'none'}` "
-                f"helps=`{', '.join(trial.helped_workload_families) or 'none'}` "
-                f"hurts=`{', '.join(trial.hurt_workload_families) or 'none'}`"
+
+        if campaign.honesty_warnings:
+            lines.extend(["", "### Honesty Warnings"])
+            for warning in campaign.honesty_warnings:
+                lines.append(
+                    f"- [{warning.severity}] `{warning.kind.value}`: {warning.message}"
+                )
+
+        lines.extend(["", "### Trials"])
+        for trial in campaign.trials:
+            lines.extend(
+                [
+                    "",
+                    f"#### Trial `{trial.trial_artifact_id}`",
+                    f"- Candidate: `{trial.candidate_configuration_id}`",
+                    f"- Config profile: `{trial.config_profile_id}`",
+                    f"- Baseline profile: `{trial.baseline_config_profile_id}`",
+                    f"- Candidate kind: `{trial.candidate_kind.value}`",
+                    f"- Status: `{trial.trial_status.value}`",
+                    (
+                        "- Recommendation: "
+                        f"`{_inspection_trial_recommendation_label(trial)}`"
+                    ),
+                ]
             )
-            for trial in campaign.trials
-        )
+            if trial.recommendation_label is not None:
+                lines.append(
+                    f"- Recommendation label: `{trial.recommendation_label.value}`"
+                )
+            lines.append(
+                "- Evidence kinds: "
+                f"`{', '.join(kind.value for kind in trial.evidence_kinds) or 'none'}`"
+            )
+            lines.append(
+                "- Helps workload families: "
+                f"`{', '.join(trial.helped_workload_families) or 'none'}`"
+            )
+            lines.append(
+                "- Hurts workload families: "
+                f"`{', '.join(trial.hurt_workload_families) or 'none'}`"
+            )
+            if trial.routing_policy is not None:
+                lines.append(f"- Routing policy: `{trial.routing_policy}`")
+            if trial.comparison_rank is not None:
+                lines.append(
+                    f"- Comparison rank: `{trial.comparison_rank}` "
+                    f"pareto=`{trial.pareto_optimal}` "
+                    f"dominated=`{trial.dominated}`"
+                )
+            if trial.remote_budget_involved:
+                lines.append(
+                    "- Remote budget outcomes: "
+                    f"`{', '.join(trial.remote_budget_constraint_outcomes) or 'none'}`"
+                )
+            if trial.diff_entries:
+                lines.append("")
+                lines.append("##### Candidate Diff")
+                for diff in trial.diff_entries:
+                    lines.append(
+                        f"- `{diff.knob_id}`: "
+                        f"`{diff.baseline_value}` -> `{diff.candidate_value}`"
+                    )
+            lines.extend(
+                [
+                    "",
+                    "##### Provenance",
+                    f"- Campaign: `{trial.provenance.campaign_id}`",
+                    f"- Trial artifact: `{trial.provenance.trial_artifact_id}`",
+                    (
+                        "- Candidate configuration: "
+                        f"`{trial.provenance.candidate_configuration_id}`"
+                    ),
+                    f"- Baseline profile: `{trial.provenance.baseline_config_profile_id}`",
+                ]
+            )
+            if trial.provenance.generation_strategy is not None:
+                lines.append(
+                    "- Generation strategy: "
+                    f"`{trial.provenance.generation_strategy}`"
+                )
+            if trial.provenance.eligibility_status is not None:
+                lines.append(
+                    f"- Eligibility: `{trial.provenance.eligibility_status}`"
+                )
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -2648,15 +2724,23 @@ def render_forge_campaign_inspection_markdown(
 def render_forge_promotion_runtime_markdown(
     summary: ForgePromotionRuntimeSummary,
 ) -> str:
-    """Render a compact Markdown report for live Forge promotion state."""
+    """Render a detailed Markdown report for live Forge promotion state."""
 
     lines = [
         "# Switchyard Forge Stage A Promotion",
         "",
         f"- Rollout artifact: `{summary.rollout_artifact_id or 'none'}`",
         f"- Lifecycle state: `{_promotion_lifecycle_label(summary)}`",
-        f"- Active config profile: `{summary.active_config_profile_id}`",
-        f"- Candidate config profile: `{summary.candidate_config_profile_id or 'none'}`",
+        f"- Applied: `{summary.applied}`",
+        f"- Rollback available: `{summary.rollback_available}`",
+        f"- Requires operator review: `{summary.requires_operator_review}`",
+        "",
+        "## Config Profiles",
+        f"- Baseline: `{summary.baseline_config_profile_id}`",
+        f"- Active: `{summary.active_config_profile_id}`",
+        f"- Candidate: `{summary.candidate_config_profile_id or 'none'}`",
+        "",
+        "## Rollout Controls",
         f"- Rollout mode: `{summary.rollout_mode.value}`",
         f"- Canary percentage: `{summary.canary_percentage}`",
         f"- Promotion disposition: `{summary.promotion_disposition.value}`",
@@ -2665,23 +2749,98 @@ def render_forge_promotion_runtime_markdown(
             f"`{', '.join(kind.value for kind in summary.evidence_kinds) or 'none'}`"
         ),
     ]
+    if summary.candidate_kind is not None:
+        lines.append(f"- Candidate kind: `{summary.candidate_kind.value}`")
+    if summary.routing_policy is not None:
+        lines.append(f"- Routing policy: `{summary.routing_policy}`")
+
+    if summary.campaign_id is not None:
+        lines.extend(
+            [
+                "",
+                "## Campaign Identity",
+                f"- Campaign: `{summary.campaign_id}`",
+                f"- Campaign artifact: `{summary.campaign_artifact_id or 'none'}`",
+                f"- Trial artifact: `{summary.trial_artifact_id or 'none'}`",
+                f"- Candidate: `{summary.candidate_configuration_id or 'none'}`",
+            ]
+        )
+
+    if summary.applied_knob_changes:
+        lines.extend(["", "## Applied Knob Changes"])
+        for knob in summary.applied_knob_changes:
+            applied_label = "applied" if knob.applied else "NOT applied"
+            lines.append(
+                f"- `{knob.knob_id}`: "
+                f"`{knob.baseline_value}` -> `{knob.candidate_value}` "
+                f"({applied_label})"
+            )
+
+    if summary.blocked_knob_changes:
+        lines.extend(["", "## Blocked Knob Changes"])
+        for knob in summary.blocked_knob_changes:
+            lines.append(
+                f"- `{knob.knob_id}`: {', '.join(knob.notes) or 'blocked'}"
+            )
+
     if summary.comparison is not None:
+        comp = summary.comparison
         lines.extend(
             [
                 "",
                 "## Canary Comparison",
-                f"- Comparison artifact: `{summary.comparison.comparison_artifact_id}`",
-                f"- Recommendation: `{summary.comparison.recommendation_disposition.value}`",
+                f"- Comparison artifact: `{comp.comparison_artifact_id}`",
+                f"- Recommendation: `{comp.recommendation_disposition.value}`",
+                f"- Label: `{comp.recommendation_label.value}`",
+                (
+                    f"- Rank: `{comp.rank}` "
+                    f"pareto=`{comp.pareto_optimal}` "
+                    f"dominated=`{comp.dominated}`"
+                ),
+                (
+                    "- Evidence kinds: "
+                    f"`{', '.join(kind.value for kind in comp.evidence_kinds) or 'none'}`"
+                ),
+                (
+                    "- Improved objectives: "
+                    f"`{', '.join(comp.improved_objective_ids) or 'none'}`"
+                ),
+                (
+                    "- Regressed objectives: "
+                    f"`{', '.join(comp.regressed_objective_ids) or 'none'}`"
+                ),
+                (
+                    "- Satisfied constraints: "
+                    f"`{', '.join(comp.satisfied_constraint_ids) or 'none'}`"
+                ),
+                (
+                    "- Violated constraints: "
+                    f"`{', '.join(comp.violated_constraint_ids) or 'none'}`"
+                ),
                 (
                     "- Helps workload families: "
-                    f"`{', '.join(summary.comparison.benefited_workload_families) or 'none'}`"
+                    f"`{', '.join(comp.benefited_workload_families) or 'none'}`"
                 ),
                 (
                     "- Hurts workload families: "
-                    f"`{', '.join(summary.comparison.regressed_workload_families) or 'none'}`"
+                    f"`{', '.join(comp.regressed_workload_families) or 'none'}`"
                 ),
             ]
         )
+        if comp.rationale:
+            lines.extend(["", "### Rationale"])
+            for reason in comp.rationale:
+                lines.append(f"- {reason}")
+
+    if summary.lifecycle_events:
+        lines.extend(["", "## Lifecycle Events"])
+        for event in summary.lifecycle_events:
+            lines.append(
+                f"- `{event.lifecycle_state.value}` at "
+                f"`{event.recorded_at.isoformat()}` "
+                f"disposition=`{event.promotion_disposition.value}`"
+            )
+
     return "\n".join(lines)
 
 
