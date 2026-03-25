@@ -57,6 +57,11 @@ Warnings are typed (`CampaignHonestyWarning`) and surfaced in operator inspectio
 views.  The system recommends `STALE` or `INVALIDATED` status when conditions
 warrant it but does not unilaterally overwrite campaign artifacts.
 
+Honesty checks always run during inspection (see ADR 0013).  Staleness, workload
+coverage, evidence consistency, and cost signal checks require no external
+environment state.  Budget-bound and topology-drift checks use the current worker
+inventory and budget posture when provided.
+
 ### Layer 3: Bounded Promotion Lifecycle
 
 Promotion follows an explicit multi-step lifecycle with rollback at every stage:

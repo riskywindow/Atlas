@@ -17,8 +17,9 @@ hybrid local/remote baseline:
   offline against benchmark and replay evidence,
 - multi-objective candidate ranking surfaces explicit tradeoffs across latency, quality,
   remote spend, and workload diversity,
-- campaign honesty assessment validates recommendations against current environment state
-  (budget bounds, topology drift, staleness, workload coverage, evidence consistency),
+- campaign honesty assessment always validates recommendations against artifact and
+  environment state (budget bounds, topology drift, staleness, workload coverage,
+  evidence consistency, cost signal verification),
 - typed recommendations carry dispositions, confidence levels, evidence kinds, and
   reason codes,
 - a bounded promotion lifecycle (propose, approve, canary, compare, promote/rollback)
@@ -1041,3 +1042,4 @@ uv run pytest
 - [docs/adr/0010-phase8-canary-only-cloud-rollout-gating.md](/Users/rishivinodkumar/Atlas/docs/adr/0010-phase8-canary-only-cloud-rollout-gating.md)
 - [docs/adr/0011-phase8-concrete-vllm-cuda-runtime-behind-generic-worker-contract.md](/Users/rishivinodkumar/Atlas/docs/adr/0011-phase8-concrete-vllm-cuda-runtime-behind-generic-worker-contract.md)
 - [docs/adr/0012-phase9-forge-stage-a-optimization-and-promotion-model.md](/Users/rishivinodkumar/Atlas/docs/adr/0012-phase9-forge-stage-a-optimization-and-promotion-model.md)
+- [docs/adr/0013-phase9-always-on-campaign-honesty-and-cost-signal-verification.md](/Users/rishivinodkumar/Atlas/docs/adr/0013-phase9-always-on-campaign-honesty-and-cost-signal-verification.md)

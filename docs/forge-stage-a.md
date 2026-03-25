@@ -170,13 +170,22 @@ Candidates that violate these constraints are:
 
 ### Honesty Checks
 
-When inspecting a campaign against the *current* environment, the honesty
-assessment warns if:
+Campaign honesty checks **always run** during inspection, not only when external
+environment state is supplied.  Staleness, workload coverage, evidence
+consistency, and cost signal checks operate on the campaign artifact itself.
+Budget-bound and topology-drift checks additionally use external environment
+state when it is available.
 
-- the current remote budget is lower than what the campaign assumed,
+The assessment warns if:
+
+- the current remote budget or concurrency cap is lower than what the campaign assumed,
 - the current remote share cap is lower than what trials evaluated,
 - workers from the campaign are no longer in the topology (topology drift),
-- the evidence is older than the staleness threshold.
+- the evidence is older than the staleness threshold,
+- the campaign covers too few workload families (overfit risk),
+- remote budget constraints were evaluated using configured values rather than
+  observed cost signals (cost signal mismatch),
+- observed and simulated evidence produce contradictory objective outcomes.
 
 These warnings appear in the `honesty_warnings` field of
 `ForgeCampaignInspectionSummary` and are surfaced through the inspection CLI and
@@ -327,17 +336,43 @@ Rollback and rejection restore the pre-promotion runtime state automatically.
 
 The campaign honesty assessment (`assess_campaign_honesty`) checks for:
 
-| Warning kind | When it fires |
-|---|---|
-| `BUDGET_BOUND_EXCEEDED` | Campaign assumed higher remote budget than currently configured |
-| `TOPOLOGY_DRIFT` | Workers from campaign evidence are missing or new workers appeared |
-| `STALE_EVIDENCE` | Evidence windows are older than the configured staleness threshold |
-| `NARROW_WORKLOAD_COVERAGE` | Campaign covers too few workload families (overfit risk) |
-| `EVIDENCE_INCONSISTENCY` | Estimated evidence outweighs observed evidence in trial inputs |
-| `OBSERVED_EVIDENCE_MISSING` | Promotion recommendations exist with no observed runtime backing |
+| Warning kind | When it fires | Severity |
+|---|---|---|
+| `BUDGET_BOUND_EXCEEDED` | Campaign assumed higher remote budget, share, or concurrency cap than currently configured | warning |
+| `TOPOLOGY_DRIFT` | Workers from campaign evidence are missing or new workers appeared | warning / info |
+| `STALE_EVIDENCE` | Evidence windows are older than the configured staleness threshold | warning |
+| `NARROW_WORKLOAD_COVERAGE` | Campaign covers too few workload families (overfit risk) | warning |
+| `EVIDENCE_INCONSISTENCY` | Estimated evidence outweighs observed, or observed and simulated objectives contradict | warning / error |
+| `OBSERVED_EVIDENCE_MISSING` | Promotion recommendations exist with no observed runtime backing | warning / error |
+| `COST_SIGNAL_MISMATCH` | Remote budget constraints evaluated using configured values, not observed cost signals | info |
+
+Honesty checks are **always on** during inspection.  Staleness, workload
+coverage, evidence consistency, and cost signal checks require no external
+environment state.  Budget-bound and topology-drift checks additionally use the
+current worker inventory and budget posture when provided.
 
 These warnings appear in the inspection view and should be reviewed before acting
 on any recommendation.
+
+### Marking Artifacts Stale or Invalidated
+
+When the honesty assessment recommends a status change, operators can apply it:
+
+```python
+from switchyard.bench.campaign_honesty import (
+    mark_campaign_stale,
+    mark_campaign_invalidated,
+    mark_trial_stale,
+    mark_trial_invalidated,
+)
+
+# Mark a campaign or trial as no longer trustworthy
+stale_campaign = mark_campaign_stale(campaign, reason="topology changed")
+invalidated_trial = mark_trial_invalidated(trial, reason="observed and simulated evidence contradict")
+```
+
+These functions return a copy with the updated status and reason; they do not
+mutate the original artifact.
 
 ## Preparing for Forge Stage B
 

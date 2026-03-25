@@ -31,6 +31,7 @@ class ForgeHonestyWarningKind(StrEnum):
     NARROW_WORKLOAD_COVERAGE = "narrow_workload_coverage"
     EVIDENCE_INCONSISTENCY = "evidence_inconsistency"
     OBSERVED_EVIDENCE_MISSING = "observed_evidence_missing"
+    COST_SIGNAL_MISMATCH = "cost_signal_mismatch"
 
 
 class ForgeHonestyWarningSummary(BaseModel):

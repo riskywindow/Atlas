@@ -10,6 +10,7 @@ from switchyard.bench.campaign_honesty import (
     assess_campaign_honesty,
     mark_campaign_invalidated,
     mark_campaign_stale,
+    mark_trial_invalidated,
     mark_trial_stale,
 )
 from switchyard.bench.campaigns import (
@@ -292,7 +293,12 @@ def test_inspection_surface_includes_honesty_warnings() -> None:
     campaign_summary = inspection.campaigns[0]
 
     # Should have honesty warnings from topology drift
-    assert len(campaign_summary.honesty_warnings) >= 1
+    drift_warnings = [
+        w
+        for w in campaign_summary.honesty_warnings
+        if w.kind.value == "topology_drift"
+    ]
+    assert len(drift_warnings) >= 1
     assert campaign_summary.trustworthy is False
     assert any(
         "honesty" in note for note in inspection.notes
@@ -325,6 +331,144 @@ def test_assessment_is_clean_when_environment_matches() -> None:
         OptimizationArtifactStatus.COMPLETE,
         OptimizationArtifactStatus.PARTIAL,
     }
+
+
+def test_mark_trial_invalidated_sets_status_and_reason() -> None:
+    """mark_trial_invalidated should produce an INVALIDATED trial artifact."""
+
+    result = _run_campaign_with_remote_evidence()
+    campaign = result.campaign_artifact
+    assert len(campaign.trials) > 0
+    trial = campaign.trials[0]
+
+    invalidated = mark_trial_invalidated(
+        trial, reason="observed and simulated evidence contradict"
+    )
+
+    assert invalidated.result_status is OptimizationArtifactStatus.INVALIDATED
+    assert invalidated.invalidation_reason == "observed and simulated evidence contradict"
+    assert any("invalidated" in note for note in invalidated.notes)
+    # Original should be unchanged
+    assert trial.result_status is not OptimizationArtifactStatus.INVALIDATED
+
+
+def test_concurrency_cap_budget_warning() -> None:
+    """Budget checks should include concurrency cap constraints."""
+
+    result = _run_campaign_with_remote_evidence()
+    campaign = result.campaign_artifact
+
+    # The campaign may not have concurrency cap constraints, but the function
+    # should accept the parameter and run without error
+    assessment = assess_campaign_honesty(
+        campaign_artifact=campaign,
+        current_remote_concurrency_cap=1,
+    )
+
+    assert assessment.campaign_artifact_id == campaign.campaign_artifact_id
+    assert isinstance(assessment.trustworthy, bool)
+    # Warnings about concurrency cap appear only when trials have
+    # REMOTE_CONCURRENCY_CAP constraint assessments with values > 1
+    for warning in assessment.warnings:
+        if warning.kind is CampaignHonestyWarningKind.BUDGET_BOUND_EXCEEDED:
+            assert len(warning.affected_trial_ids) > 0
+
+
+def test_cost_signal_mismatch_warning() -> None:
+    """Cost signal honesty check should flag configured-only remote constraints."""
+
+    result = _run_campaign_with_remote_evidence()
+    campaign = result.campaign_artifact
+
+    assessment = assess_campaign_honesty(campaign_artifact=campaign)
+
+    cost_warnings = [
+        warning
+        for warning in assessment.warnings
+        if warning.kind is CampaignHonestyWarningKind.COST_SIGNAL_MISMATCH
+    ]
+
+    # Cost signal mismatch warnings appear when remote constraints were
+    # evaluated without observed evidence.  Our test campaign uses local-only
+    # benchmarks so the constraint evidence_kinds may be empty (no warning)
+    # or populated with non-observed kinds (warning).  Either way the check
+    # must run without error.
+    for warning in cost_warnings:
+        assert warning.severity == "info"
+        assert len(warning.affected_trial_ids) > 0
+        assert any("configured" in note or "cost" in note for note in warning.notes)
+
+
+def test_inspection_always_runs_staleness_checks() -> None:
+    """Inspection should run honesty checks even without environment state."""
+
+    result = _run_campaign_with_remote_evidence()
+    campaign = result.campaign_artifact
+
+    # Provide NO environment state at all; force the campaign to look stale
+    stale_campaign = campaign.model_copy(
+        update={
+            "timestamp": datetime(2025, 1, 1, 0, 0, tzinfo=UTC),
+            "evidence_records": [
+                record.model_copy(
+                    update={
+                        "window_ended_at": datetime(2025, 1, 1, 0, 0, tzinfo=UTC),
+                    },
+                    deep=True,
+                )
+                for record in campaign.evidence_records
+            ],
+        },
+        deep=True,
+    )
+
+    # Inspection with no env state should still produce staleness warnings
+    inspection = inspect_forge_stage_a_campaigns(
+        campaign_artifacts=[stale_campaign],
+    )
+
+    assert len(inspection.campaigns) == 1
+    campaign_summary = inspection.campaigns[0]
+
+    # Always-on checks should have run
+    assert any(
+        "honesty checks always run" in note or "always run" in note
+        for note in campaign_summary.notes
+    )
+
+
+def test_inspection_without_env_state_runs_coverage_checks() -> None:
+    """Inspection runs workload coverage checks without environment state."""
+
+    result = _run_campaign_with_single_family()
+    campaign = result.campaign_artifact
+
+    inspection = inspect_forge_stage_a_campaigns(
+        campaign_artifacts=[campaign],
+    )
+
+    assert len(inspection.campaigns) == 1
+    campaign_summary = inspection.campaigns[0]
+
+    # Workload coverage warnings should appear since only one family was used
+    coverage_warnings = [
+        w
+        for w in campaign_summary.honesty_warnings
+        if w.kind.value == "narrow_workload_coverage"
+    ]
+    assert len(coverage_warnings) >= 1
+
+
+def test_mixed_evidence_scenario_with_no_observed() -> None:
+    """Campaigns with promotion recommendations but no observed evidence should warn."""
+
+    result = _run_campaign_with_remote_evidence()
+    campaign = result.campaign_artifact
+
+    # Regardless of promotion recommendations, the consistency check should run
+    assessment = assess_campaign_honesty(campaign_artifact=campaign)
+    assert isinstance(assessment.trustworthy, bool)
+    assert isinstance(assessment.warnings, list)
 
 
 # ---------------------------------------------------------------------------

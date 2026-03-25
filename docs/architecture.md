@@ -283,14 +283,23 @@ and honesty warnings.  They are never collapsed into a single score.
 
 ### Campaign Honesty
 
-The honesty assessment (`assess_campaign_honesty`) checks for:
+The honesty assessment (`assess_campaign_honesty`) **always runs** during
+inspection.  It checks for:
 
-- budget bounds exceeded (campaign assumed higher remote budget than currently configured),
+- budget bounds exceeded (campaign assumed higher remote budget, share, or concurrency
+  cap than currently configured),
 - topology drift (workers from campaign evidence are missing or new workers appeared),
 - stale evidence (evidence older than the configured staleness threshold),
 - narrow workload coverage (campaign covers too few workload families),
-- evidence inconsistency (estimated evidence outweighs observed evidence),
-- observed evidence missing (promotion recommendations with no observed runtime backing).
+- evidence inconsistency (estimated evidence outweighs observed evidence, or observed
+  and simulated objectives produce contradictory outcomes),
+- observed evidence missing (promotion recommendations with no observed runtime backing),
+- cost signal mismatch (remote budget constraints evaluated using configured values
+  rather than observed cost signals).
+
+Staleness, workload coverage, evidence consistency, and cost signal checks require no
+external environment state.  Budget-bound and topology-drift checks use the current
+worker inventory and budget posture when provided.
 
 These warnings appear in `ForgeCampaignInspectionSummary` and must be reviewed before
 acting on any recommendation.

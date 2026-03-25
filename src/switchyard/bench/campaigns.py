@@ -102,6 +102,7 @@ def inspect_forge_stage_a_campaigns(
     current_worker_inventory: Sequence[BackendInstance] | None = None,
     current_remote_budget_per_minute: int | None = None,
     current_max_remote_share_percent: float | None = None,
+    current_remote_concurrency_cap: int | None = None,
 ) -> ForgeCampaignInspectionResponse:
     """Build an operator-facing inspection view over one or more campaign artifacts.
 
@@ -122,16 +123,19 @@ def inspect_forge_stage_a_campaigns(
             current_worker_inventory=current_worker_inventory,
             current_remote_budget_per_minute=current_remote_budget_per_minute,
             current_max_remote_share_percent=current_max_remote_share_percent,
+            current_remote_concurrency_cap=current_remote_concurrency_cap,
         )
         for campaign_artifact in campaign_artifacts
     ]
     notes = [
         "inspection summaries are derived from authoritative campaign and comparison artifacts",
         "observed, replayed, simulated, and estimated evidence kinds remain listed explicitly",
+        "honesty checks (staleness, workload coverage, evidence consistency, cost signals) "
+        "always run; budget and topology checks use environment state when available",
     ]
     if current_worker_inventory is not None:
         notes.append(
-            "honesty checks were run against the current environment state"
+            "topology drift checks were run against the current worker inventory"
         )
     if not campaigns:
         notes.append("no campaign artifacts were provided for inspection")
@@ -1388,6 +1392,7 @@ def _campaign_inspection_summary(
     current_worker_inventory: Sequence[BackendInstance] | None = None,
     current_remote_budget_per_minute: int | None = None,
     current_max_remote_share_percent: float | None = None,
+    current_remote_concurrency_cap: int | None = None,
 ) -> ForgeCampaignInspectionSummary:
     comparison_by_candidate_id = (
         {
@@ -1423,35 +1428,34 @@ def _campaign_inspection_summary(
         {record.evidence_kind for record in campaign_artifact.evidence_records},
         key=lambda item: item.value,
     )
-    honesty_warnings: list[ForgeHonestyWarningSummary] = []
-    trustworthy = True
-    run_honesty_check = (
-        current_worker_inventory is not None
-        or current_remote_budget_per_minute is not None
-        or current_max_remote_share_percent is not None
+    # Always run honesty checks.  Staleness, workload coverage, evidence
+    # consistency, and cost-signal checks do not require external environment
+    # state.  Budget-bound and topology-drift checks use external state when
+    # it is available but degrade gracefully when it is not.
+    assessment = assess_campaign_honesty(
+        campaign_artifact=campaign_artifact,
+        current_worker_inventory=current_worker_inventory,
+        current_remote_budget_per_minute=current_remote_budget_per_minute,
+        current_max_remote_share_percent=current_max_remote_share_percent,
+        current_remote_concurrency_cap=current_remote_concurrency_cap,
     )
-    if run_honesty_check:
-        assessment = assess_campaign_honesty(
-            campaign_artifact=campaign_artifact,
-            current_worker_inventory=current_worker_inventory,
-            current_remote_budget_per_minute=current_remote_budget_per_minute,
-            current_max_remote_share_percent=current_max_remote_share_percent,
+    trustworthy = assessment.trustworthy
+    honesty_warnings = [
+        ForgeHonestyWarningSummary(
+            kind=ForgeHonestyWarningKind(warning.kind.value),
+            severity=warning.severity,
+            message=warning.message,
+            affected_trial_ids=list(warning.affected_trial_ids),
+            notes=list(warning.notes),
         )
-        trustworthy = assessment.trustworthy
-        honesty_warnings = [
-            ForgeHonestyWarningSummary(
-                kind=ForgeHonestyWarningKind(warning.kind.value),
-                severity=warning.severity,
-                message=warning.message,
-                affected_trial_ids=list(warning.affected_trial_ids),
-                notes=list(warning.notes),
-            )
-            for warning in assessment.warnings
-        ]
+        for warning in assessment.warnings
+    ]
 
     notes = [
         "campaign inspection summary is derived from campaign and comparison artifacts",
         "trial entries keep workload and evidence posture explicit",
+        "honesty checks always run; staleness, workload coverage, evidence consistency, "
+        "and cost signal checks do not require external environment state",
     ]
     if remote_budget_constraint_ids:
         notes.append("remote budget or remote share constraints were in scope")

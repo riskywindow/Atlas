@@ -35,6 +35,7 @@ class CampaignHonestyWarningKind(StrEnum):
     NARROW_WORKLOAD_COVERAGE = "narrow_workload_coverage"
     EVIDENCE_INCONSISTENCY = "evidence_inconsistency"
     OBSERVED_EVIDENCE_MISSING = "observed_evidence_missing"
+    COST_SIGNAL_MISMATCH = "cost_signal_mismatch"
 
 
 class CampaignHonestyWarning(BaseModel):
@@ -85,6 +86,7 @@ def assess_campaign_honesty(
     current_worker_inventory: Sequence[BackendInstance] | None = None,
     current_remote_budget_per_minute: int | None = None,
     current_max_remote_share_percent: float | None = None,
+    current_remote_concurrency_cap: int | None = None,
     now: datetime | None = None,
     staleness_hours: int = _DEFAULT_STALENESS_HOURS,
     min_workload_families: int = _DEFAULT_MIN_WORKLOAD_FAMILIES,
@@ -92,12 +94,13 @@ def assess_campaign_honesty(
     """Validate that a campaign artifact's results still deserve trust.
 
     Checks:
-    - Remote budget constraints vs current budget posture
+    - Remote budget constraints vs current budget posture (including concurrency cap)
     - Topology drift between campaign evidence and current workers
     - Staleness of evidence windows
     - Narrow workload coverage (overfit risk)
     - Missing observed evidence behind promotion recommendations
     - Inconsistency between replay-only and observed evidence
+    - Mismatch between observed and configured cost signals
     """
 
     resolved_now = now or datetime.now(UTC)
@@ -108,6 +111,7 @@ def assess_campaign_honesty(
             campaign_artifact=campaign_artifact,
             current_remote_budget_per_minute=current_remote_budget_per_minute,
             current_max_remote_share_percent=current_max_remote_share_percent,
+            current_remote_concurrency_cap=current_remote_concurrency_cap,
         )
     )
     warnings.extend(
@@ -131,6 +135,11 @@ def assess_campaign_honesty(
     )
     warnings.extend(
         _check_evidence_consistency(
+            campaign_artifact=campaign_artifact,
+        )
+    )
+    warnings.extend(
+        _check_cost_signal_honesty(
             campaign_artifact=campaign_artifact,
         )
     )
@@ -232,6 +241,26 @@ def mark_trial_stale(
     )
 
 
+def mark_trial_invalidated(
+    trial_artifact: OptimizationTrialArtifact,
+    *,
+    reason: str,
+) -> OptimizationTrialArtifact:
+    """Return a copy of the trial artifact with INVALIDATED status and reason."""
+
+    return trial_artifact.model_copy(
+        update={
+            "result_status": OptimizationArtifactStatus.INVALIDATED,
+            "invalidation_reason": reason,
+            "notes": [
+                *trial_artifact.notes,
+                f"invalidated: {reason}",
+            ],
+        },
+        deep=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Budget-bound checks
 # ---------------------------------------------------------------------------
@@ -242,6 +271,7 @@ def _check_budget_bounds(
     campaign_artifact: OptimizationCampaignArtifact,
     current_remote_budget_per_minute: int | None,
     current_max_remote_share_percent: float | None,
+    current_remote_concurrency_cap: int | None = None,
 ) -> list[CampaignHonestyWarning]:
     warnings: list[CampaignHonestyWarning] = []
 
@@ -296,6 +326,32 @@ def _check_budget_bounds(
                                 f"trial {trial.trial_artifact_id} assumed remote share "
                                 f"{evaluated:.1f}% but current cap is "
                                 f"{current_max_remote_share_percent:.1f}%"
+                            ),
+                            affected_trial_ids=[trial.trial_artifact_id],
+                            affected_constraint_ids=[assessment.constraint_id],
+                        )
+                    )
+
+            if (
+                assessment.dimension
+                is OptimizationConstraintDimension.REMOTE_CONCURRENCY_CAP
+                and current_remote_concurrency_cap is not None
+                and assessment.evaluated_value is not None
+            ):
+                evaluated = (
+                    float(assessment.evaluated_value)
+                    if not isinstance(assessment.evaluated_value, bool)
+                    else None
+                )
+                if evaluated is not None and evaluated > current_remote_concurrency_cap:
+                    warnings.append(
+                        CampaignHonestyWarning(
+                            kind=CampaignHonestyWarningKind.BUDGET_BOUND_EXCEEDED,
+                            severity="warning",
+                            message=(
+                                f"trial {trial.trial_artifact_id} assumed concurrency cap "
+                                f"{int(evaluated)} but current cap is "
+                                f"{current_remote_concurrency_cap}"
                             ),
                             affected_trial_ids=[trial.trial_artifact_id],
                             affected_constraint_ids=[assessment.constraint_id],
@@ -526,10 +582,14 @@ def _scenario_families_from_evidence_notes(
     families: set[str] = set()
     for record in campaign_artifact.evidence_records:
         for note in record.notes:
-            if "run_kind=" in note:
-                # Evidence records carry run_kind but not scenario families directly.
-                # If there's only one source benchmark, the coverage is narrow.
-                pass
+            if note.startswith("scenario_family="):
+                _, _, value = note.partition("=")
+                if value:
+                    families.add(value)
+            elif note.startswith("run_kind="):
+                _, _, value = note.partition("=")
+                if value:
+                    families.add(value)
     return families
 
 
@@ -595,6 +655,7 @@ def _check_observed_vs_replayed_inconsistency(
 ) -> list[CampaignHonestyWarning]:
     """Check for trials where observed and replayed evidence produce contradictory signals."""
 
+    warnings: list[CampaignHonestyWarning] = []
     inconsistent_trial_ids: list[str] = []
 
     for trial in campaign_artifact.trials:
@@ -628,7 +689,7 @@ def _check_observed_vs_replayed_inconsistency(
             inconsistent_trial_ids.append(trial.trial_artifact_id)
 
     if inconsistent_trial_ids:
-        return [
+        warnings.append(
             CampaignHonestyWarning(
                 kind=CampaignHonestyWarningKind.EVIDENCE_INCONSISTENCY,
                 severity="warning",
@@ -643,6 +704,122 @@ def _check_observed_vs_replayed_inconsistency(
                     "consider collecting more observed cloud-backed evidence",
                 ],
             )
-        ]
+        )
 
-    return []
+    # Check for contradictory objective assessments across evidence kinds
+    contradiction_trial_ids: list[str] = []
+    for trial in campaign_artifact.trials:
+        if not trial.objective_assessments:
+            continue
+        observed_objectives = [
+            assessment
+            for assessment in trial.objective_assessments
+            if OptimizationArtifactEvidenceKind.OBSERVED in assessment.evidence_kinds
+            and assessment.satisfied is not None
+        ]
+        simulated_objectives = [
+            assessment
+            for assessment in trial.objective_assessments
+            if (
+                OptimizationArtifactEvidenceKind.SIMULATED in assessment.evidence_kinds
+                or OptimizationArtifactEvidenceKind.ESTIMATED in assessment.evidence_kinds
+            )
+            and assessment.satisfied is not None
+        ]
+        for observed in observed_objectives:
+            for simulated in simulated_objectives:
+                if (
+                    observed.objective_id == simulated.objective_id
+                    and observed.satisfied != simulated.satisfied
+                ):
+                    contradiction_trial_ids.append(trial.trial_artifact_id)
+                    break
+            else:
+                continue
+            break
+
+    if contradiction_trial_ids:
+        warnings.append(
+            CampaignHonestyWarning(
+                kind=CampaignHonestyWarningKind.EVIDENCE_INCONSISTENCY,
+                severity="error",
+                message=(
+                    f"{len(contradiction_trial_ids)} trial(s) show contradictory "
+                    f"objective outcomes between observed and simulated evidence"
+                ),
+                affected_trial_ids=contradiction_trial_ids,
+                notes=[
+                    "observed and simulated evidence disagree on whether objectives "
+                    "were satisfied, making the recommendation unreliable",
+                    "the campaign should be re-evaluated with consistent evidence",
+                ],
+            )
+        )
+
+    return warnings
+
+
+# ---------------------------------------------------------------------------
+# Cost signal honesty checks
+# ---------------------------------------------------------------------------
+
+
+def _check_cost_signal_honesty(
+    *,
+    campaign_artifact: OptimizationCampaignArtifact,
+) -> list[CampaignHonestyWarning]:
+    """Check whether cost-related evidence is observed or merely configured.
+
+    When a campaign's remote budget or spend constraints were evaluated using
+    configured values rather than observed runtime cost signals, the
+    recommendations may not reflect actual cloud spend behavior.
+    """
+
+    warnings: list[CampaignHonestyWarning] = []
+
+    # Identify trials with remote budget/spend constraints that lack observed evidence
+    for trial in campaign_artifact.trials:
+        remote_constraints = [
+            assessment
+            for assessment in trial.constraint_assessments
+            if assessment.dimension
+            in {
+                OptimizationConstraintDimension.REMOTE_REQUEST_BUDGET_PER_MINUTE,
+                OptimizationConstraintDimension.REMOTE_SHARE_PERCENT,
+                OptimizationConstraintDimension.REMOTE_CONCURRENCY_CAP,
+            }
+        ]
+        if not remote_constraints:
+            continue
+
+        # Check if any remote constraint was evaluated without observed evidence
+        config_only_constraints = [
+            assessment
+            for assessment in remote_constraints
+            if assessment.evidence_kinds
+            and OptimizationArtifactEvidenceKind.OBSERVED not in assessment.evidence_kinds
+        ]
+        if config_only_constraints:
+            constraint_ids = [
+                assessment.constraint_id for assessment in config_only_constraints
+            ]
+            warnings.append(
+                CampaignHonestyWarning(
+                    kind=CampaignHonestyWarningKind.COST_SIGNAL_MISMATCH,
+                    severity="info",
+                    message=(
+                        f"trial {trial.trial_artifact_id} evaluated "
+                        f"{len(config_only_constraints)} remote budget constraint(s) "
+                        f"using configured values rather than observed cost signals"
+                    ),
+                    affected_trial_ids=[trial.trial_artifact_id],
+                    affected_constraint_ids=constraint_ids,
+                    notes=[
+                        "configured cost signals may not reflect actual cloud spend",
+                        "consider running the campaign with observed cloud-backed "
+                        "cost evidence for higher confidence",
+                    ],
+                )
+            )
+
+    return warnings
